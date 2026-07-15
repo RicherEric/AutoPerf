@@ -6,6 +6,7 @@ import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 
+from .adapters import Adapter, ScenarioStep
 from .adb import AdbClientProtocol
 from .collectors import Collector
 from .models import RunStatus, TestEvent
@@ -19,8 +20,16 @@ class TestRunner:
     collectors: list[Collector]
     collector_timeout: float = 15.0
     max_workers: int | None = None
+    adapter: Adapter | None = None
+    scenario: list[ScenarioStep] | None = None
+    adapter_action_timeout: float = 10.0
 
     def run(self, serial: str, duration: float, run_id: str | None = None) -> str:
+        if self.scenario and self.adapter is None:
+            raise ValueError("scenario requires an adapter")
+        for step in self.scenario or []:
+            if not callable(getattr(self.adapter, step.action, None)):
+                raise ValueError(f"Adapter has no action '{step.action}'")
         run_id = run_id or uuid.uuid4().hex
         existing = self.storage.get_run(run_id)
         if existing is None:
@@ -42,8 +51,12 @@ class TestRunner:
         due = {collector.name: started for collector in self.collectors}
         active: dict[str, tuple[Future, float, Collector]] = {}
         timed_out: set[str] = set()
+        scenario_steps = sorted(self.scenario or [], key=lambda step: step.at)
+        scenario_active: dict[int, tuple[Future, float, ScenarioStep]] = {}
+        scenario_timed_out: set[int] = set()
+        next_step = 0
         executor = ThreadPoolExecutor(
-            max_workers=self.max_workers or max(1, len(self.collectors)),
+            max_workers=self.max_workers or max(1, len(self.collectors) + (1 if scenario_steps else 0)),
             thread_name_prefix="autoperf-collector",
         )
         try:
@@ -72,6 +85,29 @@ class TestRunner:
                             executor.submit(collector.collect, self.adb, serial, run_id), now, collector
                         )
                         due[collector.name] = now + collector.interval
+                for idx, (future, submitted, step) in list(scenario_active.items()):
+                    if future.done():
+                        del scenario_active[idx]
+                        if idx in scenario_timed_out:
+                            scenario_timed_out.remove(idx)
+                            continue
+                        try:
+                            future.result()
+                            writer.put(TestEvent(run_id, "adapter_action", f"{step.action} completed",
+                                                 details={"action": step.action, **step.kwargs}))
+                        except Exception as exc:
+                            writer.put(TestEvent(run_id, "adapter_error", str(exc),
+                                                 details={"action": step.action, **step.kwargs}))
+                    elif now - submitted >= self.adapter_action_timeout and idx not in scenario_timed_out:
+                        scenario_timed_out.add(idx)
+                        writer.put(TestEvent(run_id, "adapter_timeout",
+                                             f"adapter action exceeded {self.adapter_action_timeout}s",
+                                             details={"action": step.action, **step.kwargs}))
+                while next_step < len(scenario_steps) and now - started >= scenario_steps[next_step].at:
+                    step = scenario_steps[next_step]
+                    action = getattr(self.adapter, step.action)
+                    scenario_active[next_step] = (executor.submit(action, self.adb, serial, **step.kwargs), now, step)
+                    next_step += 1
                 self.storage.update_run(run_id, RunStatus.RUNNING, checkpoint=str(time.monotonic() - started))
                 # A short control tick keeps timeout and heartbeat state responsive;
                 # actual sampling frequency is still governed by collector intervals.
@@ -87,6 +123,16 @@ class TestRunner:
                         writer.put(sample)
                 except Exception as exc:
                     writer.put(TestEvent(run_id, "collector_error", str(exc), details={"collector": name}))
+            for idx, (future, _, step) in scenario_active.items():
+                if idx in scenario_timed_out or future.cancelled():
+                    continue
+                try:
+                    future.result()
+                    writer.put(TestEvent(run_id, "adapter_action", f"{step.action} completed",
+                                         details={"action": step.action, **step.kwargs}))
+                except Exception as exc:
+                    writer.put(TestEvent(run_id, "adapter_error", str(exc),
+                                         details={"action": step.action, **step.kwargs}))
             status = RunStatus.INTERRUPTED if stop else RunStatus.COMPLETED
             writer.put(TestEvent(run_id, "lifecycle", f"run {status}"))
             writer.close()

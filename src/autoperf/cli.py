@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 
+from .adapters import AndroidAdapter, ScenarioStep
 from .adb import AdbClient
 from .collectors import default_collectors
 from .runner import TestRunner
@@ -19,6 +20,7 @@ def parser() -> argparse.ArgumentParser:
     run.add_argument("--serial", required=True)
     run.add_argument("--duration", type=float, default=60)
     run.add_argument("--resume", metavar="RUN_ID")
+    run.add_argument("--app", metavar="PACKAGE")
     many = commands.add_parser("run-many")
     many.add_argument("--serial", action="append", required=True, dest="serials")
     many.add_argument("--duration", type=float, default=60)
@@ -44,7 +46,11 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print(json.dumps(result, indent=2))
     elif args.command == "run":
-        run_id = TestRunner(storage, adb, default_collectors()).run(args.serial, args.duration, args.resume)
+        adapter = AndroidAdapter() if args.app else None
+        scenario = [ScenarioStep(0.0, "launch_app", {"package": args.app})] if args.app else None
+        run_id = TestRunner(storage, adb, default_collectors(), adapter=adapter, scenario=scenario).run(
+            args.serial, args.duration, args.resume
+        )
         print(run_id)
     else:
         results = DeviceSupervisor(storage).run_many(args.serials, args.duration)

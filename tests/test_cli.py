@@ -20,6 +20,7 @@ class FakeAdb:
             "dumpsys cpuinfo": "1.0% TOTAL: 1.0% user + 0.0% kernel",
             "cat /proc/meminfo": "MemTotal: 100 kB\nMemAvailable: 50 kB\n",
             "dumpsys battery": " level: 50\n temperature: 300\n",
+            "monkey -p com.example.app -c android.intent.category.LAUNCHER 1": "",
         }[command]
 
 
@@ -64,6 +65,29 @@ class CliTests(unittest.TestCase):
             run_id = out.getvalue().strip()
             storage = Storage(db)
             self.assertEqual(storage.get_run(run_id)["status"], "completed")
+
+    def test_run_command_with_app_flag_drives_adapter(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "cli.db"
+            out = io.StringIO()
+            with patch("autoperf.cli.AdbClient", return_value=FakeAdb()):
+                with contextlib.redirect_stdout(out):
+                    code = cli.main([
+                        "--db", str(db), "run", "--serial", "SERIAL1", "--duration", "0.05",
+                        "--app", "com.example.app",
+                    ])
+            self.assertEqual(code, 0)
+            run_id = out.getvalue().strip()
+            storage = Storage(db)
+            self.assertEqual(storage.get_run(run_id)["status"], "completed")
+            conn = storage.connect()
+            try:
+                kinds = {row[0] for row in conn.execute(
+                    "SELECT kind FROM test_events WHERE run_id=?", (run_id,)
+                )}
+            finally:
+                conn.close()
+            self.assertIn("adapter_action", kinds)
 
 
 if __name__ == "__main__":
