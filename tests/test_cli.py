@@ -7,8 +7,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from autoperf import cli
-from autoperf.models import Device
-from autoperf.storage import Storage
+from autoperf.models import Device, MetricSample
+from autoperf.storage import BatchWriter, Storage
 
 
 class FakeAdb:
@@ -88,6 +88,74 @@ class CliTests(unittest.TestCase):
             finally:
                 conn.close()
             self.assertIn("adapter_action", kinds)
+
+    def _seed_run_with_samples(self, storage, run_id, serial, values):
+        storage.create_run(run_id, serial)
+        writer = BatchWriter(storage)
+        writer.start()
+        for value in values:
+            writer.put(MetricSample(run_id, "cpu", "cpu.total", value, "%"))
+        writer.close()
+
+    def test_baseline_set_rejects_run_from_a_different_device(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "cli.db"
+            storage = Storage(db)
+            storage.initialize()
+            storage.create_run("run1", "OTHER_SERIAL")
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = cli.main(["--db", str(db), "baseline", "set", "--serial", "SERIAL1", "--run", "run1"])
+            self.assertEqual(code, 1)
+
+    def test_baseline_set_and_show_returns_computed_stats(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "cli.db"
+            storage = Storage(db)
+            storage.initialize()
+            self._seed_run_with_samples(storage, "run1", "SERIAL1", [10.0, 20.0])
+
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = cli.main(["--db", str(db), "baseline", "set", "--serial", "SERIAL1", "--run", "run1"])
+            self.assertEqual(code, 0)
+
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = cli.main(["--db", str(db), "baseline", "show", "--serial", "SERIAL1"])
+            self.assertEqual(code, 0)
+            payload = json.loads(out.getvalue())
+            self.assertEqual(payload["run_id"], "run1")
+            self.assertEqual(payload["stats"]["cpu.total"]["mean"], 15.0)
+
+    def test_compare_without_baseline_returns_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "cli.db"
+            storage = Storage(db)
+            storage.initialize()
+            self._seed_run_with_samples(storage, "run1", "SERIAL1", [10.0])
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = cli.main(["--db", str(db), "compare", "--run", "run1"])
+            self.assertEqual(code, 1)
+            self.assertIn("No baseline set", out.getvalue())
+
+    def test_compare_flags_regression_against_baseline(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "cli.db"
+            storage = Storage(db)
+            storage.initialize()
+            self._seed_run_with_samples(storage, "baseline_run", "SERIAL1", [10.0])
+            self._seed_run_with_samples(storage, "candidate_run", "SERIAL1", [50.0])
+            storage.set_baseline("SERIAL1", "baseline_run")
+
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = cli.main(["--db", str(db), "compare", "--run", "candidate_run"])
+            self.assertEqual(code, 0)
+            payload = json.loads(out.getvalue())
+            self.assertTrue(payload["regressed"])
+            self.assertEqual(payload["metrics"][0]["name"], "cpu.total")
 
 
 if __name__ == "__main__":

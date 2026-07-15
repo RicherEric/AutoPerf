@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import argparse
 import json
+from dataclasses import asdict
 
 from .adapters import AndroidAdapter, ScenarioStep
 from .adb import AdbClient
+from .analyzer import compare, compute_stats
 from .collectors import default_collectors
 from .runner import TestRunner
 from .storage import Storage
@@ -26,6 +28,18 @@ def parser() -> argparse.ArgumentParser:
     many.add_argument("--duration", type=float, default=60)
     status = commands.add_parser("status")
     status.add_argument("run_id")
+
+    baseline = commands.add_parser("baseline")
+    baseline_commands = baseline.add_subparsers(dest="baseline_command", required=True)
+    baseline_set = baseline_commands.add_parser("set")
+    baseline_set.add_argument("--serial", required=True)
+    baseline_set.add_argument("--run", required=True, dest="run_id")
+    baseline_show = baseline_commands.add_parser("show")
+    baseline_show.add_argument("--serial", required=True)
+
+    compare_cmd = commands.add_parser("compare")
+    compare_cmd.add_argument("--run", required=True, dest="run_id")
+    compare_cmd.add_argument("--threshold", type=float, default=20.0)
     return root
 
 
@@ -52,10 +66,50 @@ def main(argv: list[str] | None = None) -> int:
             args.serial, args.duration, args.resume
         )
         print(run_id)
-    else:
+    elif args.command == "run-many":
         results = DeviceSupervisor(storage).run_many(args.serials, args.duration)
         print(json.dumps([{"run_id": r.run_id, "serial": r.serial, "exit_code": r.exit_code}
                           for r in results], indent=2))
+    elif args.command == "baseline":
+        if args.baseline_command == "set":
+            run = storage.get_run(args.run_id)
+            if run is None:
+                print("Run not found")
+                return 1
+            if run["device_serial"] != args.serial:
+                print(f"Run {args.run_id} belongs to device {run['device_serial']}, not {args.serial}")
+                return 1
+            storage.set_baseline(args.serial, args.run_id)
+            print(json.dumps(storage.get_baseline(args.serial), indent=2))
+        else:
+            baseline = storage.get_baseline(args.serial)
+            if baseline is None:
+                print("No baseline set for this device")
+                return 1
+            stats = compute_stats(storage.list_samples(baseline["run_id"], limit=100_000))
+            print(json.dumps({
+                "run_id": baseline["run_id"],
+                "created_at": baseline["created_at"],
+                "stats": {name: asdict(value) for name, value in stats.items()},
+            }, indent=2))
+    else:
+        run = storage.get_run(args.run_id)
+        if run is None:
+            print("Run not found")
+            return 1
+        baseline = storage.get_baseline(run["device_serial"])
+        if baseline is None:
+            print(f"No baseline set for device {run['device_serial']}")
+            return 1
+        baseline_stats = compute_stats(storage.list_samples(baseline["run_id"], limit=100_000))
+        candidate_stats = compute_stats(storage.list_samples(args.run_id, limit=100_000))
+        results = compare(baseline_stats, candidate_stats, threshold_pct=args.threshold)
+        print(json.dumps({
+            "baseline_run_id": baseline["run_id"],
+            "candidate_run_id": args.run_id,
+            "regressed": any(r.regressed for r in results),
+            "metrics": [asdict(r) for r in results],
+        }, indent=2))
     return 0
 
 

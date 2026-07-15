@@ -1,16 +1,22 @@
 <script setup>
 import { onMounted, onUnmounted, ref } from 'vue'
-import { getRun, listSamples } from '../api.js'
+import { getComparison, getRun, listSamples, setBaseline } from '../api.js'
 
 const props = defineProps({ id: String })
 
 const run = ref(null)
 const samples = ref([])
+const comparison = ref(null)
 const error = ref('')
 const sinceId = ref(0)
+const settingBaseline = ref(false)
 
 let pollHandle = null
 const TERMINAL_STATUSES = ['completed', 'failed', 'interrupted']
+
+async function loadComparison() {
+  comparison.value = await getComparison(props.id)
+}
 
 async function poll() {
   try {
@@ -18,12 +24,26 @@ async function poll() {
     const result = await listSamples(props.id, sinceId.value)
     samples.value = [...samples.value, ...result.samples].slice(-200)
     sinceId.value = result.next_since_id
+    await loadComparison()
     if (run.value && TERMINAL_STATUSES.includes(run.value.status)) {
       clearInterval(pollHandle)
     }
   } catch (err) {
     error.value = err.message
     clearInterval(pollHandle)
+  }
+}
+
+async function onSetBaseline() {
+  error.value = ''
+  settingBaseline.value = true
+  try {
+    await setBaseline(run.value.device_serial, props.id)
+    await loadComparison()
+  } catch (err) {
+    error.value = err.message
+  } finally {
+    settingBaseline.value = false
   }
 }
 
@@ -46,6 +66,42 @@ onUnmounted(() => {
       <p>Status: <strong>{{ run.status }}</strong></p>
       <p>Device: {{ run.device_serial }}</p>
       <p v-if="run.error" class="error">Error: {{ run.error }}</p>
+      <button @click="onSetBaseline" :disabled="settingBaseline">
+        {{ settingBaseline ? 'Setting…' : 'Set as baseline for this device' }}
+      </button>
+    </div>
+  </section>
+
+  <section>
+    <h2>Comparison against baseline</h2>
+    <p v-if="!comparison">No baseline set for this device yet.</p>
+    <div v-else>
+      <p>
+        Baseline run: {{ comparison.baseline_run_id.slice(0, 8) }} —
+        <strong :class="{ error: comparison.regressed }">
+          {{ comparison.regressed ? 'regression detected' : 'within threshold' }}
+        </strong>
+      </p>
+      <table>
+        <thead>
+          <tr>
+            <th>Metric</th>
+            <th>Baseline mean</th>
+            <th>Candidate mean</th>
+            <th>Delta %</th>
+            <th>Regressed</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="metric in comparison.metrics" :key="metric.name">
+            <td>{{ metric.name }}</td>
+            <td>{{ metric.baseline_mean.toFixed(2) }}</td>
+            <td>{{ metric.candidate_mean.toFixed(2) }}</td>
+            <td>{{ metric.delta_pct === null ? '—' : metric.delta_pct.toFixed(1) + '%' }}</td>
+            <td :class="{ error: metric.regressed }">{{ metric.regressed ? 'yes' : 'no' }}</td>
+          </tr>
+        </tbody>
+      </table>
     </div>
   </section>
 

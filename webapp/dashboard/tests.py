@@ -84,3 +84,47 @@ class DashboardApiTests(SimpleTestCase):
         response = self.client.get(f"/api/runs/run1/samples?since_id={first_id}")
         payload = response.json()
         self.assertEqual([s["value"] for s in payload["samples"]], [2.0])
+
+    def test_baseline_get_returns_404_when_unset(self):
+        response = self.client.get("/api/devices/S1/baseline")
+        self.assertEqual(response.status_code, 404)
+
+    def test_baseline_post_rejects_run_from_different_device(self):
+        self.storage.create_run("run1", "OTHER")
+        response = self.client.post(
+            "/api/devices/S1/baseline", data=json.dumps({"run_id": "run1"}), content_type="application/json"
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_baseline_post_then_get_returns_baseline(self):
+        self.storage.create_run("run1", "S1")
+        response = self.client.post(
+            "/api/devices/S1/baseline", data=json.dumps({"run_id": "run1"}), content_type="application/json"
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["run_id"], "run1")
+
+        response = self.client.get("/api/devices/S1/baseline")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["run_id"], "run1")
+
+    def test_run_comparison_returns_404_without_baseline(self):
+        self.storage.create_run("run1", "S1")
+        response = self.client.get("/api/runs/run1/comparison")
+        self.assertEqual(response.status_code, 404)
+
+    def test_run_comparison_flags_regression_against_baseline(self):
+        writer = BatchWriter(self.storage)
+        writer.start()
+        writer.put(MetricSample("baseline_run", "cpu", "cpu.total", 10.0, "%"))
+        writer.put(MetricSample("candidate_run", "cpu", "cpu.total", 50.0, "%"))
+        writer.close()
+        self.storage.create_run("baseline_run", "S1")
+        self.storage.create_run("candidate_run", "S1")
+        self.storage.set_baseline("S1", "baseline_run")
+
+        response = self.client.get("/api/runs/candidate_run/comparison")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["regressed"])
+        self.assertEqual(payload["metrics"][0]["name"], "cpu.total")

@@ -8,4 +8,6 @@ urlpatterns = [
     path("runs", views.runs, name="runs"),
     path("runs/<str:run_id>", views.run_detail, name="run_detail"),
     path("runs/<str:run_id>/samples", views.run_samples, name="run_samples"),
+    path("runs/<str:run_id>/comparison", views.run_comparison, name="run_comparison"),
+    path("devices/<str:serial>/baseline", views.baseline, name="baseline"),
 ]

@@ -117,6 +117,27 @@ class StorageTests(unittest.TestCase):
             remaining = storage.list_samples("run1", since_id=first_id)
             self.assertEqual([s["value"] for s in remaining], [2.0, 3.0])
 
+    def test_get_baseline_returns_none_when_unset(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = Storage(Path(directory) / "db.sqlite")
+            storage.initialize()
+            self.assertIsNone(storage.get_baseline("S1"))
+
+    def test_set_baseline_then_get_returns_run_id(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = Storage(Path(directory) / "db.sqlite")
+            storage.initialize()
+            storage.set_baseline("S1", "run1")
+            self.assertEqual(storage.get_baseline("S1")["run_id"], "run1")
+
+    def test_set_baseline_overwrites_previous_baseline_for_same_device(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = Storage(Path(directory) / "db.sqlite")
+            storage.initialize()
+            storage.set_baseline("S1", "run1")
+            storage.set_baseline("S1", "run2")
+            self.assertEqual(storage.get_baseline("S1")["run_id"], "run2")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -34,3 +34,22 @@ export function getRun(runId) {
 export function listSamples(runId, sinceId = 0) {
   return request(`/runs/${runId}/samples?since_id=${sinceId}`)
 }
+
+export function setBaseline(serial, runId) {
+  return request(`/devices/${serial}/baseline`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ run_id: runId }),
+  })
+}
+
+export async function getComparison(runId) {
+  const response = await fetch(`/api/runs/${runId}/comparison`)
+  if (response.status === 404) {
+    return null
+  }
+  if (!response.ok) {
+    throw new Error(`Request failed: ${response.status}`)
+  }
+  return response.json()
+}

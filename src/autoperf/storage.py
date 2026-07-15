@@ -21,6 +21,7 @@ CREATE INDEX IF NOT EXISTS idx_metrics_run_time ON metric_samples(run_id, timest
 CREATE INDEX IF NOT EXISTS idx_metrics_run_id ON metric_samples(run_id, id);
 CREATE TABLE IF NOT EXISTS test_events (id INTEGER PRIMARY KEY, run_id TEXT NOT NULL, timestamp TEXT NOT NULL,
   kind TEXT NOT NULL, message TEXT NOT NULL, details TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS baselines (device_serial TEXT PRIMARY KEY, run_id TEXT NOT NULL, created_at TEXT NOT NULL);
 """
 
 
@@ -85,6 +86,23 @@ class Storage:
                 (run_id, since_id, limit),
             ).fetchall()
             return [dict(row) for row in rows]
+
+    def set_baseline(self, device_serial: str, run_id: str) -> None:
+        with closing(self.connect()) as conn:
+            with conn:
+                conn.execute(
+                    "INSERT INTO baselines(device_serial, run_id, created_at) VALUES (?, ?, ?) "
+                    "ON CONFLICT(device_serial) DO UPDATE SET run_id=excluded.run_id, created_at=excluded.created_at",
+                    (device_serial, run_id, utc_now()),
+                )
+
+    def get_baseline(self, device_serial: str) -> dict | None:
+        with closing(self.connect()) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM baselines WHERE device_serial=?", (device_serial,)
+            ).fetchone()
+            return dict(row) if row else None
 
 
 class BatchWriter:
