@@ -3,7 +3,7 @@ import time
 import unittest
 from pathlib import Path
 
-from autoperf.models import Device, RunStatus, TestEvent
+from autoperf.models import Device, MetricSample, RunStatus, TestEvent
 from autoperf.storage import BatchWriter, Storage
 
 
@@ -73,6 +73,49 @@ class StorageTests(unittest.TestCase):
         writer.put(TestEvent("run1", "kind", "message"))
         with self.assertRaises(RuntimeError):
             writer.put(TestEvent("run1", "kind", "message2"))
+
+    def test_list_devices_returns_registered_devices(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = Storage(Path(directory) / "db.sqlite")
+            storage.initialize()
+            storage.register_device(Device("S1", "device", "Pixel", "pixel"))
+            storage.register_device(Device("S2", "device", "Galaxy", "galaxy"))
+            serials = {row["serial"] for row in storage.list_devices()}
+            self.assertEqual(serials, {"S1", "S2"})
+
+    def test_list_runs_orders_most_recent_first(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = Storage(Path(directory) / "db.sqlite")
+            storage.initialize()
+            storage.create_run("run1", "device")
+            storage.create_run("run2", "device")
+            runs = storage.list_runs()
+            self.assertEqual([r["id"] for r in runs], ["run2", "run1"])
+
+    def test_list_runs_respects_limit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = Storage(Path(directory) / "db.sqlite")
+            storage.initialize()
+            storage.create_run("run1", "device")
+            storage.create_run("run2", "device")
+            self.assertEqual(len(storage.list_runs(limit=1)), 1)
+
+    def test_list_samples_filters_by_since_id_and_orders_by_id(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = Storage(Path(directory) / "db.sqlite")
+            storage.initialize()
+            writer = BatchWriter(storage)
+            writer.start()
+            for value in (1.0, 2.0, 3.0):
+                writer.put(MetricSample("run1", "cpu", "cpu.total", value, "%"))
+            writer.close()
+
+            all_samples = storage.list_samples("run1")
+            self.assertEqual([s["value"] for s in all_samples], [1.0, 2.0, 3.0])
+
+            first_id = all_samples[0]["id"]
+            remaining = storage.list_samples("run1", since_id=first_id)
+            self.assertEqual([s["value"] for s in remaining], [2.0, 3.0])
 
 
 if __name__ == "__main__":

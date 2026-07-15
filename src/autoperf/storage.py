@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS test_runs (id TEXT PRIMARY KEY, device_serial TEXT NO
 CREATE TABLE IF NOT EXISTS metric_samples (id INTEGER PRIMARY KEY, run_id TEXT NOT NULL, timestamp TEXT NOT NULL,
   collector TEXT NOT NULL, name TEXT NOT NULL, value REAL NOT NULL, unit TEXT NOT NULL, labels TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_metrics_run_time ON metric_samples(run_id, timestamp);
+CREATE INDEX IF NOT EXISTS idx_metrics_run_id ON metric_samples(run_id, id);
 CREATE TABLE IF NOT EXISTS test_events (id INTEGER PRIMARY KEY, run_id TEXT NOT NULL, timestamp TEXT NOT NULL,
   kind TEXT NOT NULL, message TEXT NOT NULL, details TEXT NOT NULL);
 """
@@ -61,6 +62,29 @@ class Storage:
             conn.row_factory = sqlite3.Row
             row = conn.execute("SELECT * FROM test_runs WHERE id=?", (run_id,)).fetchone()
             return dict(row) if row else None
+
+    def list_devices(self) -> list[dict]:
+        with closing(self.connect()) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute("SELECT * FROM devices ORDER BY last_seen DESC").fetchall()
+            return [dict(row) for row in rows]
+
+    def list_runs(self, limit: int = 100) -> list[dict]:
+        with closing(self.connect()) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM test_runs ORDER BY rowid DESC LIMIT ?", (limit,)
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def list_samples(self, run_id: str, since_id: int = 0, limit: int = 1000) -> list[dict]:
+        with closing(self.connect()) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM metric_samples WHERE run_id=? AND id>? ORDER BY id ASC LIMIT ?",
+                (run_id, since_id, limit),
+            ).fetchall()
+            return [dict(row) for row in rows]
 
 
 class BatchWriter:
