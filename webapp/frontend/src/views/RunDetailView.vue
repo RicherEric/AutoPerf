@@ -1,12 +1,14 @@
 <script setup>
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
-import { getComparison, getRun, listSamples, setBaseline } from '../api.js'
+import { useRouter } from 'vue-router'
+import { deleteRun, getComparison, getRun, listSamples, setBaseline } from '../api.js'
 import Card from '../components/Card.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import DeltaBar from '../components/DeltaBar.vue'
 import MetricChart from '../components/MetricChart.vue'
 
 const props = defineProps({ id: String })
+const router = useRouter()
 
 const STATUS_TONE = {
   completed: 'success',
@@ -23,6 +25,7 @@ const comparison = ref(null)
 const error = ref('')
 const sinceId = ref(0)
 const settingBaseline = ref(false)
+const deleting = ref(false)
 
 // Keyed by metric name so a fast collector (cpu/memory, every 5s) can't
 // crowd out a slow one (battery, every 60s) in a single flat-capped array.
@@ -96,6 +99,19 @@ async function onSetBaseline() {
   }
 }
 
+async function onDeleteRun() {
+  if (!confirm(`Delete run ${props.id.slice(0, 8)}? This cannot be undone.`)) return
+  error.value = ''
+  deleting.value = true
+  try {
+    await deleteRun(props.id)
+    router.push('/runs')
+  } catch (err) {
+    error.value = err.message
+    deleting.value = false
+  }
+}
+
 onMounted(async () => {
   await poll()
   pollHandle = setInterval(poll, 2000)
@@ -107,7 +123,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <p><router-link to="/">&larr; Back to runs</router-link></p>
+  <p><router-link to="/runs">&larr; Back to runs</router-link></p>
   <p v-if="error" class="error">{{ error }}</p>
 
   <Card :title="`Run ${id.slice(0, 8)}`">
@@ -119,6 +135,13 @@ onUnmounted(() => {
       <p v-if="run.error" class="error">Error: {{ run.error }}</p>
       <button @click="onSetBaseline" :disabled="settingBaseline">
         {{ settingBaseline ? 'Setting…' : 'Set as baseline for this device' }}
+      </button>
+      <button
+        v-if="run.status !== 'running' && run.status !== 'pending'"
+        @click="onDeleteRun"
+        :disabled="deleting"
+      >
+        {{ deleting ? 'Deleting…' : 'Delete this run' }}
       </button>
     </div>
   </Card>

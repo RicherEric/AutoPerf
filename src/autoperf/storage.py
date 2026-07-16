@@ -68,6 +68,13 @@ class Storage:
                 conn.execute("UPDATE test_runs SET status=?, started_at=CASE WHEN ?='running' THEN COALESCE(started_at, ?) ELSE started_at END, finished_at=CASE WHEN ? IN ('completed','failed','interrupted') THEN ? ELSE finished_at END, checkpoint=COALESCE(?,checkpoint), error=? WHERE id=?",
                              (status, status, now, status, now, checkpoint, error, run_id))
 
+    def delete_run(self, run_id: str) -> None:
+        with closing(self.connect()) as conn:
+            with conn:
+                conn.execute("DELETE FROM metric_samples WHERE run_id=?", (run_id,))
+                conn.execute("DELETE FROM test_events WHERE run_id=?", (run_id,))
+                conn.execute("DELETE FROM test_runs WHERE id=?", (run_id,))
+
     def get_run(self, run_id: str) -> dict | None:
         with closing(self.connect()) as conn:
             conn.row_factory = sqlite3.Row

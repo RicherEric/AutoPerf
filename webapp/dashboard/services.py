@@ -104,21 +104,31 @@ def trigger_suite(storage: Storage, serial: str, tier: str, duration: float) -> 
     ]
 
 
-def get_dashboard_stats(storage: Storage, recent_limit: int = 50) -> dict:
+DEFAULT_REGRESSION_THRESHOLD_PCT = 20.0
+
+
+def get_dashboard_stats(
+    storage: Storage, recent_limit: int = 50, threshold_pct: float = DEFAULT_REGRESSION_THRESHOLD_PCT
+) -> dict:
     """Aggregates recent completed runs into a pass/fail verdict, a per-scenario
-    breakdown, and a metric trend, for the dashboard's stats/home page.
+    breakdown, a metric trend, and a per-run detail list explaining *why* each
+    verdict landed where it did, for the dashboard's stats/home page.
 
     A run's "verdict" is derived from the same baseline comparison analyzer.py
     already does for a single run (GET /api/runs/<id>/comparison) -- there's no
     separate pass/fail concept invented here, just this same check applied
     across recent history instead of one run at a time. A run whose device has
     no baseline set is its own "no_baseline" bucket (not counted as pass or
-    fail) since there's nothing to compare it against yet.
+    fail) since there's nothing to compare it against yet. `threshold_pct` is
+    the same regression threshold analyzer.compare() uses, surfaced in the
+    response so the UI can state the actual pass/fail criteria rather than
+    leaving it implicit.
     """
     runs = storage.list_runs(limit=recent_limit)
     completed = [r for r in runs if r["status"] == "completed"]
 
     baseline_cache: dict[str, dict | None] = {}
+    baseline_run_id_cache: dict[str, str | None] = {}
     verdicts = []
     trend_by_metric: dict[str, list[dict]] = {}
 
@@ -134,15 +144,28 @@ def get_dashboard_stats(storage: Storage, recent_limit: int = 50) -> dict:
                 compute_stats(storage.list_samples(baseline_row["run_id"], limit=100_000))
                 if baseline_row else None
             )
+            baseline_run_id_cache[device] = baseline_row["run_id"] if baseline_row else None
         baseline_stats = baseline_cache[device]
 
+        regressed_metrics = []
         if baseline_stats is None:
             verdict = "no_baseline"
         else:
-            results = compare(baseline_stats, run_stats)
-            verdict = "fail" if any(r.regressed for r in results) else "pass"
+            results = compare(baseline_stats, run_stats, threshold_pct=threshold_pct)
+            regressed_metrics = [
+                {"name": r.name, "delta_pct": r.delta_pct} for r in results if r.regressed
+            ]
+            verdict = "fail" if regressed_metrics else "pass"
 
-        verdicts.append({"run_id": run["id"], "scenario": run["youtube_scenario"], "verdict": verdict})
+        verdicts.append({
+            "run_id": run["id"],
+            "device_serial": device,
+            "scenario": run["youtube_scenario"],
+            "verdict": verdict,
+            "started_at": run["started_at"],
+            "baseline_run_id": baseline_run_id_cache.get(device),
+            "regressed_metrics": regressed_metrics,
+        })
 
     passed = sum(1 for v in verdicts if v["verdict"] == "pass")
     failed = sum(1 for v in verdicts if v["verdict"] == "fail")
@@ -173,6 +196,8 @@ def get_dashboard_stats(storage: Storage, recent_limit: int = 50) -> dict:
         "failed": failed,
         "no_baseline": no_baseline,
         "pass_rate": (passed / evaluated) if evaluated else None,
+        "threshold_pct": threshold_pct,
         "by_scenario": scenario_stats,
         "trend": trend_by_metric,
+        "runs": list(reversed(verdicts)),  # most-recent-first for a "recent verdicts" table
     }

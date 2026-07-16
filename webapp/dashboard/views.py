@@ -53,11 +53,26 @@ def runs(request):
     return JsonResponse({"run_id": run_id, "status": "pending"}, status=202)
 
 
-@require_http_methods(["GET"])
+@csrf_exempt
+@require_http_methods(["GET", "DELETE"])
 def run_detail(request, run_id):
-    run = get_storage().get_run(run_id)
+    storage = get_storage()
+    run = storage.get_run(run_id)
     if run is None:
         return JsonResponse({"error": "not found"}, status=404)
+
+    if request.method == "DELETE":
+        if run["status"] in ("pending", "running"):
+            return JsonResponse({"error": f"run is still {run['status']} -- cannot delete an in-progress run"}, status=400)
+        baseline_row = storage.get_baseline(run["device_serial"])
+        if baseline_row is not None and baseline_row["run_id"] == run_id:
+            return JsonResponse(
+                {"error": "this run is the current baseline for its device -- set a different baseline first"},
+                status=400,
+            )
+        storage.delete_run(run_id)
+        return JsonResponse({"deleted": run_id})
+
     return JsonResponse(run)
 
 

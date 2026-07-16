@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import logging
 import re
+import time
 from urllib.parse import parse_qs, urlparse
 
 import websockets
@@ -85,12 +86,13 @@ async def handler(websocket) -> None:
 
     stream_fn = _screenshot_stream if mode == "screenshot" else _h264_stream
     logger.info("streaming %s to %s (mode=%s)", serial, websocket.remote_address, mode)
+    started = time.monotonic()
     try:
         await stream_fn(websocket, adb, serial)
     except (websockets.exceptions.ConnectionClosed, asyncio.CancelledError):
         pass
     finally:
-        logger.info("stream ended for %s", serial)
+        logger.info("stream ended for %s after %.1fs", serial, time.monotonic() - started)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -98,7 +100,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8100)
     args = parser.parse_args(argv)
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
     async def run() -> None:
         async with serve(handler, args.host, args.port):

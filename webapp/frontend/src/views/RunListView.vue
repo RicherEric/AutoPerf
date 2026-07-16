@@ -1,6 +1,6 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { listDevices, listRuns, listYoutubeScenarios, refreshDevices, triggerRun, triggerSuite } from '../api.js'
+import { deleteRun, listDevices, listRuns, listYoutubeScenarios, refreshDevices, triggerRun, triggerSuite } from '../api.js'
 import Card from '../components/Card.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 
@@ -34,6 +34,7 @@ const error = ref('')
 const refreshing = ref(false)
 const starting = ref(false)
 const startingSuite = ref('')
+const deletingId = ref('')
 
 let pollHandle = null
 
@@ -99,6 +100,20 @@ async function onRunSuite(tier) {
     error.value = err.message
   } finally {
     startingSuite.value = ''
+  }
+}
+
+async function onDeleteRun(runId) {
+  if (!confirm(`Delete run ${runId.slice(0, 8)}? This cannot be undone.`)) return
+  error.value = ''
+  deletingId.value = runId
+  try {
+    await deleteRun(runId)
+    await loadRuns()
+  } catch (err) {
+    error.value = err.message
+  } finally {
+    deletingId.value = ''
   }
 }
 
@@ -186,6 +201,7 @@ onUnmounted(() => {
           <th>Status</th>
           <th>Started</th>
           <th>Finished</th>
+          <th></th>
         </tr>
       </thead>
       <tbody>
@@ -195,6 +211,15 @@ onUnmounted(() => {
           <td><StatusBadge :label="run.status" :tone="STATUS_TONE[run.status] ?? 'neutral'" /></td>
           <td>{{ run.started_at ?? '—' }}</td>
           <td>{{ run.finished_at ?? '—' }}</td>
+          <td>
+            <button
+              v-if="run.status !== 'running' && run.status !== 'pending'"
+              @click="onDeleteRun(run.id)"
+              :disabled="deletingId === run.id"
+            >
+              {{ deletingId === run.id ? '…' : 'Delete' }}
+            </button>
+          </td>
         </tr>
       </tbody>
     </table>

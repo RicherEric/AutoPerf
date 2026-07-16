@@ -51,6 +51,10 @@ export function getRun(runId) {
   return request(`/runs/${runId}`)
 }
 
+export function deleteRun(runId) {
+  return request(`/runs/${runId}`, { method: 'DELETE' })
+}
+
 export function listSamples(runId, sinceId = 0) {
   return request(`/runs/${runId}/samples?since_id=${sinceId}`)
 }

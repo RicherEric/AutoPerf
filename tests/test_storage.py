@@ -159,6 +159,34 @@ class StorageTests(unittest.TestCase):
             remaining = storage.list_samples("run1", since_id=first_id)
             self.assertEqual([s["value"] for s in remaining], [2.0, 3.0])
 
+    def test_delete_run_removes_run_samples_and_events(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = Storage(Path(directory) / "db.sqlite")
+            storage.initialize()
+            storage.create_run("run1", "device")
+            writer = BatchWriter(storage)
+            writer.start()
+            writer.put(MetricSample("run1", "cpu", "cpu.total", 1.0, "%"))
+            writer.put(TestEvent("run1", "lifecycle", "run started"))
+            writer.close()
+
+            storage.delete_run("run1")
+
+            self.assertIsNone(storage.get_run("run1"))
+            self.assertEqual(storage.list_samples("run1"), [])
+            conn = storage.connect()
+            try:
+                count = conn.execute("SELECT count(*) FROM test_events WHERE run_id=?", ("run1",)).fetchone()[0]
+            finally:
+                conn.close()
+            self.assertEqual(count, 0)
+
+    def test_delete_run_is_a_noop_for_missing_run(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = Storage(Path(directory) / "db.sqlite")
+            storage.initialize()
+            storage.delete_run("does-not-exist")  # must not raise
+
     def test_get_baseline_returns_none_when_unset(self):
         with tempfile.TemporaryDirectory() as directory:
             storage = Storage(Path(directory) / "db.sqlite")

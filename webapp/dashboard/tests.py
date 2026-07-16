@@ -134,6 +134,33 @@ class DashboardApiTests(SimpleTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["id"], "run1")
 
+    def test_run_detail_delete_removes_a_completed_run(self):
+        self.storage.create_run("run1", "S1")
+        self.storage.update_run("run1", "completed")
+        response = self.client.delete("/api/runs/run1")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"deleted": "run1"})
+        self.assertIsNone(self.storage.get_run("run1"))
+
+    def test_run_detail_delete_returns_404_for_missing_run(self):
+        response = self.client.delete("/api/runs/missing-run")
+        self.assertEqual(response.status_code, 404)
+
+    def test_run_detail_delete_rejects_running_run(self):
+        self.storage.create_run("run1", "S1")
+        self.storage.update_run("run1", "running")
+        response = self.client.delete("/api/runs/run1")
+        self.assertEqual(response.status_code, 400)
+        self.assertIsNotNone(self.storage.get_run("run1"))
+
+    def test_run_detail_delete_rejects_current_baseline(self):
+        self.storage.create_run("run1", "S1")
+        self.storage.update_run("run1", "completed")
+        self.storage.set_baseline("S1", "run1")
+        response = self.client.delete("/api/runs/run1")
+        self.assertEqual(response.status_code, 400)
+        self.assertIsNotNone(self.storage.get_run("run1"))
+
     def test_run_samples_filters_by_since_id_and_decodes_labels(self):
         writer = BatchWriter(self.storage)
         writer.start()
@@ -345,6 +372,23 @@ class DashboardApiTests(SimpleTestCase):
         payload = response.json()
         self.assertEqual(payload["failed"], 1)
         self.assertEqual(payload["passed"], 1)  # the baseline run itself still passes
+
+    def test_stats_explains_why_a_run_failed(self):
+        self._complete_run_with_samples("baseline_run", "S1", [10.0])
+        self.storage.set_baseline("S1", "baseline_run")
+        self._complete_run_with_samples("run1", "S1", [50.0], scenario="cold_start")
+
+        response = self.client.get("/api/stats")
+        payload = response.json()
+        self.assertEqual(payload["threshold_pct"], 20.0)
+        failed_run = next(r for r in payload["runs"] if r["run_id"] == "run1")
+        self.assertEqual(failed_run["verdict"], "fail")
+        self.assertEqual(failed_run["baseline_run_id"], "baseline_run")
+        self.assertEqual(failed_run["regressed_metrics"], [{"name": "cpu.total", "delta_pct": 400.0}])
+
+        passing_run = next(r for r in payload["runs"] if r["run_id"] == "baseline_run")
+        self.assertEqual(passing_run["verdict"], "pass")
+        self.assertEqual(passing_run["regressed_metrics"], [])
 
     def test_stats_groups_by_scenario(self):
         self._complete_run_with_samples("baseline_run", "S1", [10.0])
