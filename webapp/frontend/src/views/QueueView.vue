@@ -49,6 +49,33 @@ onUnmounted(() => {
     <p>(run from the <code>webapp</code> directory, with Redis running)</p>
   </Card>
 
+  <Card v-if="status?.running_runs?.length" title="Currently running">
+    <p class="hint">
+      Sourced from Storage, not Celery -- <code>--pool=solo</code> is fully synchronous, so
+      the worker can't answer an inspect() request while it's busy executing a task
+      (the section above may show 0 active tasks even though a run is genuinely in
+      progress). This list stays accurate regardless.
+    </p>
+    <table>
+      <thead>
+        <tr>
+          <th>Run</th>
+          <th>Device</th>
+          <th>Started</th>
+          <th>Checkpoint (s)</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr v-for="run in status.running_runs" :key="run.id">
+          <td><router-link :to="`/runs/${run.id}`">{{ run.id.slice(0, 8) }}</router-link></td>
+          <td>{{ run.device_serial }}</td>
+          <td>{{ run.started_at ?? '—' }}</td>
+          <td>{{ run.checkpoint ?? '—' }}</td>
+        </tr>
+      </tbody>
+    </table>
+  </Card>
+
   <Card v-for="worker in status?.workers ?? []" :key="worker.name" :title="worker.name">
     <div class="stat-row">
       <div class="stat-tile">
@@ -102,5 +129,9 @@ pre {
   padding: var(--space-3);
   border-radius: var(--radius-sm);
   overflow-x: auto;
+}
+.hint {
+  color: var(--color-text-muted);
+  font-size: 0.85em;
 }
 </style>

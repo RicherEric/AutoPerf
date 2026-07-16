@@ -12,4 +12,5 @@ urlpatterns = [
     path("devices/<str:serial>/baseline", views.baseline, name="baseline"),
     path("youtube-scenarios", views.youtube_scenarios_list, name="youtube_scenarios_list"),
     path("queue", views.queue_status, name="queue_status"),
+    path("suites", views.suites, name="suites"),
 ]

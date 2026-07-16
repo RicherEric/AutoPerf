@@ -159,16 +159,29 @@ class CliTests(unittest.TestCase):
             self.assertTrue(payload["regressed"])
             self.assertEqual(payload["metrics"][0]["name"], "cpu.total")
 
-    def test_youtube_scenarios_list_prints_registry_names(self):
+    def test_youtube_scenarios_list_prints_name_description_tier(self):
         with tempfile.TemporaryDirectory() as directory:
             db = Path(directory) / "cli.db"
             out = io.StringIO()
             with contextlib.redirect_stdout(out):
                 code = cli.main(["--db", str(db), "youtube-scenarios", "list"])
             self.assertEqual(code, 0)
-            names = json.loads(out.getvalue())
-            self.assertIn("cold_start", names)
-            self.assertGreaterEqual(len(names), 15)
+            entries = json.loads(out.getvalue())
+            self.assertGreaterEqual(len(entries), 15)
+            cold_start = next(e for e in entries if e["name"] == "cold_start")
+            self.assertEqual(cold_start["tier"], "smoke")
+            self.assertTrue(cold_start["description"])
+
+    def test_youtube_scenarios_list_filters_by_tier(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "cli.db"
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = cli.main(["--db", str(db), "youtube-scenarios", "list", "--tier", "smoke"])
+            self.assertEqual(code, 0)
+            entries = json.loads(out.getvalue())
+            self.assertTrue(entries)
+            self.assertTrue(all(e["tier"] == "smoke" for e in entries))
 
     def test_run_command_with_youtube_scenario_drives_adapter(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -202,6 +215,24 @@ class CliTests(unittest.TestCase):
                         "--db", str(db), "run", "--serial", "SERIAL1",
                         "--app", "com.example.app", "--youtube-scenario", "cold_start",
                     ])
+
+    def test_run_suite_command_runs_every_scenario_in_a_tier(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "cli.db"
+            out = io.StringIO()
+            with patch("autoperf.cli.AdbClient", return_value=FakeAdb()):
+                with contextlib.redirect_stdout(out):
+                    code = cli.main([
+                        "--db", str(db), "run-suite", "--serial", "SERIAL1",
+                        "--tier", "smoke", "--duration", "0.05",
+                    ])
+            self.assertEqual(code, 0)
+            results = json.loads(out.getvalue())
+            self.assertEqual(
+                sorted(r["scenario"] for r in results),
+                ["cold_start", "cold_start_and_stop", "home_feed_scroll", "search_and_play"],
+            )
+            self.assertTrue(all(r["status"] == "completed" for r in results))
 
 
 if __name__ == "__main__":

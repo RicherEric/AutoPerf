@@ -1,9 +1,31 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+from typing import Callable
+
 from ..adapters import APP_SWITCH, BACK, HOME, ScenarioStep
 from . import coords
 
 PACKAGE = "com.google.android.youtube"
+
+# Depth tiers, shallow to deep -- the same idea as smoke tests vs. a full
+# daily regression suite: SMOKE only checks "does the app even launch and
+# reach basic content" (fast, run often); FUNCTIONAL covers common everyday
+# interactions; REGRESSION covers deeper/edge-case flows worth running on a
+# slower cadence (e.g. nightly) precisely because they take longer and touch
+# less-common paths.
+TIER_SMOKE = "smoke"
+TIER_FUNCTIONAL = "functional"
+TIER_REGRESSION = "regression"
+TIERS = (TIER_SMOKE, TIER_FUNCTIONAL, TIER_REGRESSION)
+
+
+@dataclass(frozen=True, slots=True)
+class ScenarioPreset:
+    name: str
+    description: str
+    tier: str
+    build: Callable[[tuple[int, int]], list[ScenarioStep]]
 
 
 def _launch(at: float = 0.0) -> ScenarioStep:
@@ -165,36 +187,47 @@ def library_and_downloads_browse(screen) -> list[ScenarioStep]:
     ]
 
 
-REGISTRY = {
-    "cold_start": cold_start,
-    "cold_start_and_stop": cold_start_and_stop,
-    "search_and_play": search_and_play,
-    "home_feed_scroll": home_feed_scroll,
-    "home_feed_tap_video": home_feed_tap_video,
-    "shorts_browsing": shorts_browsing,
-    "shorts_like_and_next": shorts_like_and_next,
-    "quality_switch_manual": quality_switch_manual,
-    "like_video": like_video,
-    "comment_scroll": comment_scroll,
-    "fullscreen_toggle_cycle": fullscreen_toggle_cycle,
-    "seek_scrub_forward": seek_scrub_forward,
-    "seek_long_press_skip": seek_long_press_skip,
-    "background_foreground_resume": background_foreground_resume,
-    "app_switch_cycle": app_switch_cycle,
-    "pip_minimize": pip_minimize,
-    "multi_video_session": multi_video_session,
-    "subscriptions_feed_browse": subscriptions_feed_browse,
-    "library_and_downloads_browse": library_and_downloads_browse,
+REGISTRY: dict[str, ScenarioPreset] = {
+    preset.name: preset
+    for preset in (
+        ScenarioPreset("cold_start", "冷啟動開啟 YouTube App,最基本的存活檢查(能不能正常開啟)。", TIER_SMOKE, cold_start),
+        ScenarioPreset("cold_start_and_stop", "開啟 YouTube 後強制關閉,驗證啟動與關閉流程都正常。", TIER_SMOKE, cold_start_and_stop),
+        ScenarioPreset("search_and_play", "開啟搜尋、輸入關鍵字、點擊建議、播放第一個結果影片,涵蓋搜尋到播放的核心流程。", TIER_SMOKE, search_and_play),
+        ScenarioPreset("home_feed_scroll", "在首頁動態消息連續往下滑動三次,測試瀏覽首頁 feed 的流暢度。", TIER_SMOKE, home_feed_scroll),
+        ScenarioPreset("home_feed_tap_video", "滑動首頁一次後點擊一支影片縮圖進入播放。", TIER_FUNCTIONAL, home_feed_tap_video),
+        ScenarioPreset("like_video", "進入影片播放後對影片按讚。", TIER_FUNCTIONAL, like_video),
+        ScenarioPreset("shorts_browsing", "切到 Shorts 分頁,連續快速上滑瀏覽 5 支短影音。", TIER_FUNCTIONAL, shorts_browsing),
+        ScenarioPreset("shorts_like_and_next", "在 Shorts 按讚後滑到下一支,再按一次讚。", TIER_FUNCTIONAL, shorts_like_and_next),
+        ScenarioPreset("subscriptions_feed_browse", "切到訂閱分頁並滑動瀏覽,再點擊一支影片。", TIER_FUNCTIONAL, subscriptions_feed_browse),
+        ScenarioPreset("library_and_downloads_browse", "切到媒體庫分頁,進入下載項目後返回。", TIER_FUNCTIONAL, library_and_downloads_browse),
+        ScenarioPreset("comment_scroll", "進入影片播放後開啟留言區並滑動瀏覽留言,最後返回。", TIER_FUNCTIONAL, comment_scroll),
+        ScenarioPreset("fullscreen_toggle_cycle", "進入影片播放後反覆切換全螢幕/退出全螢幕。", TIER_FUNCTIONAL, fullscreen_toggle_cycle),
+        ScenarioPreset("quality_switch_manual", "進入影片播放後,手動開啟選單切換畫質。", TIER_REGRESSION, quality_switch_manual),
+        ScenarioPreset("seek_scrub_forward", "進入影片播放後在進度條上快轉拖曳兩次。", TIER_REGRESSION, seek_scrub_forward),
+        ScenarioPreset("seek_long_press_skip", "進入影片播放後用長按方式快轉跳過片段。", TIER_REGRESSION, seek_long_press_skip),
+        ScenarioPreset("background_foreground_resume", "播放中按 Home 鍵切到背景,幾秒後回到前景恢復播放,測試背景/前景切換的復原能力。", TIER_REGRESSION, background_foreground_resume),
+        ScenarioPreset("app_switch_cycle", "播放中連續使用「最近使用 App」鍵切換,測試多工切換穩定度。", TIER_REGRESSION, app_switch_cycle),
+        ScenarioPreset("pip_minimize", "進入畫中畫模式並拖曳懸浮視窗。", TIER_REGRESSION, pip_minimize),
+        ScenarioPreset("multi_video_session", "連續觀看多支影片(進入影片 A → 返回 → 影片 B → 返回 → 影片 C),測試長時間連續切換的穩定度。", TIER_REGRESSION, multi_video_session),
+    )
 }
 
 
-def list_scenarios() -> list[str]:
-    return sorted(REGISTRY)
+def list_scenarios(tier: str | None = None) -> list[str]:
+    return sorted(name for name, preset in REGISTRY.items() if tier is None or preset.tier == tier)
+
+
+def describe_scenarios(tier: str | None = None) -> list[dict]:
+    return [
+        {"name": preset.name, "description": preset.description, "tier": preset.tier}
+        for preset in sorted(REGISTRY.values(), key=lambda p: p.name)
+        if tier is None or preset.tier == tier
+    ]
 
 
 def build(name: str, screen: tuple[int, int]) -> list[ScenarioStep]:
     try:
-        builder = REGISTRY[name]
+        preset = REGISTRY[name]
     except KeyError:
         raise ValueError(f"Unknown YouTube scenario: {name!r}") from None
-    return builder(screen)
+    return preset.build(screen)

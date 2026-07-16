@@ -78,6 +78,14 @@ class Storage:
             ).fetchall()
             return [dict(row) for row in rows]
 
+    def list_running_runs(self, limit: int = 100) -> list[dict]:
+        with closing(self.connect()) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM test_runs WHERE status='running' ORDER BY rowid DESC LIMIT ?", (limit,)
+            ).fetchall()
+            return [dict(row) for row in rows]
+
     def list_samples(self, run_id: str, since_id: int = 0, limit: int = 1000) -> list[dict]:
         with closing(self.connect()) as conn:
             conn.row_factory = sqlite3.Row

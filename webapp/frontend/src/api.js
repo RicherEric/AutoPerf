@@ -27,8 +27,16 @@ export function triggerRun(serial, duration, youtubeScenario = '') {
   })
 }
 
-export function listYoutubeScenarios() {
-  return request('/youtube-scenarios')
+export function listYoutubeScenarios(tier = '') {
+  return request(`/youtube-scenarios${tier ? `?tier=${tier}` : ''}`)
+}
+
+export function triggerSuite(serial, tier, duration) {
+  return request('/suites', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ serial, tier, duration }),
+  })
 }
 
 export function getQueueStatus() {

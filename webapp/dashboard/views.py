@@ -11,7 +11,7 @@ from autoperf.adb import AdbClient
 from autoperf.analyzer import compare, compute_stats
 from autoperf.scenarios import youtube as youtube_scenarios
 
-from .services import get_queue_status, get_storage, trigger_run
+from .services import get_queue_status, get_storage, trigger_run, trigger_suite
 
 
 @require_http_methods(["GET"])
@@ -102,12 +102,35 @@ def baseline(request, serial):
 
 @require_http_methods(["GET"])
 def youtube_scenarios_list(request):
-    return JsonResponse(youtube_scenarios.list_scenarios(), safe=False)
+    tier = request.GET.get("tier") or None
+    if tier and tier not in youtube_scenarios.TIERS:
+        return JsonResponse({"error": f"unknown tier: {tier!r}"}, status=400)
+    return JsonResponse(youtube_scenarios.describe_scenarios(tier=tier), safe=False)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def suites(request):
+    try:
+        body = json.loads(request.body or b"{}")
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "invalid JSON body"}, status=400)
+
+    serial = body.get("serial")
+    if not serial:
+        return JsonResponse({"error": "serial is required"}, status=400)
+    tier = body.get("tier")
+    if tier not in youtube_scenarios.TIERS:
+        return JsonResponse({"error": f"tier must be one of {youtube_scenarios.TIERS}"}, status=400)
+    duration = float(body.get("duration", 30))
+
+    run_ids = trigger_suite(get_storage(), serial, tier, duration)
+    return JsonResponse({"tier": tier, "run_ids": run_ids, "count": len(run_ids)}, status=202)
 
 
 @require_http_methods(["GET"])
 def queue_status(request):
-    return JsonResponse(get_queue_status())
+    return JsonResponse(get_queue_status(get_storage()))
 
 
 @require_http_methods(["GET"])

@@ -100,6 +100,17 @@ class StorageTests(unittest.TestCase):
             storage.create_run("run2", "device")
             self.assertEqual(len(storage.list_runs(limit=1)), 1)
 
+    def test_list_running_runs_returns_only_running_status(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = Storage(Path(directory) / "db.sqlite")
+            storage.initialize()
+            storage.create_run("run1", "device")
+            storage.create_run("run2", "device")
+            storage.update_run("run1", RunStatus.RUNNING)
+            storage.update_run("run2", RunStatus.COMPLETED)
+            running = storage.list_running_runs()
+            self.assertEqual([r["id"] for r in running], ["run1"])
+
     def test_list_samples_filters_by_since_id_and_orders_by_id(self):
         with tempfile.TemporaryDirectory() as directory:
             storage = Storage(Path(directory) / "db.sqlite")

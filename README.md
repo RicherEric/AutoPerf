@@ -49,6 +49,24 @@ browsing) built purely from `launch_app`/`stop_app`/`tap`/`swipe`/`key_event` --
 no playback-correctness verification is included by design; these only drive
 the UI, the same way `--app` does.
 
+Each preset has a `name`, a Traditional Chinese `description` of exactly what it
+does (shown in the dashboard's scenario dropdown as a tooltip and hint text, and
+in `autoperf youtube-scenarios list`), and a `tier`:
+
+| Tier | Meaning | Presets |
+|---|---|---|
+| `smoke` | Fast, fundamental checks -- does the app even launch and reach basic content. Run often. | `cold_start`, `cold_start_and_stop`, `search_and_play`, `home_feed_scroll` |
+| `functional` | Common everyday interactions. | `home_feed_tap_video`, `like_video`, `shorts_browsing`, `shorts_like_and_next`, `subscriptions_feed_browse`, `library_and_downloads_browse`, `comment_scroll`, `fullscreen_toggle_cycle` |
+| `regression` | Deeper/edge-case flows, worth a slower cadence (e.g. nightly) precisely because they take longer and touch less-common paths. | `quality_switch_manual`, `seek_scrub_forward`, `seek_long_press_skip`, `background_foreground_resume`, `app_switch_cycle`, `pip_minimize`, `multi_video_session` |
+
+```powershell
+autoperf youtube-scenarios list --tier smoke
+autoperf run-suite --serial <DEVICE_SERIAL> --tier smoke --duration 30
+```
+`run-suite` runs every scenario in a tier as its own separate run (own run_id,
+own report) back to back. The dashboard's Run List page has the same thing as
+"Run \<tier\> suite" buttons, backed by `POST /api/suites`.
+
 ## Baseline / regression comparison (v0.4)
 
 ```powershell
@@ -104,8 +122,9 @@ The dashboard has three pages (teal/cyan theme in `frontend/src/theme.css`,
 palette validated against the project's dataviz method -- see that file's
 header comment):
 
-- **Run List** (`/`) -- device picker, duration, an optional YouTube scenario
-  dropdown, and the run history table.
+- **Run List** (`/`) -- device picker, duration, a YouTube scenario dropdown
+  grouped by tier (with each option's description as a tooltip), "Run \<tier\>
+  suite" buttons, and the run history table.
 - **Run Detail** (`/runs/:id`) -- one small SVG line chart per metric
   (`components/MetricChart.vue`; each metric gets its own y-axis since
   cpu %, memory KiB, and battery °C don't share a scale), a "set as
@@ -113,7 +132,12 @@ header comment):
 - **Task Queue** (`/queue`) -- polls `GET /api/queue`, which wraps Celery's
   `control.inspect()`. No worker replying within the timeout is a normal,
   clearly-labeled state (distinct from the broker itself being unreachable),
-  not an error.
+  not an error. **Known Celery limitation**: `--pool=solo` is fully
+  synchronous, so the worker can't answer an `inspect()` broadcast while it's
+  busy executing a task -- `active`/`reserved` will under-report (often to
+  zero) for the whole duration of a run. The page also shows a "Currently
+  running" table sourced directly from Storage (`list_running_runs()`), which
+  has no such blind spot, for exactly this reason.
 
 ## Live device screen (view-only)
 

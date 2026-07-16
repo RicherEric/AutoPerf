@@ -78,12 +78,51 @@ class DashboardApiTests(SimpleTestCase):
         self.assertEqual(response.status_code, 202)
         self.assertEqual(mock_trigger.call_args.args[1:], ("S1", 5.0, "cold_start"))
 
-    def test_youtube_scenarios_list_returns_registry_names(self):
+    def test_youtube_scenarios_list_returns_name_description_tier(self):
         response = self.client.get("/api/youtube-scenarios")
         self.assertEqual(response.status_code, 200)
-        names = response.json()
-        self.assertIn("cold_start", names)
-        self.assertGreaterEqual(len(names), 15)
+        entries = response.json()
+        self.assertGreaterEqual(len(entries), 15)
+        cold_start = next(e for e in entries if e["name"] == "cold_start")
+        self.assertEqual(cold_start["tier"], "smoke")
+        self.assertTrue(cold_start["description"])
+
+    def test_youtube_scenarios_list_filters_by_tier(self):
+        response = self.client.get("/api/youtube-scenarios?tier=smoke")
+        self.assertEqual(response.status_code, 200)
+        entries = response.json()
+        self.assertTrue(entries)
+        self.assertTrue(all(e["tier"] == "smoke" for e in entries))
+
+    def test_youtube_scenarios_list_rejects_unknown_tier(self):
+        response = self.client.get("/api/youtube-scenarios?tier=not-a-tier")
+        self.assertEqual(response.status_code, 400)
+
+    def test_suites_post_requires_serial(self):
+        response = self.client.post(
+            "/api/suites", data=json.dumps({"tier": "smoke"}), content_type="application/json"
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_suites_post_rejects_unknown_tier(self):
+        response = self.client.post(
+            "/api/suites", data=json.dumps({"serial": "S1", "tier": "nonsense"}), content_type="application/json"
+        )
+        self.assertEqual(response.status_code, 400)
+
+    @patch("dashboard.services.run_test_task")
+    def test_suites_post_enqueues_one_run_per_scenario_in_tier(self, mock_task):
+        response = self.client.post(
+            "/api/suites",
+            data=json.dumps({"serial": "S1", "tier": "smoke", "duration": 10}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 202)
+        payload = response.json()
+        self.assertEqual(payload["tier"], "smoke")
+        self.assertEqual(payload["count"], 4)
+        self.assertEqual(len(payload["run_ids"]), 4)
+        self.assertEqual(mock_task.delay.call_count, 4)
 
     def test_run_detail_returns_404_for_missing_run(self):
         response = self.client.get("/api/runs/missing-run")
@@ -238,3 +277,24 @@ class DashboardApiTests(SimpleTestCase):
         self.assertFalse(payload["broker_reachable"])
         self.assertFalse(payload["worker_online"])
         self.assertIn("connection refused", payload["error"])
+
+    @patch("dashboard.services.celery_app")
+    def test_queue_status_reports_running_runs_from_storage_even_when_celery_sees_nothing(self, mock_celery_app):
+        # This is the solo-pool blind spot: the worker is fully synchronous, so
+        # it cannot answer an inspect() broadcast while busy executing a task
+        # -- active/reserved/scheduled all come back empty even though a run
+        # is genuinely in progress. running_runs must still show it, since it
+        # reads Storage directly rather than going through Celery at all.
+        inspector = mock_celery_app.control.inspect.return_value
+        inspector.active.return_value = {}
+        inspector.reserved.return_value = {}
+        inspector.scheduled.return_value = {}
+
+        self.storage.create_run("run1", "S1")
+        self.storage.update_run("run1", "running", checkpoint="12.3")
+
+        response = self.client.get("/api/queue")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertFalse(payload["worker_online"])
+        self.assertEqual([r["id"] for r in payload["running_runs"]], ["run1"])

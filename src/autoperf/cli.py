@@ -46,7 +46,13 @@ def parser() -> argparse.ArgumentParser:
 
     yt = commands.add_parser("youtube-scenarios")
     yt_commands = yt.add_subparsers(dest="youtube_scenarios_command", required=True)
-    yt_commands.add_parser("list")
+    yt_list = yt_commands.add_parser("list")
+    yt_list.add_argument("--tier", choices=youtube_scenarios.TIERS)
+
+    suite = commands.add_parser("run-suite")
+    suite.add_argument("--serial", required=True)
+    suite.add_argument("--tier", required=True, choices=youtube_scenarios.TIERS)
+    suite.add_argument("--duration", type=float, default=30)
     return root
 
 
@@ -124,8 +130,19 @@ def main(argv: list[str] | None = None) -> int:
             "regressed": any(r.regressed for r in results),
             "metrics": [asdict(r) for r in results],
         }, indent=2))
+    elif args.command == "youtube-scenarios":
+        print(json.dumps(youtube_scenarios.describe_scenarios(tier=args.tier), indent=2))
     else:
-        print(json.dumps(youtube_scenarios.list_scenarios(), indent=2))
+        adapter = AndroidAdapter()
+        screen = adapter.screen_size(adb, args.serial)
+        results = []
+        for name in youtube_scenarios.list_scenarios(tier=args.tier):
+            scenario = youtube_scenarios.build(name, screen)
+            run_id = TestRunner(storage, adb, default_collectors(), adapter=adapter, scenario=scenario).run(
+                args.serial, args.duration
+            )
+            results.append({"scenario": name, "run_id": run_id, "status": storage.get_run(run_id)["status"]})
+        print(json.dumps(results, indent=2))
     return 0
 
 
