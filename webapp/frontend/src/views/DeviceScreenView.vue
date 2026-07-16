@@ -127,7 +127,15 @@ function startH264() {
       if (isKey && !configured) {
         const codec = parseCodecFromSps(payload)
         console.log('Configuring VideoDecoder', codec)
-        decoder.configure({ codec, avc: { format: 'annexb' } })
+        // No `description` and no `avc` field, matching the real, working
+        // @yume-chan/scrcpy-decoder-webcodecs implementation (used by
+        // ws-scrcpy/tango): omitting `description` for an 'avc1.*' codec is
+        // what makes Chrome treat the bitstream as Annex-B, since AVC/AVCC
+        // format requires a description (the avcC box) that we don't have
+        // and don't need. The `avc: {format: 'annexb'}` field used in an
+        // earlier version of this file is not part of what that proven
+        // implementation sends and may be silently ignored or mishandled.
+        decoder.configure({ codec, hardwareAcceleration: 'no-preference', optimizeForLatency: true })
         configured = true
       }
       if (configured) {
