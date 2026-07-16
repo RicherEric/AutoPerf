@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import multiprocessing as mp
 import uuid
 
 from django.conf import settings
 
 from autoperf.storage import Storage
-from autoperf.workers import _device_worker
+
+from .tasks import run_test_task
 
 
 def get_storage() -> Storage:
@@ -14,24 +14,20 @@ def get_storage() -> Storage:
 
 
 def trigger_run(storage: Storage, serial: str, duration: float) -> str:
-    """Start a test run as an independent OS process and return immediately.
+    """Enqueue a test run on the Celery worker and return immediately.
 
-    TestRunner.run() installs a SIGINT handler, which only works on the main
-    thread of the main interpreter -- a plain threading.Thread here would
-    crash after the run row is already marked "running", leaking a stuck row
-    and an orphaned BatchWriter thread. Spawning via multiprocessing (the same
-    mechanism autoperf.workers.DeviceSupervisor already uses for run-many)
-    puts TestRunner.run() on the main thread of a fresh process instead, so
-    this bug class doesn't apply, and the run also survives the dev server
-    being restarted.
+    Task execution itself must still land on the main thread of a fresh
+    process for TestRunner.run()'s SIGINT handling to work (signal.signal
+    only works on the main thread of the main interpreter) -- see
+    dashboard.tasks.run_test_task's docstring for how the Celery
+    `--pool=solo` worker satisfies that. This function's own job is just
+    durable enqueueing: create the run row synchronously so it's visible
+    immediately, then hand off to Celery/Redis instead of spawning a raw
+    OS process directly, so a run survives a Celery worker restart (Redis
+    still holds the queued task) the same way it already survived a
+    Django dev server restart.
     """
     run_id = uuid.uuid4().hex
     storage.create_run(run_id, serial)
-    ctx = mp.get_context("spawn")
-    heartbeat = ctx.Queue()
-    ctx.Process(
-        target=_device_worker,
-        args=(storage.path, serial, duration, run_id, heartbeat, 1.0),
-        name=f"autoperf-dashboard-{serial}",
-    ).start()
+    run_test_task.delay(storage.path, serial, duration, run_id)
     return run_id

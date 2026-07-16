@@ -10,6 +10,7 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 
+import os
 from pathlib import Path
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -82,6 +83,13 @@ DATABASES = {
 # metric_samples, test_events). Same file the CLI's `autoperf` command writes
 # to by default when run from the repo root.
 AUTOPERF_DB_PATH = BASE_DIR.parent / "autoperf.db"
+
+# Celery broker for running triggered tests as durable background jobs (v0.6)
+# instead of raw multiprocessing.Process spawn. No result backend is
+# configured: task return values aren't used anywhere -- Storage.get_run()
+# is the single source of truth for a run's status, same as before.
+CELERY_BROKER_URL = os.environ.get("AUTOPERF_CELERY_BROKER_URL", "redis://localhost:6379/0")
+CELERY_TASK_IGNORE_RESULT = True
 
 
 # Internationalization
