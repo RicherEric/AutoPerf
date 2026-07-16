@@ -21,6 +21,8 @@ class FakeAdb:
             "cat /proc/meminfo": "MemTotal: 100 kB\nMemAvailable: 50 kB\n",
             "dumpsys battery": " level: 50\n temperature: 300\n",
             "monkey -p com.example.app -c android.intent.category.LAUNCHER 1": "",
+            "monkey -p com.google.android.youtube -c android.intent.category.LAUNCHER 1": "",
+            "wm size": "Physical size: 1080x2340\n",
         }[command]
 
 
@@ -156,6 +158,50 @@ class CliTests(unittest.TestCase):
             payload = json.loads(out.getvalue())
             self.assertTrue(payload["regressed"])
             self.assertEqual(payload["metrics"][0]["name"], "cpu.total")
+
+    def test_youtube_scenarios_list_prints_registry_names(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "cli.db"
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = cli.main(["--db", str(db), "youtube-scenarios", "list"])
+            self.assertEqual(code, 0)
+            names = json.loads(out.getvalue())
+            self.assertIn("cold_start", names)
+            self.assertGreaterEqual(len(names), 15)
+
+    def test_run_command_with_youtube_scenario_drives_adapter(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "cli.db"
+            out = io.StringIO()
+            with patch("autoperf.cli.AdbClient", return_value=FakeAdb()):
+                with contextlib.redirect_stdout(out):
+                    code = cli.main([
+                        "--db", str(db), "run", "--serial", "SERIAL1", "--duration", "0.05",
+                        "--youtube-scenario", "cold_start",
+                    ])
+            self.assertEqual(code, 0)
+            run_id = out.getvalue().strip()
+            storage = Storage(db)
+            self.assertEqual(storage.get_run(run_id)["status"], "completed")
+            conn = storage.connect()
+            try:
+                kinds = {row[0] for row in conn.execute(
+                    "SELECT kind FROM test_events WHERE run_id=?", (run_id,)
+                )}
+            finally:
+                conn.close()
+            self.assertIn("adapter_action", kinds)
+
+    def test_run_command_rejects_app_and_youtube_scenario_together(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "cli.db"
+            with contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    cli.main([
+                        "--db", str(db), "run", "--serial", "SERIAL1",
+                        "--app", "com.example.app", "--youtube-scenario", "cold_start",
+                    ])
 
 
 if __name__ == "__main__":

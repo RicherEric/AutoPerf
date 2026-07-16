@@ -13,7 +13,7 @@ def get_storage() -> Storage:
     return Storage(settings.AUTOPERF_DB_PATH)
 
 
-def trigger_run(storage: Storage, serial: str, duration: float) -> str:
+def trigger_run(storage: Storage, serial: str, duration: float, youtube_scenario: str | None = None) -> str:
     """Enqueue a test run on the Celery worker and return immediately.
 
     Task execution itself must still land on the main thread of a fresh
@@ -29,5 +29,5 @@ def trigger_run(storage: Storage, serial: str, duration: float) -> str:
     """
     run_id = uuid.uuid4().hex
     storage.create_run(run_id, serial)
-    run_test_task.delay(storage.path, serial, duration, run_id)
+    run_test_task.delay(storage.path, serial, duration, run_id, youtube_scenario)
     return run_id

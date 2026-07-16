@@ -58,7 +58,32 @@ class DashboardApiTests(SimpleTestCase):
         self.assertEqual(response.status_code, 202)
         self.assertEqual(response.json(), {"run_id": "new-run-id", "status": "pending"})
         mock_trigger.assert_called_once()
-        self.assertEqual(mock_trigger.call_args.args[1:], ("S1", 5.0))
+        self.assertEqual(mock_trigger.call_args.args[1:], ("S1", 5.0, None))
+
+    def test_runs_post_rejects_unknown_youtube_scenario(self):
+        response = self.client.post(
+            "/api/runs",
+            data=json.dumps({"serial": "S1", "youtube_scenario": "not-a-real-scenario"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 400)
+
+    @patch("dashboard.views.trigger_run", return_value="new-run-id")
+    def test_runs_post_passes_youtube_scenario_through(self, mock_trigger):
+        response = self.client.post(
+            "/api/runs",
+            data=json.dumps({"serial": "S1", "duration": 5, "youtube_scenario": "cold_start"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(mock_trigger.call_args.args[1:], ("S1", 5.0, "cold_start"))
+
+    def test_youtube_scenarios_list_returns_registry_names(self):
+        response = self.client.get("/api/youtube-scenarios")
+        self.assertEqual(response.status_code, 200)
+        names = response.json()
+        self.assertIn("cold_start", names)
+        self.assertGreaterEqual(len(names), 15)
 
     def test_run_detail_returns_404_for_missing_run(self):
         response = self.client.get("/api/runs/missing-run")
@@ -135,7 +160,12 @@ class DashboardApiTests(SimpleTestCase):
     def test_trigger_run_creates_pending_row_and_enqueues_celery_task(self, mock_task):
         run_id = trigger_run(self.storage, "S1", 30)
         self.assertEqual(self.storage.get_run(run_id)["status"], "pending")
-        mock_task.delay.assert_called_once_with(self.storage.path, "S1", 30, run_id)
+        mock_task.delay.assert_called_once_with(self.storage.path, "S1", 30, run_id, None)
+
+    @patch("dashboard.services.run_test_task")
+    def test_trigger_run_passes_youtube_scenario_through(self, mock_task):
+        run_id = trigger_run(self.storage, "S1", 30, "cold_start")
+        mock_task.delay.assert_called_once_with(self.storage.path, "S1", 30, run_id, "cold_start")
 
     @patch("dashboard.tasks.AdbClient")
     def test_run_test_task_executes_directly_and_completes(self, mock_adb_client):
@@ -149,3 +179,21 @@ class DashboardApiTests(SimpleTestCase):
         # the standard way to unit test a task's logic in isolation.
         run_test_task(str(self.db_path), "S1", 0.05, "run1")
         self.assertEqual(self.storage.get_run("run1")["status"], "completed")
+
+    @patch("dashboard.tasks.AdbClient")
+    def test_run_test_task_with_youtube_scenario_drives_adapter(self, mock_adb_client):
+        mock_adb_client.return_value.shell.side_effect = lambda serial, command, timeout=10: {
+            "dumpsys cpuinfo": "1.0% TOTAL: 1.0% user + 0.0% kernel",
+            "cat /proc/meminfo": "MemTotal: 100 kB\nMemAvailable: 50 kB\n",
+            "dumpsys battery": " level: 50\n temperature: 300\n",
+            "wm size": "Physical size: 1080x2340\n",
+            "monkey -p com.google.android.youtube -c android.intent.category.LAUNCHER 1": "",
+        }[command]
+        run_test_task(str(self.db_path), "S1", 0.05, "run1", "cold_start")
+        self.assertEqual(self.storage.get_run("run1")["status"], "completed")
+        conn = self.storage.connect()
+        try:
+            kinds = {row[0] for row in conn.execute("SELECT kind FROM test_events WHERE run_id=?", ("run1",))}
+        finally:
+            conn.close()
+        self.assertIn("adapter_action", kinds)

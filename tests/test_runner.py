@@ -43,6 +43,9 @@ class BoomAdapter(Adapter):
     def key_event(self, adb, serial, keycode):
         raise NotImplementedError
 
+    def screen_size(self, adb, serial):
+        raise NotImplementedError
+
 
 class RunnerTests(unittest.TestCase):
     def test_scenario_without_adapter_raises(self):

@@ -61,6 +61,16 @@ class AdbClientTests(unittest.TestCase):
                 AdbClient().devices()
         self.assertIn("device offline", str(ctx.exception))
 
+    def test_exec_out_args_builds_argv_without_running_anything(self):
+        with patch("autoperf.adb.subprocess.run") as run:
+            argv = AdbClient().exec_out_args("SERIAL_1", "screenrecord --output-format=h264 -")
+        self.assertEqual(argv, ["adb", "-s", "SERIAL_1", "exec-out", "screenrecord --output-format=h264 -"])
+        run.assert_not_called()
+
+    def test_exec_out_args_rejects_invalid_serial(self):
+        with self.assertRaises(ValueError):
+            AdbClient().exec_out_args("bad;serial", "screencap -p")
+
 
 if __name__ == "__main__":
     unittest.main()

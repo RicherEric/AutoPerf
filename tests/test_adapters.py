@@ -73,6 +73,16 @@ class AndroidAdapterTests(unittest.TestCase):
             AndroidAdapter().tap(adb, "device", "100; reboot", 200)
         self.assertEqual(adb.calls, [])
 
+    def test_screen_size_parses_physical_size(self):
+        adb = RecordingAdb(response="Physical size: 1080x2340\nOverride size: 1080x2340\n")
+        self.assertEqual(AndroidAdapter().screen_size(adb, "device"), (1080, 2340))
+        self.assertEqual(adb.calls, [("device", "wm size", 10)])
+
+    def test_screen_size_raises_on_unparsable_output(self):
+        adb = RecordingAdb(response="no size info here")
+        with self.assertRaises(ValueError):
+            AndroidAdapter().screen_size(adb, "device")
+
 
 if __name__ == "__main__":
     unittest.main()

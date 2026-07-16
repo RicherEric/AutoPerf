@@ -9,6 +9,7 @@ from django.views.decorators.http import require_http_methods
 
 from autoperf.adb import AdbClient
 from autoperf.analyzer import compare, compute_stats
+from autoperf.scenarios import youtube as youtube_scenarios
 
 from .services import get_storage, trigger_run
 
@@ -44,7 +45,11 @@ def runs(request):
         return JsonResponse({"error": "serial is required"}, status=400)
     duration = float(body.get("duration", 60))
 
-    run_id = trigger_run(get_storage(), serial, duration)
+    youtube_scenario = body.get("youtube_scenario") or None
+    if youtube_scenario and youtube_scenario not in youtube_scenarios.REGISTRY:
+        return JsonResponse({"error": f"unknown youtube_scenario: {youtube_scenario!r}"}, status=400)
+
+    run_id = trigger_run(get_storage(), serial, duration, youtube_scenario)
     return JsonResponse({"run_id": run_id, "status": "pending"}, status=202)
 
 
@@ -93,6 +98,11 @@ def baseline(request, serial):
 
     storage.set_baseline(serial, run_id)
     return JsonResponse(storage.get_baseline(serial))
+
+
+@require_http_methods(["GET"])
+def youtube_scenarios_list(request):
+    return JsonResponse(youtube_scenarios.list_scenarios(), safe=False)
 
 
 @require_http_methods(["GET"])

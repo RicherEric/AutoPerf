@@ -10,6 +10,7 @@ from .adb import AdbClientProtocol
 _PACKAGE_RE = re.compile(r"^[A-Za-z][\w]*(\.[A-Za-z][\w]*)+$")
 _ACTIVITY_RE = re.compile(r"^\.?[A-Za-z][\w.]*$")
 _KEYCODE_RE = re.compile(r"^KEYCODE_[A-Z0-9_]+$")
+_WM_SIZE_RE = re.compile(r"Physical size:\s*(\d+)x(\d+)")
 
 HOME = "KEYCODE_HOME"
 BACK = "KEYCODE_BACK"
@@ -53,6 +54,9 @@ class Adapter(ABC):
     @abstractmethod
     def key_event(self, adb: AdbClientProtocol, serial: str, keycode: str) -> None: ...
 
+    @abstractmethod
+    def screen_size(self, adb: AdbClientProtocol, serial: str) -> tuple[int, int]: ...
+
 
 class AndroidAdapter(Adapter):
     """Generic AOSP adapter: drives the device with plain `adb shell input`/`am`/`monkey`
@@ -86,6 +90,13 @@ class AndroidAdapter(Adapter):
 
     def key_event(self, adb, serial, keycode):
         adb.shell(serial, f"input keyevent {_require_keycode(keycode)}")
+
+    def screen_size(self, adb, serial):
+        output = adb.shell(serial, "wm size")
+        match = _WM_SIZE_RE.search(output)
+        if not match:
+            raise ValueError("Unable to parse screen size")
+        return int(match.group(1)), int(match.group(2))
 
 
 @dataclass(frozen=True, slots=True)

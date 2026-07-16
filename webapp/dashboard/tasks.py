@@ -2,14 +2,16 @@ from __future__ import annotations
 
 from celery import shared_task
 
+from autoperf.adapters import AndroidAdapter
 from autoperf.adb import AdbClient
 from autoperf.collectors import default_collectors
 from autoperf.runner import TestRunner
+from autoperf.scenarios import youtube as youtube_scenarios
 from autoperf.storage import Storage
 
 
 @shared_task(name="dashboard.run_test", ignore_result=True)
-def run_test_task(db_path: str, serial: str, duration: float, run_id: str) -> None:
+def run_test_task(db_path: str, serial: str, duration: float, run_id: str, youtube_scenario: str | None = None) -> None:
     """Runs a test as a Celery task instead of a raw multiprocessing.Process.
 
     Celery's Windows-compatible `--pool=solo` executes each task directly in
@@ -21,4 +23,11 @@ def run_test_task(db_path: str, serial: str, duration: float, run_id: str) -> No
     """
     storage = Storage(db_path)
     storage.initialize()
-    TestRunner(storage, AdbClient(), default_collectors()).run(serial, duration, run_id)
+    adb = AdbClient()
+    adapter = None
+    scenario = None
+    if youtube_scenario:
+        adapter = AndroidAdapter()
+        screen = adapter.screen_size(adb, serial)
+        scenario = youtube_scenarios.build(youtube_scenario, screen)
+    TestRunner(storage, adb, default_collectors(), adapter=adapter, scenario=scenario).run(serial, duration, run_id)

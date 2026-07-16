@@ -10,4 +10,5 @@ urlpatterns = [
     path("runs/<str:run_id>/samples", views.run_samples, name="run_samples"),
     path("runs/<str:run_id>/comparison", views.run_comparison, name="run_comparison"),
     path("devices/<str:serial>/baseline", views.baseline, name="baseline"),
+    path("youtube-scenarios", views.youtube_scenarios_list, name="youtube_scenarios_list"),
 ]

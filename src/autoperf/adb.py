@@ -51,3 +51,15 @@ class AdbClient:
         if not re.fullmatch(r"[A-Za-z0-9._:-]+", serial):
             raise ValueError("Invalid Android device serial")
         return self._run("-s", serial, "shell", command, timeout=timeout)
+
+    def exec_out_args(self, serial: str, command: str) -> list[str]:
+        """Build the argv for `adb exec-out <command>` without running it.
+
+        Used by long-lived/streaming callers (the live-screen server) that
+        need to spawn adb themselves via asyncio and read its stdout as a
+        live byte stream, rather than through the synchronous, buffered
+        `_run`/`shell` path above.
+        """
+        if not re.fullmatch(r"[A-Za-z0-9._:-]+", serial):
+            raise ValueError("Invalid Android device serial")
+        return [self.executable, "-s", serial, "exec-out", command]

@@ -9,6 +9,7 @@ from .adb import AdbClient
 from .analyzer import compare, compute_stats
 from .collectors import default_collectors
 from .runner import TestRunner
+from .scenarios import youtube as youtube_scenarios
 from .storage import Storage
 from .workers import DeviceSupervisor
 
@@ -22,7 +23,9 @@ def parser() -> argparse.ArgumentParser:
     run.add_argument("--serial", required=True)
     run.add_argument("--duration", type=float, default=60)
     run.add_argument("--resume", metavar="RUN_ID")
-    run.add_argument("--app", metavar="PACKAGE")
+    driver = run.add_mutually_exclusive_group()
+    driver.add_argument("--app", metavar="PACKAGE")
+    driver.add_argument("--youtube-scenario", metavar="NAME", dest="youtube_scenario")
     many = commands.add_parser("run-many")
     many.add_argument("--serial", action="append", required=True, dest="serials")
     many.add_argument("--duration", type=float, default=60)
@@ -40,6 +43,10 @@ def parser() -> argparse.ArgumentParser:
     compare_cmd = commands.add_parser("compare")
     compare_cmd.add_argument("--run", required=True, dest="run_id")
     compare_cmd.add_argument("--threshold", type=float, default=20.0)
+
+    yt = commands.add_parser("youtube-scenarios")
+    yt_commands = yt.add_subparsers(dest="youtube_scenarios_command", required=True)
+    yt_commands.add_parser("list")
     return root
 
 
@@ -60,8 +67,15 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print(json.dumps(result, indent=2))
     elif args.command == "run":
-        adapter = AndroidAdapter() if args.app else None
-        scenario = [ScenarioStep(0.0, "launch_app", {"package": args.app})] if args.app else None
+        adapter = None
+        scenario = None
+        if args.youtube_scenario:
+            adapter = AndroidAdapter()
+            screen = adapter.screen_size(adb, args.serial)
+            scenario = youtube_scenarios.build(args.youtube_scenario, screen)
+        elif args.app:
+            adapter = AndroidAdapter()
+            scenario = [ScenarioStep(0.0, "launch_app", {"package": args.app})]
         run_id = TestRunner(storage, adb, default_collectors(), adapter=adapter, scenario=scenario).run(
             args.serial, args.duration, args.resume
         )
@@ -92,7 +106,7 @@ def main(argv: list[str] | None = None) -> int:
                 "created_at": baseline["created_at"],
                 "stats": {name: asdict(value) for name, value in stats.items()},
             }, indent=2))
-    else:
+    elif args.command == "compare":
         run = storage.get_run(args.run_id)
         if run is None:
             print("Run not found")
@@ -110,6 +124,8 @@ def main(argv: list[str] | None = None) -> int:
             "regressed": any(r.regressed for r in results),
             "metrics": [asdict(r) for r in results],
         }, indent=2))
+    else:
+        print(json.dumps(youtube_scenarios.list_scenarios(), indent=2))
     return 0
 
 
