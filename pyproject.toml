@@ -15,6 +15,7 @@ autoperf = "autoperf.cli:main"
 dev = ["pytest>=9,<10"]
 dashboard = ["django>=5.0,<6"]
 worker = ["celery>=5.3,<6", "redis>=5.0,<6"]
+livescreen = ["websockets>=13,<14"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
