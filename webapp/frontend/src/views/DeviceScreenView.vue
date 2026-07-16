@@ -91,6 +91,16 @@ function startFallback() {
 function startH264() {
   connectionState.value = 'connecting'
   gotFirstFrame = false
+  let configured = false // tracked locally rather than re-reading decoder.state --
+  // configure() queues the state transition on VideoDecoder's internal control
+  // message queue, which is not guaranteed to be reflected in `decoder.state`
+  // synchronously by the time the very next line runs. Re-checking
+  // `decoder.state === 'configured'` right after calling configure() could
+  // see the stale 'unconfigured' value and skip decode()'ing the key frame --
+  // and without a decoded key frame, delta frames alone can never produce a
+  // picture. Calling decode() unconditionally right after configure() is safe:
+  // the queue guarantees configure() runs first.
+  let messageCount = 0
   decoder = new VideoDecoder({
     output: (frame) => {
       gotFirstFrame = true
@@ -99,7 +109,9 @@ function startH264() {
       drawBitmapToCanvas(frame)
       frame.close()
     },
-    error: () => {
+    error: (err) => {
+      console.error('VideoDecoder error', err)
+      errorMessage.value = `WebCodecs decoder error, falling back: ${err.message}`
       startFallback()
     },
   })
@@ -107,14 +119,18 @@ function startH264() {
   socket = new WebSocket(`${LIVESCREEN_HOST}/stream/${selectedSerial.value}`)
   socket.binaryType = 'arraybuffer'
   socket.onmessage = (event) => {
+    messageCount += 1
     const data = new Uint8Array(event.data)
     const isKey = data[0] === 1
     const payload = data.subarray(1)
     try {
-      if (isKey && decoder.state === 'unconfigured') {
-        decoder.configure({ codec: parseCodecFromSps(payload), avc: { format: 'annexb' } })
+      if (isKey && !configured) {
+        const codec = parseCodecFromSps(payload)
+        console.log('Configuring VideoDecoder', codec)
+        decoder.configure({ codec, avc: { format: 'annexb' } })
+        configured = true
       }
-      if (decoder.state === 'configured') {
+      if (configured) {
         decoder.decode(new EncodedVideoChunk({
           type: isKey ? 'key' : 'delta',
           timestamp: performance.now() * 1000,
@@ -122,6 +138,7 @@ function startH264() {
         }))
       }
     } catch (err) {
+      console.error('WebCodecs decode failed', err)
       errorMessage.value = `WebCodecs decode failed, falling back: ${err.message}`
       startFallback()
     }
@@ -133,7 +150,8 @@ function startH264() {
 
   firstFrameTimer = setTimeout(() => {
     if (!gotFirstFrame) {
-      errorMessage.value = 'No video frame arrived in time, falling back to screenshots.'
+      console.warn(`No frame after ${FIRST_FRAME_TIMEOUT_MS}ms: received ${messageCount} WS message(s), configured=${configured}`)
+      errorMessage.value = `No video frame arrived in time (received ${messageCount} message(s) from the server), falling back to screenshots.`
       startFallback()
     }
   }, FIRST_FRAME_TIMEOUT_MS)
