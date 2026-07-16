@@ -5,12 +5,45 @@ import uuid
 from django.conf import settings
 
 from autoperf.storage import Storage
+from config.celery import app as celery_app
 
 from .tasks import run_test_task
 
 
 def get_storage() -> Storage:
     return Storage(settings.AUTOPERF_DB_PATH)
+
+
+def get_queue_status(timeout: float = 1.0) -> dict:
+    """Reports Celery/Redis queue state, treating "no worker replied" as normal.
+
+    inspect().active()/.reserved()/.scheduled() broadcast over the broker and
+    return None if zero workers reply within `timeout` -- that's a completely
+    ordinary state for a dashboard that isn't always running a worker, not an
+    error. Only a real broker-connection failure (Redis itself unreachable)
+    should read as broken, and it's reported as a *distinct* state so the UI
+    can tell "nobody's listening" apart from "the broker itself is down" --
+    two different problems with two different fixes.
+    """
+    try:
+        inspector = celery_app.control.inspect(timeout=timeout)
+        active = inspector.active() or {}
+        reserved = inspector.reserved() or {}
+        scheduled = inspector.scheduled() or {}
+    except Exception as exc:
+        return {"broker_reachable": False, "worker_online": False, "workers": [], "error": str(exc)}
+
+    names = sorted(set(active) | set(reserved) | set(scheduled))
+    workers = [
+        {
+            "name": name,
+            "active": active.get(name, []),
+            "reserved": reserved.get(name, []),
+            "scheduled": scheduled.get(name, []),
+        }
+        for name in names
+    ]
+    return {"broker_reachable": True, "worker_online": bool(names), "workers": workers}
 
 
 def trigger_run(storage: Storage, serial: str, duration: float, youtube_scenario: str | None = None) -> str:

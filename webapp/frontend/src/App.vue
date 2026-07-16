@@ -1,33 +1,27 @@
 <script setup>
+import { useRoute } from 'vue-router'
+import { computed } from 'vue'
+
+const route = useRoute()
+const isRunSection = computed(() => route.path === '/' || route.path.startsWith('/runs/'))
 </script>
 
 <template>
-  <main>
-    <h1><router-link to="/">AutoPerf Dashboard</router-link></h1>
+  <nav class="nav">
+    <strong>AutoPerf</strong>
+    <router-link to="/" :class="{ 'nav-active': isRunSection }">Run List</router-link>
+    <router-link to="/queue" active-class="nav-active">Task Queue</router-link>
+    <router-link to="/screen" active-class="nav-active">Device Screen</router-link>
+  </nav>
+  <main class="content">
     <router-view />
   </main>
 </template>
 
-<style>
-body {
-  font-family: system-ui, sans-serif;
-  margin: 2rem;
-  color: #1a1a1a;
-}
-table {
-  border-collapse: collapse;
-  width: 100%;
-}
-th, td {
-  text-align: left;
-  padding: 0.4rem 0.8rem;
-  border-bottom: 1px solid #ddd;
-}
-button {
-  padding: 0.4rem 0.8rem;
-  cursor: pointer;
-}
-.error {
-  color: #b00020;
+<style scoped>
+.content {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: var(--space-6) var(--space-5);
 }
 </style>

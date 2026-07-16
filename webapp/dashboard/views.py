@@ -11,7 +11,7 @@ from autoperf.adb import AdbClient
 from autoperf.analyzer import compare, compute_stats
 from autoperf.scenarios import youtube as youtube_scenarios
 
-from .services import get_storage, trigger_run
+from .services import get_queue_status, get_storage, trigger_run
 
 
 @require_http_methods(["GET"])
@@ -103,6 +103,11 @@ def baseline(request, serial):
 @require_http_methods(["GET"])
 def youtube_scenarios_list(request):
     return JsonResponse(youtube_scenarios.list_scenarios(), safe=False)
+
+
+@require_http_methods(["GET"])
+def queue_status(request):
+    return JsonResponse(get_queue_status())
 
 
 @require_http_methods(["GET"])

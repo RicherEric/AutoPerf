@@ -197,3 +197,44 @@ class DashboardApiTests(SimpleTestCase):
         finally:
             conn.close()
         self.assertIn("adapter_action", kinds)
+
+    @patch("dashboard.services.celery_app")
+    def test_queue_status_reports_online_workers(self, mock_celery_app):
+        inspector = mock_celery_app.control.inspect.return_value
+        inspector.active.return_value = {"worker1@host": [{"id": "abc", "name": "dashboard.run_test"}]}
+        inspector.reserved.return_value = {"worker1@host": []}
+        inspector.scheduled.return_value = {}
+
+        response = self.client.get("/api/queue")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["broker_reachable"])
+        self.assertTrue(payload["worker_online"])
+        self.assertEqual(payload["workers"], [
+            {"name": "worker1@host", "active": [{"id": "abc", "name": "dashboard.run_test"}], "reserved": [], "scheduled": []}
+        ])
+
+    @patch("dashboard.services.celery_app")
+    def test_queue_status_reports_no_worker_online_as_a_normal_state(self, mock_celery_app):
+        inspector = mock_celery_app.control.inspect.return_value
+        inspector.active.return_value = None
+        inspector.reserved.return_value = None
+        inspector.scheduled.return_value = None
+
+        response = self.client.get("/api/queue")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["broker_reachable"])
+        self.assertFalse(payload["worker_online"])
+        self.assertEqual(payload["workers"], [])
+
+    @patch("dashboard.services.celery_app")
+    def test_queue_status_reports_broker_unreachable_distinctly(self, mock_celery_app):
+        mock_celery_app.control.inspect.side_effect = OSError("connection refused")
+
+        response = self.client.get("/api/queue")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertFalse(payload["broker_reachable"])
+        self.assertFalse(payload["worker_online"])
+        self.assertIn("connection refused", payload["error"])

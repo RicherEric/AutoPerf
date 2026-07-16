@@ -10,6 +10,8 @@ adb devices
 autoperf devices
 autoperf run --serial <DEVICE_SERIAL> --duration 60
 autoperf run --serial <DEVICE_SERIAL> --duration 60 --app com.android.settings
+autoperf run --serial <DEVICE_SERIAL> --duration 60 --youtube-scenario cold_start
+autoperf youtube-scenarios list
 autoperf run-many --serial <DEVICE_A> --serial <DEVICE_B> --duration 60
 autoperf status <RUN_ID>
 ```
@@ -28,9 +30,24 @@ The optional `--app <package>` flag drives the device via an `Adapter` (see `ada
 - `runner.py`: lifecycle, scheduling, fault isolation, checkpoints
 - `storage.py`: WAL schema and single writer queue
 - `analyzer.py`: per-metric mean/stdev/min/max and baseline-vs-candidate comparison
-- `cli.py`: headless control surface (`devices`, `run`, `run-many`, `status`, `baseline set/show`, `compare`)
+- `scenarios/`: relative-coordinate helpers (`coords.py`) and the YouTube preset library (`youtube.py`)
+- `screen_stream.py`: pure Annex-B NAL splitter / access-unit assembler used by the live-screen server
+- `cli.py`: headless control surface (`devices`, `run`, `run-many`, `status`, `baseline set/show`, `compare`, `youtube-scenarios list`)
 
 Run tests without third-party dependencies: `python -m unittest discover -s tests -v`.
+
+## YouTube scenario library
+
+`adapters.py`'s `screen_size()` (parses `adb shell wm size`) lets `scenarios/coords.py`
+express taps/swipes as fractions of the screen (0..1) instead of hardcoded pixels,
+resolved to absolute coordinates once per run -- so the same scenario works across
+different screen resolutions. `scenarios/youtube.py` has 19 named presets (cold
+start, search+play, home feed scroll, Shorts browsing, quality switch, like,
+comment scroll, fullscreen, seek/scrub, long-press skip, background/foreground
+resume, app-switch cycling, PiP, multi-video session, subscriptions/library
+browsing) built purely from `launch_app`/`stop_app`/`tap`/`swipe`/`key_event` --
+no playback-correctness verification is included by design; these only drive
+the UI, the same way `--app` does.
 
 ## Baseline / regression comparison (v0.4)
 
@@ -82,3 +99,35 @@ mark it as that device's baseline and see a live comparison against it.
 Run the API tests with `python webapp\manage.py test dashboard` -- they call
 the Celery task function directly (bypassing `.delay()`), so they need
 neither Redis nor a running worker.
+
+The dashboard has three pages (teal/cyan theme in `frontend/src/theme.css`,
+palette validated against the project's dataviz method -- see that file's
+header comment):
+
+- **Run List** (`/`) -- device picker, duration, an optional YouTube scenario
+  dropdown, and the run history table.
+- **Run Detail** (`/runs/:id`) -- one small SVG line chart per metric
+  (`components/MetricChart.vue`; each metric gets its own y-axis since
+  cpu %, memory KiB, and battery °C don't share a scale), a "set as
+  baseline" button, and a baseline comparison table with a `DeltaBar` per row.
+- **Task Queue** (`/queue`) -- polls `GET /api/queue`, which wraps Celery's
+  `control.inspect()`. No worker replying within the timeout is a normal,
+  clearly-labeled state (distinct from the broker itself being unreachable),
+  not an error.
+
+## Live device screen (view-only)
+
+```powershell
+.\venv\Scripts\python.exe -m pip install -e .[livescreen]
+cd webapp
+..\venv\Scripts\python.exe -m livescreen.server --port 8100
+```
+Open `/screen` in the dashboard, pick a device, and connect. This runs as its
+own standalone asyncio process (not Django Channels -- it never touches
+Storage/SQLite, just `adb exec-out screenrecord --output-format=h264 -` piped
+over a WebSocket) and decodes in-browser via WebCodecs
+(`VideoDecoder`, Annex-B format, Chrome/Edge 94+) with an automatic fallback to
+periodic PNG screenshots (`adb exec-out screencap -p`) if WebCodecs isn't
+available or the H.264 path fails. View-only for now -- tapping the preview
+does not drive the device. One stream at a time; a new connection cancels
+whatever was previously streaming.

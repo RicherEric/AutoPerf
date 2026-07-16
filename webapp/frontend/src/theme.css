@@ -1,0 +1,274 @@
+/*
+ * Palette derived via the project's dataviz method (docs: dataviz skill).
+ * Categorical chart-series slots (teal/amber/violet/rose) were validated
+ * with scripts/validate_palette.js --pairs all against these exact light
+ * (#ffffff) and dark (#0f1c1b) surfaces: lightness band, chroma floor, CVD
+ * separation (deutan/protan), normal-vision floor, and contrast all PASS.
+ * Status colors are the skill's fixed, reserved status scale -- never
+ * reused as chart-series identity, always paired with a text label.
+ */
+
+:root {
+  color-scheme: light;
+
+  --color-bg: #f3f7f7;
+  --color-surface: #ffffff;
+  --color-surface-alt: #eaf2f2;
+  --color-border: #d5e2e2;
+  --color-text: #10201f;
+  --color-text-muted: #5c7170;
+
+  --color-primary: #0d9488;
+  --color-primary-hover: #0b7a70;
+  --color-accent: #14b8a6;
+
+  --color-success-bg: #0ca30c;
+  --color-success-text: #ffffff;
+  --color-warning-bg: #fab219;
+  --color-warning-text: #1a1a19;
+  --color-danger-bg: #d03b3b;
+  --color-danger-text: #ffffff;
+  --color-neutral-bg: #6b7280;
+  --color-neutral-text: #ffffff;
+
+  --chart-series-1: #0d9488; /* cpu.total */
+  --chart-series-2: #d97706; /* memory.used */
+  --chart-series-3: #8b5cf6; /* battery.level */
+  --chart-series-4: #e11d48; /* battery.temperature */
+  --chart-grid: #d5e2e2;
+  --chart-axis-text: #5c7170;
+
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+  --space-6: 2rem;
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --font-sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+
+    --color-bg: #0a1413;
+    --color-surface: #0f1c1b;
+    --color-surface-alt: #142524;
+    --color-border: #274040;
+    --color-text: #eef7f6;
+    --color-text-muted: #9fb8b6;
+
+    --color-primary: #2dd4bf;
+    --color-primary-hover: #5eead4;
+    --color-accent: #2dd4bf;
+
+    --color-success-bg: #0ca30c;
+    --color-success-text: #ffffff;
+    --color-warning-bg: #fab219;
+    --color-warning-text: #1a1a19;
+    --color-danger-bg: #e35c5c;
+    --color-danger-text: #1a1a19;
+    --color-neutral-bg: #4b5563;
+    --color-neutral-text: #ffffff;
+
+    --chart-series-1: #0d9488;
+    --chart-series-2: #d97706;
+    --chart-series-3: #8b5cf6;
+    --chart-series-4: #e11d48;
+    --chart-grid: #274040;
+    --chart-axis-text: #9fb8b6;
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --color-bg: #0a1413;
+  --color-surface: #0f1c1b;
+  --color-surface-alt: #142524;
+  --color-border: #274040;
+  --color-text: #eef7f6;
+  --color-text-muted: #9fb8b6;
+
+  --color-primary: #2dd4bf;
+  --color-primary-hover: #5eead4;
+  --color-accent: #2dd4bf;
+
+  --color-success-bg: #0ca30c;
+  --color-success-text: #ffffff;
+  --color-warning-bg: #fab219;
+  --color-warning-text: #1a1a19;
+  --color-danger-bg: #e35c5c;
+  --color-danger-text: #1a1a19;
+  --color-neutral-bg: #4b5563;
+  --color-neutral-text: #ffffff;
+
+  --chart-series-1: #0d9488;
+  --chart-series-2: #d97706;
+  --chart-series-3: #8b5cf6;
+  --chart-series-4: #e11d48;
+  --chart-grid: #274040;
+  --chart-axis-text: #9fb8b6;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  font-family: var(--font-sans);
+  margin: 0;
+  background: var(--color-bg);
+  color: var(--color-text);
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+th,
+td {
+  text-align: left;
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+}
+
+th {
+  color: var(--color-text-muted);
+  font-weight: 600;
+  font-size: 0.85em;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+tbody tr:hover {
+  background: var(--color-surface-alt);
+}
+
+button {
+  font-family: inherit;
+  padding: var(--space-2) var(--space-4);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  background: var(--color-primary);
+  color: #ffffff;
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  background: var(--color-primary-hover);
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+select,
+input {
+  font-family: inherit;
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  color: var(--color-text);
+}
+
+.error {
+  color: var(--color-danger-bg);
+}
+
+.card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: var(--space-5);
+  margin-bottom: var(--space-5);
+}
+
+.card h2 {
+  margin-top: 0;
+  font-size: 1.05rem;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 0.15rem var(--space-3);
+  border-radius: 999px;
+  font-size: 0.85em;
+  font-weight: 600;
+}
+
+.badge-success {
+  background: var(--color-success-bg);
+  color: var(--color-success-text);
+}
+
+.badge-warning {
+  background: var(--color-warning-bg);
+  color: var(--color-warning-text);
+}
+
+.badge-danger {
+  background: var(--color-danger-bg);
+  color: var(--color-danger-text);
+}
+
+.badge-neutral {
+  background: var(--color-neutral-bg);
+  color: var(--color-neutral-text);
+}
+
+.stat-tile {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-alt);
+}
+
+.stat-tile .value {
+  font-size: 1.5rem;
+  font-weight: 700;
+}
+
+.stat-tile .label {
+  color: var(--color-text-muted);
+  font-size: 0.8em;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.nav {
+  display: flex;
+  align-items: center;
+  gap: var(--space-5);
+  padding: var(--space-4) var(--space-6);
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-surface);
+}
+
+.nav a {
+  color: var(--color-text-muted);
+  text-decoration: none;
+  font-weight: 600;
+  padding: var(--space-1) 0;
+  border-bottom: 2px solid transparent;
+}
+
+.nav a:hover {
+  color: var(--color-text);
+}
+
+.nav a.nav-active {
+  color: var(--color-primary);
+  border-bottom-color: var(--color-primary);
+}

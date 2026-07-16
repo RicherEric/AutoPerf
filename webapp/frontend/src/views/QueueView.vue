@@ -1,0 +1,106 @@
+<script setup>
+import { onMounted, onUnmounted, ref } from 'vue'
+import { getQueueStatus } from '../api.js'
+import Card from '../components/Card.vue'
+import StatusBadge from '../components/StatusBadge.vue'
+
+const status = ref(null)
+const error = ref('')
+let pollHandle = null
+
+async function poll() {
+  try {
+    status.value = await getQueueStatus()
+  } catch (err) {
+    error.value = err.message
+  }
+}
+
+onMounted(async () => {
+  await poll()
+  pollHandle = setInterval(poll, 3000)
+})
+
+onUnmounted(() => {
+  clearInterval(pollHandle)
+})
+</script>
+
+<template>
+  <Card title="Task queue">
+    <p v-if="error" class="error">{{ error }}</p>
+    <div v-if="status">
+      <p v-if="!status.broker_reachable">
+        <StatusBadge label="Broker unreachable" tone="danger" />
+        <span v-if="status.error"> — {{ status.error }}</span>
+      </p>
+      <p v-else-if="!status.worker_online">
+        <StatusBadge label="No worker connected" tone="warning" />
+      </p>
+      <p v-else>
+        <StatusBadge :label="`${status.workers.length} worker(s) online`" tone="success" />
+      </p>
+    </div>
+  </Card>
+
+  <Card v-if="status && status.broker_reachable && !status.worker_online" title="Start a worker">
+    <p>No Celery worker is currently listening on the broker. Start one:</p>
+    <pre>celery -A config worker --pool=solo -l info</pre>
+    <p>(run from the <code>webapp</code> directory, with Redis running)</p>
+  </Card>
+
+  <Card v-for="worker in status?.workers ?? []" :key="worker.name" :title="worker.name">
+    <div class="stat-row">
+      <div class="stat-tile">
+        <span class="value">{{ worker.active.length }}</span>
+        <span class="label">Active</span>
+      </div>
+      <div class="stat-tile">
+        <span class="value">{{ worker.reserved.length }}</span>
+        <span class="label">Reserved</span>
+      </div>
+      <div class="stat-tile">
+        <span class="value">{{ worker.scheduled.length }}</span>
+        <span class="label">Scheduled</span>
+      </div>
+    </div>
+    <table v-if="worker.active.length || worker.reserved.length">
+      <thead>
+        <tr>
+          <th>Task ID</th>
+          <th>Name</th>
+          <th>State</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr v-for="task in worker.active" :key="task.id">
+          <td>{{ task.id.slice(0, 12) }}</td>
+          <td>{{ task.name }}</td>
+          <td>active</td>
+        </tr>
+        <tr v-for="task in worker.reserved" :key="task.id">
+          <td>{{ task.id.slice(0, 12) }}</td>
+          <td>{{ task.name }}</td>
+          <td>reserved</td>
+        </tr>
+      </tbody>
+    </table>
+  </Card>
+</template>
+
+<style scoped>
+.stat-row {
+  display: flex;
+  gap: var(--space-4);
+  margin-bottom: var(--space-4);
+}
+.stat-row .stat-tile {
+  flex: 1;
+}
+pre {
+  background: var(--color-surface-alt);
+  padding: var(--space-3);
+  border-radius: var(--radius-sm);
+  overflow-x: auto;
+}
+</style>

@@ -1,10 +1,22 @@
 <script setup>
 import { onMounted, onUnmounted, ref } from 'vue'
-import { listDevices, listRuns, refreshDevices, triggerRun } from '../api.js'
+import { listDevices, listRuns, listYoutubeScenarios, refreshDevices, triggerRun } from '../api.js'
+import Card from '../components/Card.vue'
+import StatusBadge from '../components/StatusBadge.vue'
+
+const STATUS_TONE = {
+  completed: 'success',
+  running: 'warning',
+  pending: 'neutral',
+  failed: 'danger',
+  interrupted: 'danger',
+}
 
 const devices = ref([])
 const runs = ref([])
+const youtubeScenarios = ref([])
 const selectedSerial = ref('')
+const selectedScenario = ref('')
 const duration = ref(60)
 const error = ref('')
 const refreshing = ref(false)
@@ -42,7 +54,7 @@ async function onStartRun() {
   error.value = ''
   starting.value = true
   try {
-    await triggerRun(selectedSerial.value, Number(duration.value))
+    await triggerRun(selectedSerial.value, Number(duration.value), selectedScenario.value)
     await loadRuns()
   } catch (err) {
     error.value = err.message
@@ -52,7 +64,7 @@ async function onStartRun() {
 }
 
 onMounted(async () => {
-  await Promise.all([loadDevices(), loadRuns()])
+  await Promise.all([loadDevices(), loadRuns(), listYoutubeScenarios().then((names) => (youtubeScenarios.value = names))])
   pollHandle = setInterval(loadRuns, 3000)
 })
 
@@ -62,8 +74,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <section>
-    <h2>Start a run</h2>
+  <Card title="Start a run">
     <p v-if="error" class="error">{{ error }}</p>
     <div>
       <label>
@@ -83,14 +94,20 @@ onUnmounted(() => {
         Duration (s):
         <input type="number" v-model="duration" min="1" />
       </label>
+      <label>
+        YouTube scenario:
+        <select v-model="selectedScenario">
+          <option value="">(none — plain run)</option>
+          <option v-for="name in youtubeScenarios" :key="name" :value="name">{{ name }}</option>
+        </select>
+      </label>
       <button @click="onStartRun" :disabled="starting || !selectedSerial">
         {{ starting ? 'Starting…' : 'Start Run' }}
       </button>
     </div>
-  </section>
+  </Card>
 
-  <section>
-    <h2>Runs</h2>
+  <Card title="Runs">
     <table>
       <thead>
         <tr>
@@ -105,11 +122,11 @@ onUnmounted(() => {
         <tr v-for="run in runs" :key="run.id">
           <td><router-link :to="`/runs/${run.id}`">{{ run.id.slice(0, 8) }}</router-link></td>
           <td>{{ run.device_serial }}</td>
-          <td>{{ run.status }}</td>
+          <td><StatusBadge :label="run.status" :tone="STATUS_TONE[run.status] ?? 'neutral'" /></td>
           <td>{{ run.started_at ?? '—' }}</td>
           <td>{{ run.finished_at ?? '—' }}</td>
         </tr>
       </tbody>
     </table>
-  </section>
+  </Card>
 </template>

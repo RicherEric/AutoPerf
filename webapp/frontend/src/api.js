@@ -19,12 +19,20 @@ export function listRuns() {
   return request('/runs')
 }
 
-export function triggerRun(serial, duration) {
+export function triggerRun(serial, duration, youtubeScenario = '') {
   return request('/runs', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ serial, duration }),
+    body: JSON.stringify({ serial, duration, youtube_scenario: youtubeScenario || null }),
   })
+}
+
+export function listYoutubeScenarios() {
+  return request('/youtube-scenarios')
+}
+
+export function getQueueStatus() {
+  return request('/queue')
 }
 
 export function getRun(runId) {
