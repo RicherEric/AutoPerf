@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import uuid
 from dataclasses import asdict
 
 from .adapters import AndroidAdapter, ScenarioStep
@@ -75,15 +76,22 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "run":
         adapter = None
         scenario = None
+        run_id = args.resume
         if args.youtube_scenario:
             adapter = AndroidAdapter()
             screen = adapter.screen_size(adb, args.serial)
             scenario = youtube_scenarios.build(args.youtube_scenario, screen)
+            if run_id is None:
+                # Pre-create the row with the scenario name recorded --
+                # TestRunner.run() sees an existing row for this run_id and
+                # skips its own create_run(), preserving the field.
+                run_id = uuid.uuid4().hex
+                storage.create_run(run_id, args.serial, youtube_scenario=args.youtube_scenario)
         elif args.app:
             adapter = AndroidAdapter()
             scenario = [ScenarioStep(0.0, "launch_app", {"package": args.app})]
         run_id = TestRunner(storage, adb, default_collectors(), adapter=adapter, scenario=scenario).run(
-            args.serial, args.duration, args.resume
+            args.serial, args.duration, run_id
         )
         print(run_id)
     elif args.command == "run-many":
@@ -138,8 +146,10 @@ def main(argv: list[str] | None = None) -> int:
         results = []
         for name in youtube_scenarios.list_scenarios(tier=args.tier):
             scenario = youtube_scenarios.build(name, screen)
-            run_id = TestRunner(storage, adb, default_collectors(), adapter=adapter, scenario=scenario).run(
-                args.serial, args.duration
+            run_id = uuid.uuid4().hex
+            storage.create_run(run_id, args.serial, youtube_scenario=name)
+            TestRunner(storage, adb, default_collectors(), adapter=adapter, scenario=scenario).run(
+                args.serial, args.duration, run_id
             )
             results.append({"scenario": name, "run_id": run_id, "status": storage.get_run(run_id)["status"]})
         print(json.dumps(results, indent=2))

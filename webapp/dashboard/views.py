@@ -11,7 +11,7 @@ from autoperf.adb import AdbClient
 from autoperf.analyzer import compare, compute_stats
 from autoperf.scenarios import youtube as youtube_scenarios
 
-from .services import get_queue_status, get_storage, trigger_run, trigger_suite
+from .services import get_dashboard_stats, get_queue_status, get_storage, trigger_run, trigger_suite
 
 
 @require_http_methods(["GET"])
@@ -131,6 +131,12 @@ def suites(request):
 @require_http_methods(["GET"])
 def queue_status(request):
     return JsonResponse(get_queue_status(get_storage()))
+
+
+@require_http_methods(["GET"])
+def stats(request):
+    recent_limit = int(request.GET.get("limit", 50))
+    return JsonResponse(get_dashboard_stats(get_storage(), recent_limit=recent_limit))
 
 
 @require_http_methods(["GET"])

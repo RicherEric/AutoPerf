@@ -14,7 +14,7 @@ from .models import Device, MetricSample, RunStatus, TestEvent, utc_now
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS devices (serial TEXT PRIMARY KEY, model TEXT, product TEXT, last_seen TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS test_runs (id TEXT PRIMARY KEY, device_serial TEXT NOT NULL, status TEXT NOT NULL,
-  started_at TEXT, finished_at TEXT, checkpoint TEXT, error TEXT);
+  started_at TEXT, finished_at TEXT, checkpoint TEXT, error TEXT, youtube_scenario TEXT);
 CREATE TABLE IF NOT EXISTS metric_samples (id INTEGER PRIMARY KEY, run_id TEXT NOT NULL, timestamp TEXT NOT NULL,
   collector TEXT NOT NULL, name TEXT NOT NULL, value REAL NOT NULL, unit TEXT NOT NULL, labels TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_metrics_run_time ON metric_samples(run_id, timestamp);
@@ -39,6 +39,13 @@ class Storage:
         with closing(self.connect()) as conn:
             with conn:
                 conn.executescript(SCHEMA)
+                # Migration for databases created before youtube_scenario existed --
+                # CREATE TABLE IF NOT EXISTS above is a no-op on an existing table,
+                # so older files need the column added explicitly. Idempotent: a
+                # fresh database already has it via SCHEMA and this is skipped.
+                columns = {row[1] for row in conn.execute("PRAGMA table_info(test_runs)")}
+                if "youtube_scenario" not in columns:
+                    conn.execute("ALTER TABLE test_runs ADD COLUMN youtube_scenario TEXT")
 
     def register_device(self, device: Device) -> None:
         with closing(self.connect()) as conn:
@@ -46,10 +53,13 @@ class Storage:
                 conn.execute("INSERT INTO devices VALUES (?, ?, ?, ?) ON CONFLICT(serial) DO UPDATE SET model=excluded.model, product=excluded.product, last_seen=excluded.last_seen",
                              (device.serial, device.model, device.product, utc_now()))
 
-    def create_run(self, run_id: str, serial: str) -> None:
+    def create_run(self, run_id: str, serial: str, youtube_scenario: str | None = None) -> None:
         with closing(self.connect()) as conn:
             with conn:
-                conn.execute("INSERT INTO test_runs(id, device_serial, status) VALUES (?, ?, ?)", (run_id, serial, RunStatus.PENDING))
+                conn.execute(
+                    "INSERT INTO test_runs(id, device_serial, status, youtube_scenario) VALUES (?, ?, ?, ?)",
+                    (run_id, serial, RunStatus.PENDING, youtube_scenario),
+                )
 
     def update_run(self, run_id: str, status: RunStatus, *, checkpoint: str | None = None, error: str | None = None) -> None:
         now = utc_now()

@@ -43,6 +43,10 @@ export function getQueueStatus() {
   return request('/queue')
 }
 
+export function getStats(limit = 50) {
+  return request(`/stats?limit=${limit}`)
+}
+
 export function getRun(runId) {
   return request(`/runs/${runId}`)
 }

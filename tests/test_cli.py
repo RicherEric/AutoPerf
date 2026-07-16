@@ -205,6 +205,7 @@ class CliTests(unittest.TestCase):
             finally:
                 conn.close()
             self.assertIn("adapter_action", kinds)
+            self.assertEqual(storage.get_run(run_id)["youtube_scenario"], "cold_start")
 
     def test_run_command_rejects_app_and_youtube_scenario_together(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -233,6 +234,10 @@ class CliTests(unittest.TestCase):
                 ["cold_start", "cold_start_and_stop", "home_feed_scroll", "search_and_play"],
             )
             self.assertTrue(all(r["status"] == "completed" for r in results))
+
+            storage = Storage(db)
+            for result in results:
+                self.assertEqual(storage.get_run(result["run_id"])["youtube_scenario"], result["scenario"])
 
 
 if __name__ == "__main__":

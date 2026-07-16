@@ -1,3 +1,4 @@
+import sqlite3
 import tempfile
 import time
 import unittest
@@ -13,6 +14,36 @@ class StorageTests(unittest.TestCase):
             storage = Storage(Path(directory) / "db.sqlite")
             storage.initialize()
             storage.initialize()
+
+    def test_initialize_migrates_databases_predating_youtube_scenario_column(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = Path(directory) / "db.sqlite"
+            conn = sqlite3.connect(str(db_path))
+            conn.execute(
+                "CREATE TABLE test_runs (id TEXT PRIMARY KEY, device_serial TEXT NOT NULL, status TEXT NOT NULL,"
+                " started_at TEXT, finished_at TEXT, checkpoint TEXT, error TEXT)"
+            )
+            conn.commit()
+            conn.close()
+
+            storage = Storage(db_path)
+            storage.initialize()  # must not raise, and must add the missing column
+            storage.create_run("run1", "device", youtube_scenario="cold_start")
+            self.assertEqual(storage.get_run("run1")["youtube_scenario"], "cold_start")
+
+    def test_create_run_records_youtube_scenario(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = Storage(Path(directory) / "db.sqlite")
+            storage.initialize()
+            storage.create_run("run1", "device", youtube_scenario="home_feed_scroll")
+            self.assertEqual(storage.get_run("run1")["youtube_scenario"], "home_feed_scroll")
+
+    def test_create_run_defaults_youtube_scenario_to_none(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = Storage(Path(directory) / "db.sqlite")
+            storage.initialize()
+            storage.create_run("run1", "device")
+            self.assertIsNone(storage.get_run("run1")["youtube_scenario"])
 
     def test_register_device_upserts_on_conflict(self):
         with tempfile.TemporaryDirectory() as directory:

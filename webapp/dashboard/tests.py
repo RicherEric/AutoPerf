@@ -298,3 +298,76 @@ class DashboardApiTests(SimpleTestCase):
         payload = response.json()
         self.assertFalse(payload["worker_online"])
         self.assertEqual([r["id"] for r in payload["running_runs"]], ["run1"])
+
+    def _complete_run_with_samples(self, run_id, serial, values, scenario=None):
+        self.storage.create_run(run_id, serial, scenario)
+        writer = BatchWriter(self.storage)
+        writer.start()
+        for value in values:
+            writer.put(MetricSample(run_id, "cpu", "cpu.total", value, "%"))
+        writer.close()
+        self.storage.update_run(run_id, "completed")
+
+    def test_stats_with_no_runs_returns_zeroed_counts(self):
+        response = self.client.get("/api/stats")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["total_runs"], 0)
+        self.assertIsNone(payload["pass_rate"])
+        self.assertEqual(payload["by_scenario"], [])
+
+    def test_stats_counts_no_baseline_runs_separately(self):
+        self._complete_run_with_samples("run1", "S1", [10.0])
+        response = self.client.get("/api/stats")
+        payload = response.json()
+        self.assertEqual(payload["no_baseline"], 1)
+        self.assertEqual(payload["passed"], 0)
+        self.assertEqual(payload["failed"], 0)
+        self.assertIsNone(payload["pass_rate"])
+
+    def test_stats_marks_run_within_threshold_as_pass(self):
+        self._complete_run_with_samples("baseline_run", "S1", [10.0])
+        self.storage.set_baseline("S1", "baseline_run")
+        self._complete_run_with_samples("run1", "S1", [10.5], scenario="cold_start")
+
+        response = self.client.get("/api/stats")
+        payload = response.json()
+        self.assertEqual(payload["passed"], 2)  # baseline run compares against itself too
+        self.assertEqual(payload["failed"], 0)
+        self.assertEqual(payload["pass_rate"], 1.0)
+
+    def test_stats_marks_regressed_run_as_fail(self):
+        self._complete_run_with_samples("baseline_run", "S1", [10.0])
+        self.storage.set_baseline("S1", "baseline_run")
+        self._complete_run_with_samples("run1", "S1", [50.0], scenario="cold_start")
+
+        response = self.client.get("/api/stats")
+        payload = response.json()
+        self.assertEqual(payload["failed"], 1)
+        self.assertEqual(payload["passed"], 1)  # the baseline run itself still passes
+
+    def test_stats_groups_by_scenario(self):
+        self._complete_run_with_samples("baseline_run", "S1", [10.0])
+        self.storage.set_baseline("S1", "baseline_run")
+        self._complete_run_with_samples("run1", "S1", [10.5], scenario="cold_start")
+        self._complete_run_with_samples("run2", "S1", [50.0], scenario="like_video")
+
+        response = self.client.get("/api/stats")
+        payload = response.json()
+        by_scenario = {entry["scenario"]: entry for entry in payload["by_scenario"]}
+        self.assertEqual(by_scenario["cold_start"]["pass"], 1)
+        self.assertEqual(by_scenario["like_video"]["fail"], 1)
+
+    def test_stats_includes_metric_trend(self):
+        self._complete_run_with_samples("run1", "S1", [10.0])
+        response = self.client.get("/api/stats")
+        payload = response.json()
+        self.assertIn("cpu.total", payload["trend"])
+        self.assertEqual(payload["trend"]["cpu.total"][0]["value"], 10.0)
+
+    def test_stats_respects_limit_query_param(self):
+        self._complete_run_with_samples("run1", "S1", [10.0])
+        self._complete_run_with_samples("run2", "S1", [20.0])
+        response = self.client.get("/api/stats?limit=1")
+        payload = response.json()
+        self.assertEqual(payload["total_runs"], 1)

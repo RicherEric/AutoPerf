@@ -3,13 +3,14 @@ import { useRoute } from 'vue-router'
 import { computed } from 'vue'
 
 const route = useRoute()
-const isRunSection = computed(() => route.path === '/' || route.path.startsWith('/runs/'))
+const isRunSection = computed(() => route.path === '/runs' || route.path.startsWith('/runs/'))
 </script>
 
 <template>
   <nav class="nav">
     <strong>AutoPerf</strong>
-    <router-link to="/" :class="{ 'nav-active': isRunSection }">Run List</router-link>
+    <router-link to="/" active-class="nav-active">統計概覽</router-link>
+    <router-link to="/runs" :class="{ 'nav-active': isRunSection }">Run List</router-link>
     <router-link to="/queue" active-class="nav-active">Task Queue</router-link>
     <router-link to="/screen" active-class="nav-active">Device Screen</router-link>
   </nav>

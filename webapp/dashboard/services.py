@@ -4,6 +4,8 @@ import uuid
 
 from django.conf import settings
 
+from autoperf.analyzer import compare, compute_stats
+from autoperf.models import utc_now
 from autoperf.scenarios import youtube as youtube_scenarios
 from autoperf.storage import Storage
 from config.celery import app as celery_app
@@ -83,7 +85,7 @@ def trigger_run(storage: Storage, serial: str, duration: float, youtube_scenario
     Django dev server restart.
     """
     run_id = uuid.uuid4().hex
-    storage.create_run(run_id, serial)
+    storage.create_run(run_id, serial, youtube_scenario)
     run_test_task.delay(storage.path, serial, duration, run_id, youtube_scenario)
     return run_id
 
@@ -100,3 +102,77 @@ def trigger_suite(storage: Storage, serial: str, tier: str, duration: float) -> 
         trigger_run(storage, serial, duration, name)
         for name in youtube_scenarios.list_scenarios(tier=tier)
     ]
+
+
+def get_dashboard_stats(storage: Storage, recent_limit: int = 50) -> dict:
+    """Aggregates recent completed runs into a pass/fail verdict, a per-scenario
+    breakdown, and a metric trend, for the dashboard's stats/home page.
+
+    A run's "verdict" is derived from the same baseline comparison analyzer.py
+    already does for a single run (GET /api/runs/<id>/comparison) -- there's no
+    separate pass/fail concept invented here, just this same check applied
+    across recent history instead of one run at a time. A run whose device has
+    no baseline set is its own "no_baseline" bucket (not counted as pass or
+    fail) since there's nothing to compare it against yet.
+    """
+    runs = storage.list_runs(limit=recent_limit)
+    completed = [r for r in runs if r["status"] == "completed"]
+
+    baseline_cache: dict[str, dict | None] = {}
+    verdicts = []
+    trend_by_metric: dict[str, list[dict]] = {}
+
+    for run in reversed(completed):  # chronological order for trend charts
+        run_stats = compute_stats(storage.list_samples(run["id"], limit=100_000))
+        for name, stat in run_stats.items():
+            trend_by_metric.setdefault(name, []).append({"timestamp": run["started_at"], "value": stat.mean})
+
+        device = run["device_serial"]
+        if device not in baseline_cache:
+            baseline_row = storage.get_baseline(device)
+            baseline_cache[device] = (
+                compute_stats(storage.list_samples(baseline_row["run_id"], limit=100_000))
+                if baseline_row else None
+            )
+        baseline_stats = baseline_cache[device]
+
+        if baseline_stats is None:
+            verdict = "no_baseline"
+        else:
+            results = compare(baseline_stats, run_stats)
+            verdict = "fail" if any(r.regressed for r in results) else "pass"
+
+        verdicts.append({"run_id": run["id"], "scenario": run["youtube_scenario"], "verdict": verdict})
+
+    passed = sum(1 for v in verdicts if v["verdict"] == "pass")
+    failed = sum(1 for v in verdicts if v["verdict"] == "fail")
+    no_baseline = sum(1 for v in verdicts if v["verdict"] == "no_baseline")
+    evaluated = passed + failed
+
+    by_scenario: dict[str, dict] = {}
+    for v in verdicts:
+        key = v["scenario"] or "(no scenario)"
+        bucket = by_scenario.setdefault(key, {"pass": 0, "fail": 0, "no_baseline": 0})
+        bucket[v["verdict"]] += 1
+    scenario_stats = [
+        {
+            "scenario": name,
+            **counts,
+            "pass_rate": (counts["pass"] / (counts["pass"] + counts["fail"])) if (counts["pass"] + counts["fail"]) else None,
+        }
+        for name, counts in sorted(by_scenario.items())
+    ]
+
+    today = utc_now()[:10]
+    runs_today = sum(1 for r in runs if (r["started_at"] or "")[:10] == today)
+
+    return {
+        "total_runs": len(runs),
+        "runs_today": runs_today,
+        "passed": passed,
+        "failed": failed,
+        "no_baseline": no_baseline,
+        "pass_rate": (passed / evaluated) if evaluated else None,
+        "by_scenario": scenario_stats,
+        "trend": trend_by_metric,
+    }

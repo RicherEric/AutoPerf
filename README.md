@@ -67,6 +67,13 @@ autoperf run-suite --serial <DEVICE_SERIAL> --tier smoke --duration 30
 own report) back to back. The dashboard's Run List page has the same thing as
 "Run \<tier\> suite" buttons, backed by `POST /api/suites`.
 
+Every run's `test_runs` row records which scenario (if any) drove it
+(`youtube_scenario` column) so the stats page can compute a per-scenario pass
+rate. The CLI/dashboard pre-create the run row with this field set *before*
+calling `TestRunner.run()` with that same run_id -- `TestRunner` sees the row
+already exists and skips its own `create_run()`, so no changes were needed in
+`runner.py` itself.
+
 ## Baseline / regression comparison (v0.4)
 
 ```powershell
@@ -118,13 +125,21 @@ Run the API tests with `python webapp\manage.py test dashboard` -- they call
 the Celery task function directly (bypassing `.delay()`), so they need
 neither Redis nor a running worker.
 
-The dashboard has three pages (teal/cyan theme in `frontend/src/theme.css`,
+The dashboard has four pages (teal/cyan theme in `frontend/src/theme.css`,
 palette validated against the project's dataviz method -- see that file's
 header comment):
 
-- **Run List** (`/`) -- device picker, duration, a YouTube scenario dropdown
-  grouped by tier (with each option's description as a tooltip), "Run \<tier\>
-  suite" buttons, and the run history table.
+- **統計概覽 / Stats** (`/`, the home page) -- overall pass rate, today's run
+  count, a per-scenario pass-rate bar list (worst-first), and metric trend
+  charts across recent run history. Backed by `GET /api/stats`
+  (`services.get_dashboard_stats`), which reuses the exact same baseline
+  comparison analyzer.py already does for one run at a time
+  (`GET /api/runs/<id>/comparison`) across recent history instead -- a run
+  whose device has no baseline yet is its own "no_baseline" bucket, not
+  counted as pass or fail.
+- **Run List** (`/runs`) -- device picker, duration, a YouTube scenario
+  dropdown grouped by tier (with each option's description as a tooltip),
+  "Run \<tier\> suite" buttons, and the run history table.
 - **Run Detail** (`/runs/:id`) -- one small SVG line chart per metric
   (`components/MetricChart.vue`; each metric gets its own y-axis since
   cpu %, memory KiB, and battery °C don't share a scale), a "set as
@@ -152,6 +167,10 @@ Storage/SQLite, just `adb exec-out screenrecord --output-format=h264 -` piped
 over a WebSocket) and decodes in-browser via WebCodecs
 (`VideoDecoder`, Annex-B format, Chrome/Edge 94+) with an automatic fallback to
 periodic PNG screenshots (`adb exec-out screencap -p`) if WebCodecs isn't
-available or the H.264 path fails. View-only for now -- tapping the preview
-does not drive the device. One stream at a time; a new connection cancels
+available or the H.264 path fails. `VideoDecoder.configure()` is called with
+only `{codec, hardwareAcceleration, optimizeForLatency}` -- no `description`,
+no `avc` field -- matching `@yume-chan/scrcpy-decoder-webcodecs` (used by
+ws-scrcpy/tango), a real production scrcpy-in-browser implementation: omitting
+`description` for an `avc1.*` codec is what signals Annex-B to Chrome. View-only
+for now -- tapping the preview does not drive the device. One stream at a time; a new connection cancels
 whatever was previously streaming.
