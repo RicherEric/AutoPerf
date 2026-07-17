@@ -2,6 +2,12 @@
 
 AutoPerf v0.1 is an offline-first Android performance test core. It runs independently of a dashboard, samples Android devices through ADB, and persists metrics through a single batch writer into SQLite WAL.
 
+Works on both Windows and macOS -- everything talks to the phone through
+`adb`, which ships for both platforms. See [`docs/INSTALL.md`](docs/INSTALL.md)
+for full manual + automated (`scripts/setup.ps1` / `scripts/setup.sh`) setup
+instructions covering both. The quick start below assumes Windows; swap
+`.\venv\Scripts\python.exe` for `./venv/bin/python` on macOS.
+
 ## Quick start (Windows PowerShell)
 
 ```powershell
