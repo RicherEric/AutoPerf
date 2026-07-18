@@ -1,14 +1,18 @@
 import json
 import tempfile
+import threading
+import time
 from pathlib import Path
 from unittest.mock import patch
 
 from django.test import Client, SimpleTestCase, override_settings
 
+from autoperf.adb import AdbError
 from autoperf.models import Device, MetricSample
+from autoperf.runner import DeviceBusyError
 from autoperf.storage import BatchWriter, Storage
 from dashboard.services import trigger_run
-from dashboard.tasks import run_test_task
+from dashboard.tasks import DEVICE_BUSY_RETRY_COUNTDOWN, run_test_task
 
 
 class DashboardApiTests(SimpleTestCase):
@@ -35,6 +39,7 @@ class DashboardApiTests(SimpleTestCase):
     @patch("dashboard.views.AdbClient")
     def test_devices_refresh_registers_and_returns_devices(self, mock_adb_client):
         mock_adb_client.return_value.devices.return_value = [Device("S2", "device", "Galaxy", "galaxy")]
+        mock_adb_client.return_value.shell.side_effect = RuntimeError("device offline")
         response = self.client.post("/api/devices/refresh")
         self.assertEqual(response.status_code, 200)
         serials = {d["serial"] for d in response.json()}
@@ -122,7 +127,7 @@ class DashboardApiTests(SimpleTestCase):
         self.assertEqual(payload["tier"], "smoke")
         self.assertEqual(payload["count"], 4)
         self.assertEqual(len(payload["run_ids"]), 4)
-        self.assertEqual(mock_task.delay.call_count, 4)
+        self.assertEqual(mock_task.apply_async.call_count, 4)
 
     def test_run_detail_returns_404_for_missing_run(self):
         response = self.client.get("/api/runs/missing-run")
@@ -226,12 +231,16 @@ class DashboardApiTests(SimpleTestCase):
     def test_trigger_run_creates_pending_row_and_enqueues_celery_task(self, mock_task):
         run_id = trigger_run(self.storage, "S1", 30)
         self.assertEqual(self.storage.get_run(run_id)["status"], "pending")
-        mock_task.delay.assert_called_once_with(self.storage.path, "S1", 30, run_id, None)
+        mock_task.apply_async.assert_called_once_with(
+            args=[self.storage.path, "S1", 30, run_id, None], task_id=run_id
+        )
 
     @patch("dashboard.services.run_test_task")
     def test_trigger_run_passes_youtube_scenario_through(self, mock_task):
         run_id = trigger_run(self.storage, "S1", 30, "cold_start")
-        mock_task.delay.assert_called_once_with(self.storage.path, "S1", 30, run_id, "cold_start")
+        mock_task.apply_async.assert_called_once_with(
+            args=[self.storage.path, "S1", 30, run_id, "cold_start"], task_id=run_id
+        )
 
     @patch("dashboard.tasks.AdbClient")
     def test_run_test_task_executes_directly_and_completes(self, mock_adb_client):
@@ -245,6 +254,23 @@ class DashboardApiTests(SimpleTestCase):
         # the standard way to unit test a task's logic in isolation.
         run_test_task(str(self.db_path), "S1", 0.05, "run1")
         self.assertEqual(self.storage.get_run("run1")["status"], "completed")
+
+    @patch.object(run_test_task, "retry")
+    def test_run_test_task_retries_when_device_is_busy(self, mock_retry):
+        # A bound task's retry() always raises internally (Retry or
+        # MaxRetriesExceededError) -- the mock mirrors that so
+        # `raise self.retry(...)` in tasks.py behaves the same way here as
+        # it would against a real broker, without needing one.
+        mock_retry.side_effect = RuntimeError("retry requested")
+        self.storage.create_run("run1", "device")
+        self.storage.try_start_run("run1")
+        self.storage.create_run("run2", "device")
+        with self.assertRaises(RuntimeError):
+            run_test_task(str(self.db_path), "device", 0.05, "run2")
+        _, kwargs = mock_retry.call_args
+        self.assertIsInstance(kwargs["exc"], DeviceBusyError)
+        self.assertEqual(kwargs["countdown"], DEVICE_BUSY_RETRY_COUNTDOWN)
+        self.assertEqual(self.storage.get_run("run2")["status"], "pending")
 
     @patch("dashboard.tasks.AdbClient")
     def test_run_test_task_with_youtube_scenario_drives_adapter(self, mock_adb_client):
@@ -353,7 +379,11 @@ class DashboardApiTests(SimpleTestCase):
         self.assertIsNone(payload["pass_rate"])
 
     def test_stats_marks_run_within_threshold_as_pass(self):
-        self._complete_run_with_samples("baseline_run", "S1", [10.0])
+        # Baseline must share the candidate's scenario -- baselines are
+        # scoped per (device, scenario) precisely so a heavier/lighter
+        # scenario's naturally-different resource usage is never mistaken
+        # for a regression (see Storage.get_baseline's docstring).
+        self._complete_run_with_samples("baseline_run", "S1", [10.0], scenario="cold_start")
         self.storage.set_baseline("S1", "baseline_run")
         self._complete_run_with_samples("run1", "S1", [10.5], scenario="cold_start")
 
@@ -364,7 +394,7 @@ class DashboardApiTests(SimpleTestCase):
         self.assertEqual(payload["pass_rate"], 1.0)
 
     def test_stats_marks_regressed_run_as_fail(self):
-        self._complete_run_with_samples("baseline_run", "S1", [10.0])
+        self._complete_run_with_samples("baseline_run", "S1", [10.0], scenario="cold_start")
         self.storage.set_baseline("S1", "baseline_run")
         self._complete_run_with_samples("run1", "S1", [50.0], scenario="cold_start")
 
@@ -374,7 +404,7 @@ class DashboardApiTests(SimpleTestCase):
         self.assertEqual(payload["passed"], 1)  # the baseline run itself still passes
 
     def test_stats_explains_why_a_run_failed(self):
-        self._complete_run_with_samples("baseline_run", "S1", [10.0])
+        self._complete_run_with_samples("baseline_run", "S1", [10.0], scenario="cold_start")
         self.storage.set_baseline("S1", "baseline_run")
         self._complete_run_with_samples("run1", "S1", [50.0], scenario="cold_start")
 
@@ -391,16 +421,36 @@ class DashboardApiTests(SimpleTestCase):
         self.assertEqual(passing_run["regressed_metrics"], [])
 
     def test_stats_groups_by_scenario(self):
-        self._complete_run_with_samples("baseline_run", "S1", [10.0])
-        self.storage.set_baseline("S1", "baseline_run")
+        # Two scenarios each need their own scenario-scoped baseline.
+        self._complete_run_with_samples("baseline_cold", "S1", [10.0], scenario="cold_start")
+        self.storage.set_baseline("S1", "baseline_cold")
+        self._complete_run_with_samples("baseline_like", "S1", [40.0], scenario="like_video")
+        self.storage.set_baseline("S1", "baseline_like")
         self._complete_run_with_samples("run1", "S1", [10.5], scenario="cold_start")
         self._complete_run_with_samples("run2", "S1", [50.0], scenario="like_video")
 
         response = self.client.get("/api/stats")
         payload = response.json()
         by_scenario = {entry["scenario"]: entry for entry in payload["by_scenario"]}
-        self.assertEqual(by_scenario["cold_start"]["pass"], 1)
-        self.assertEqual(by_scenario["like_video"]["fail"], 1)
+        self.assertEqual(by_scenario["cold_start"]["pass"], 2)  # baseline_cold + run1
+        self.assertEqual(by_scenario["like_video"]["fail"], 1)  # run2 regressed vs baseline_like
+
+    def test_baseline_does_not_leak_across_different_scenarios(self):
+        # Regression test for a real bug: a device's baseline used to be
+        # global, so a heavier scenario compared against a lighter
+        # scenario's baseline produced a false "fail" purely because it does
+        # more on-screen work, not because anything actually regressed.
+        self._complete_run_with_samples("baseline_run", "S1", [10.0], scenario="cold_start")
+        self.storage.set_baseline("S1", "baseline_run")
+        self._complete_run_with_samples("run1", "S1", [500.0], scenario="multi_video_session")
+
+        response = self.client.get("/api/stats")
+        payload = response.json()
+        run1_verdict = next(r for r in payload["runs"] if r["run_id"] == "run1")
+        self.assertEqual(run1_verdict["verdict"], "no_baseline")
+
+        comparison_response = self.client.get("/api/runs/run1/comparison")
+        self.assertEqual(comparison_response.status_code, 404)
 
     def test_stats_includes_metric_trend(self):
         self._complete_run_with_samples("run1", "S1", [10.0])
@@ -415,3 +465,203 @@ class DashboardApiTests(SimpleTestCase):
         response = self.client.get("/api/stats?limit=1")
         payload = response.json()
         self.assertEqual(payload["total_runs"], 1)
+
+    def test_stats_filters_by_device_query_param(self):
+        self._complete_run_with_samples("run1", "S1", [10.0])
+        self._complete_run_with_samples("run2", "S2", [20.0])
+        response = self.client.get("/api/stats?device=S1")
+        payload = response.json()
+        self.assertEqual(payload["total_runs"], 1)
+        self.assertEqual(payload["runs"][0]["device_serial"], "S1")
+
+    def test_run_cancel_returns_404_for_missing_run(self):
+        response = self.client.post("/api/runs/missing-run/cancel")
+        self.assertEqual(response.status_code, 404)
+
+    def test_run_cancel_rejects_already_terminal_run(self):
+        self.storage.create_run("run1", "S1")
+        self.storage.update_run("run1", "completed")
+        response = self.client.post("/api/runs/run1/cancel")
+        self.assertEqual(response.status_code, 400)
+
+    @patch("dashboard.services.celery_app")
+    def test_run_cancel_revokes_and_marks_interrupted_when_pending(self, mock_celery_app):
+        # revoke() is fired in a background thread and must never block this
+        # response -- see _revoke_in_background's docstring for why (an
+        # empirically observed real hang on a busy --pool=solo worker).
+        revoked = threading.Event()
+        mock_celery_app.control.revoke.side_effect = lambda *a, **k: revoked.set()
+
+        self.storage.create_run("run1", "S1")
+        response = self.client.post("/api/runs/run1/cancel")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "interrupted")
+        self.assertEqual(self.storage.get_run("run1")["status"], "interrupted")
+
+        self.assertTrue(revoked.wait(timeout=1), "revoke() was never called in the background")
+        mock_celery_app.control.revoke.assert_called_once_with("run1")
+
+    @patch("dashboard.services.celery_app")
+    def test_run_cancel_returns_immediately_even_if_revoke_hangs(self, mock_celery_app):
+        # Directly guards against the regression this fix addresses: even if
+        # the broker round-trip inside revoke() blocks for a long time, the
+        # HTTP response must come back right away.
+        release = threading.Event()
+        mock_celery_app.control.revoke.side_effect = lambda *a, **k: release.wait(timeout=5)
+
+        self.storage.create_run("run1", "S1")
+        started = time.monotonic()
+        response = self.client.post("/api/runs/run1/cancel")
+        elapsed = time.monotonic() - started
+
+        self.assertEqual(response.status_code, 200)
+        self.assertLess(elapsed, 1.0)
+        release.set()
+
+    def test_run_cancel_sets_cancel_flag_when_running(self):
+        self.storage.create_run("run1", "S1")
+        self.storage.update_run("run1", "running")
+        response = self.client.post("/api/runs/run1/cancel")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "cancelling")
+        self.assertEqual(self.storage.get_run("run1")["cancel_requested"], 1)
+        # still running -- TestRunner's own loop is responsible for winding down
+        self.assertEqual(self.storage.get_run("run1")["status"], "running")
+
+    @patch("dashboard.views.AdbClient")
+    def test_devices_connect_requires_address(self, mock_adb_client):
+        response = self.client.post("/api/devices/connect", data=json.dumps({}), content_type="application/json")
+        self.assertEqual(response.status_code, 400)
+
+    @patch("dashboard.views.AdbClient")
+    def test_devices_connect_success_refreshes_device_list(self, mock_adb_client):
+        mock_adb_client.return_value.connect.return_value = "connected to 192.168.1.50:5555"
+        mock_adb_client.return_value.devices.return_value = [Device("192.168.1.50:5555", "device", "Pixel", "pixel")]
+        mock_adb_client.return_value.shell.side_effect = RuntimeError("skip enrichment in this test")
+        response = self.client.post(
+            "/api/devices/connect",
+            data=json.dumps({"address": "192.168.1.50:5555"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertIn("connected to", payload["message"])
+        self.assertEqual({d["serial"] for d in payload["devices"]}, {"192.168.1.50:5555"})
+
+    @patch("dashboard.views.AdbClient")
+    def test_devices_connect_reports_adb_failure(self, mock_adb_client):
+        mock_adb_client.return_value.connect.side_effect = AdbError("cannot connect to 1.2.3.4:5555")
+        response = self.client.post(
+            "/api/devices/connect", data=json.dumps({"address": "1.2.3.4:5555"}), content_type="application/json"
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("cannot connect", response.json()["error"])
+
+    @patch("dashboard.views.AdbClient")
+    def test_devices_pair_requires_address_and_code(self, mock_adb_client):
+        response = self.client.post(
+            "/api/devices/pair", data=json.dumps({"address": "192.168.1.50:37251"}), content_type="application/json"
+        )
+        self.assertEqual(response.status_code, 400)
+
+    @patch("dashboard.views.AdbClient")
+    def test_devices_pair_success(self, mock_adb_client):
+        mock_adb_client.return_value.pair.return_value = "Successfully paired to 192.168.1.50:37251"
+        response = self.client.post(
+            "/api/devices/pair",
+            data=json.dumps({"address": "192.168.1.50:37251", "code": "123456"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("paired", response.json()["message"].lower())
+
+    @patch("dashboard.views.AdbClient")
+    def test_devices_pair_reports_failure(self, mock_adb_client):
+        mock_adb_client.return_value.pair.side_effect = AdbError("Failed: wrong pairing code")
+        response = self.client.post(
+            "/api/devices/pair",
+            data=json.dumps({"address": "192.168.1.50:37251", "code": "000000"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_device_nickname_sets_and_persists(self):
+        self.storage.register_device(Device("S1", "device", "Pixel", "pixel"))
+        response = self.client.post(
+            "/api/devices/S1/nickname", data=json.dumps({"nickname": "Alice's phone"}), content_type="application/json"
+        )
+        self.assertEqual(response.status_code, 200)
+        devices = {d["serial"]: d for d in self.client.get("/api/devices").json()}
+        self.assertEqual(devices["S1"]["nickname"], "Alice's phone")
+
+    @patch("dashboard.views.AdbClient")
+    def test_devices_refresh_labels_wireless_connection_from_serial_shape(self, mock_adb_client):
+        mock_adb_client.return_value.devices.return_value = [Device("192.168.1.50:5555", "device", "Pixel", "pixel")]
+        mock_adb_client.return_value.shell.side_effect = RuntimeError("skip enrichment in this test")
+        response = self.client.post("/api/devices/refresh")
+        payload = response.json()
+        self.assertEqual(payload[0]["connection"], "wifi")
+
+    @patch("dashboard.views.AdbClient")
+    def test_devices_refresh_parses_extended_identity_info(self, mock_adb_client):
+        # Realistic mocked output shaped like real `adb shell` responses,
+        # captured against a real Galaxy A55 during development.
+        mock_adb_client.return_value.devices.return_value = [Device("S1", "device", "SM_A5560", "a55xzh")]
+        mock_adb_client.return_value.shell.side_effect = lambda serial, command, timeout=10: {
+            "getprop": (
+                "[ro.build.version.release]: [14]\n"
+                "[ro.product.manufacturer]: [samsung]\n"
+                "[ro.product.brand]: [samsung]\n"
+                "[ro.build.version.sdk]: [34]\n"
+                "[ro.build.display.id]: [UP1A.231005.007.A5560ZHS7AYC6]\n"
+                "[ro.product.cpu.abi]: [arm64-v8a]\n"
+            ),
+            "dumpsys battery": " level: 79\n temperature: 300\n",
+            "settings get global device_name": "Galaxy A55 5G\n",
+            "dumpsys package com.android.chrome": "    versionName=150.0.7871.114\n",
+            "ip -f inet addr show wlan0": "    inet 192.168.1.217/24 brd 192.168.1.255 scope global wlan0\n",
+        }[command]
+
+        response = self.client.post("/api/devices/refresh")
+        payload = response.json()[0]
+        self.assertEqual(payload["android_version"], "14")
+        self.assertEqual(payload["nickname"], "Galaxy A55 5G")
+        self.assertEqual(payload["manufacturer"], "samsung")
+        self.assertEqual(payload["brand"], "samsung")
+        self.assertEqual(payload["sdk_version"], "34")
+        self.assertEqual(payload["build_id"], "UP1A.231005.007.A5560ZHS7AYC6")
+        self.assertEqual(payload["cpu_abi"], "arm64-v8a")
+        self.assertEqual(payload["chrome_version"], "150.0.7871.114")
+        self.assertEqual(payload["wifi_ip"], "192.168.1.217")
+        self.assertIn("Android 14", payload["user_agent"])
+        self.assertIn("SM_A5560", payload["user_agent"])
+        self.assertIn("Chrome/150.0.7871.114", payload["user_agent"])
+
+    @patch("dashboard.views.AdbClient")
+    def test_devices_refresh_omits_user_agent_when_build_id_unavailable(self, mock_adb_client):
+        mock_adb_client.return_value.devices.return_value = [Device("S1", "device", "Pixel", "pixel")]
+        mock_adb_client.return_value.shell.side_effect = RuntimeError("device unresponsive")
+
+        response = self.client.post("/api/devices/refresh")
+        payload = response.json()[0]
+        self.assertIsNone(payload["user_agent"])
+        self.assertIsNone(payload["manufacturer"])
+
+    @patch("dashboard.views.AdbClient")
+    def test_device_nickname_survives_a_later_refresh(self, mock_adb_client):
+        # register_device's COALESCE keeps a manually-set nickname even when
+        # a fresh refresh's auto-detected device_name would otherwise fill it.
+        self.storage.register_device(Device("S1", "device", "Pixel", "pixel"))
+        self.storage.set_device_nickname("S1", "Eric's phone")
+
+        mock_adb_client.return_value.devices.return_value = [Device("S1", "device", "Pixel", "pixel")]
+        mock_adb_client.return_value.shell.side_effect = lambda serial, command, timeout=10: {
+            "getprop": "",
+            "dumpsys battery": " level: 50\n",
+            "settings get global device_name": "Some Other Name\n",
+            "dumpsys package com.android.chrome": "",
+            "ip -f inet addr show wlan0": "",
+        }[command]
+
+        response = self.client.post("/api/devices/refresh")
+        self.assertEqual(response.json()[0]["nickname"], "Eric's phone")

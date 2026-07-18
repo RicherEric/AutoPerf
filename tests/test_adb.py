@@ -71,6 +71,45 @@ class AdbClientTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             AdbClient().exec_out_args("bad;serial", "screencap -p")
 
+    def test_connect_rejects_malformed_address_without_running_subprocess(self):
+        with patch("autoperf.adb.subprocess.run") as run:
+            with self.assertRaises(ValueError):
+                AdbClient().connect("not-an-address")
+            run.assert_not_called()
+
+    def test_connect_succeeds_on_connected_to_output(self):
+        with patch("autoperf.adb.subprocess.run", return_value=_completed(stdout="connected to 192.168.1.50:5555\n")):
+            result = AdbClient().connect("192.168.1.50:5555")
+        self.assertIn("connected to", result)
+
+    def test_connect_raises_when_adb_reports_failure_despite_exit_zero(self):
+        # `adb connect` exits 0 even when it can't actually connect -- failure
+        # must be detected from stdout content, not the return code.
+        with patch("autoperf.adb.subprocess.run", return_value=_completed(stdout="failed to connect to 1.2.3.4:5555\n")):
+            with self.assertRaises(AdbError):
+                AdbClient().connect("1.2.3.4:5555")
+
+    def test_pair_rejects_malformed_address_or_code(self):
+        with patch("autoperf.adb.subprocess.run") as run:
+            with self.assertRaises(ValueError):
+                AdbClient().pair("not-an-address", "123456")
+            with self.assertRaises(ValueError):
+                AdbClient().pair("192.168.1.50:37251", "12")
+            run.assert_not_called()
+
+    def test_pair_succeeds_on_successfully_paired_output(self):
+        with patch(
+            "autoperf.adb.subprocess.run",
+            return_value=_completed(stdout="Successfully paired to 192.168.1.50:37251\n"),
+        ):
+            result = AdbClient().pair("192.168.1.50:37251", "123456")
+        self.assertIn("paired", result.lower())
+
+    def test_pair_raises_when_adb_reports_failure_despite_exit_zero(self):
+        with patch("autoperf.adb.subprocess.run", return_value=_completed(stdout="Failed: wrong pairing code\n")):
+            with self.assertRaises(AdbError):
+                AdbClient().pair("192.168.1.50:37251", "000000")
+
 
 if __name__ == "__main__":
     unittest.main()

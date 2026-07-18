@@ -82,8 +82,7 @@ adb devices
 docker run -d --name autoperf-redis -p 6379:6379 redis:7-alpine
 .\venv\Scripts\python.exe webapp\manage.py runserver 8000
 # (new terminal)
-cd webapp
-..\venv\Scripts\celery.exe -A config worker --pool=solo -l info
+.\venv\Scripts\python.exe scripts\start-worker.py
 # (new terminal)
 cd webapp\frontend
 npm install
@@ -107,21 +106,21 @@ docker run -d --name autoperf-redis -p 6379:6379 redis:7-alpine
 
 ./venv/bin/python webapp/manage.py runserver 8000
 # (new terminal)
-cd webapp
-../venv/bin/celery -A config worker -l info
+./venv/bin/python scripts/start-worker.py
 # (new terminal)
 cd webapp/frontend
 npm install
 npm run dev
 ```
 
-Note the Celery command differs from Windows: `--pool=solo` is only
-*required* on Windows, which has no `fork()` and therefore no working
-`prefork` pool. On macOS the default `prefork` pool works fine and is
-faster under load; `--pool=solo` also still works if you prefer it (see
-`webapp/dashboard/tasks.py`'s docstring for why `--pool=solo` exists at
-all -- it's about `TestRunner.run()`'s SIGINT handling needing the
-worker's main thread, not about Windows specifically).
+Note `scripts/start-worker.py` runs a different Celery command here than
+on Windows: `--pool=solo` is only *required* on Windows, which has no
+`fork()` and therefore no working `prefork` pool. On macOS the default
+`prefork` pool works fine and is faster under load (see "Sizing worker
+parallelism" below for how the two differ); `--pool=solo` also still works
+if you prefer it directly (see `webapp/dashboard/tasks.py`'s docstring for
+why `--pool=solo` exists at all -- it's about `TestRunner.run()`'s SIGINT
+handling needing the worker's main thread, not about Windows specifically).
 
 ## Manual steps (WSL / Ubuntu, bash/zsh)
 
@@ -166,8 +165,7 @@ sudo service redis-server start   # WSL usually has no systemd; `service` works 
 
 ./venv/bin/python webapp/manage.py runserver 8000
 # (new terminal)
-cd webapp
-../venv/bin/celery -A config worker -l info
+./venv/bin/python scripts/start-worker.py
 # (new terminal)
 cd webapp/frontend
 npm install
@@ -176,6 +174,35 @@ npm run dev
 
 Like macOS, `--pool=solo` is not required here -- the default `prefork`
 pool works since WSL is a real Linux kernel underneath.
+
+## Sizing worker parallelism
+
+`scripts/start-worker.py` (run with the venv's own Python, same one you
+installed AutoPerf into) decides how many tasks can run at once from
+`min(cpu_count, connected_adb_device_count)` -- no point starting 8 workers
+on an 8-core laptop with only 2 phones plugged in. If zero devices are
+connected when it starts, it defaults to 1 and tells you to either plug a
+device in and re-run, or pass `--concurrency N` to force a number.
+
+- **macOS/Linux/WSL**: one `celery -A config worker --concurrency=N -l info`
+  process -- `prefork`'s own concurrency already parallelizes across N
+  forked children.
+- **Windows**: `--pool=solo` can't take an internal concurrency value, so
+  N>1 launches N separate `--pool=solo -n workerK@%h` processes instead,
+  supervised by the script (Ctrl+C stops all of them).
+
+Either way, two runs can never race against the *same* device even with
+N>1: `TestRunner.run()` atomically claims its device before starting
+(`Storage.try_start_run()`), and a run queued for a device that's already
+busy just retries every couple of seconds until it's free, the same way it
+always implicitly waited behind AutoPerf's old single-worker queue --
+`scripts/start-worker.py` only changes how many *different* devices can be
+tested at once, not the one-run-per-device-at-a-time guarantee.
+
+Override the auto-detected number any time with:
+```
+python scripts/start-worker.py --concurrency 4
+```
 
 ## Verifying the install
 

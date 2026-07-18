@@ -82,6 +82,53 @@ class StorageTests(unittest.TestCase):
             self.assertEqual(run["status"], "completed")
             self.assertIsNotNone(run["finished_at"])
 
+    def test_try_start_run_succeeds_when_device_is_free(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = Storage(Path(directory) / "db.sqlite")
+            storage.initialize()
+            storage.create_run("run1", "device")
+            self.assertTrue(storage.try_start_run("run1"))
+            self.assertEqual(storage.get_run("run1")["status"], "running")
+
+    def test_try_start_run_fails_while_another_run_on_same_device_is_running(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = Storage(Path(directory) / "db.sqlite")
+            storage.initialize()
+            storage.create_run("run1", "device")
+            storage.create_run("run2", "device")
+            self.assertTrue(storage.try_start_run("run1"))
+            self.assertFalse(storage.try_start_run("run2"))
+            self.assertEqual(storage.get_run("run2")["status"], "pending")
+
+    def test_try_start_run_succeeds_once_the_other_run_is_no_longer_running(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = Storage(Path(directory) / "db.sqlite")
+            storage.initialize()
+            storage.create_run("run1", "device")
+            storage.create_run("run2", "device")
+            self.assertTrue(storage.try_start_run("run1"))
+            self.assertFalse(storage.try_start_run("run2"))
+            storage.update_run("run1", RunStatus.COMPLETED)
+            self.assertTrue(storage.try_start_run("run2"))
+
+    def test_try_start_run_does_not_block_different_devices(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = Storage(Path(directory) / "db.sqlite")
+            storage.initialize()
+            storage.create_run("run1", "deviceA")
+            storage.create_run("run2", "deviceB")
+            self.assertTrue(storage.try_start_run("run1"))
+            self.assertTrue(storage.try_start_run("run2"))
+
+    def test_try_start_run_allows_resuming_the_same_run_id(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = Storage(Path(directory) / "db.sqlite")
+            storage.initialize()
+            storage.create_run("run1", "device")
+            self.assertTrue(storage.try_start_run("run1"))
+            storage.update_run("run1", RunStatus.INTERRUPTED)
+            self.assertTrue(storage.try_start_run("run1"))
+
     def test_batch_writer_flushes_all_items_after_close(self):
         with tempfile.TemporaryDirectory() as directory:
             storage = Storage(Path(directory) / "db.sqlite")
@@ -114,6 +161,27 @@ class StorageTests(unittest.TestCase):
             serials = {row["serial"] for row in storage.list_devices()}
             self.assertEqual(serials, {"S1", "S2"})
 
+    def test_register_device_merges_extra_info_into_flat_dict(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = Storage(Path(directory) / "db.sqlite")
+            storage.initialize()
+            storage.register_device(
+                Device("S1", "device", "Pixel", "pixel"),
+                extra_info={"manufacturer": "Google", "sdk_version": "34"},
+            )
+            device = storage.list_devices()[0]
+            self.assertEqual(device["manufacturer"], "Google")
+            self.assertEqual(device["sdk_version"], "34")
+            self.assertNotIn("extra_info", device)
+
+    def test_register_device_without_extra_info_still_lists_cleanly(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = Storage(Path(directory) / "db.sqlite")
+            storage.initialize()
+            storage.register_device(Device("S1", "device", "Pixel", "pixel"))
+            device = storage.list_devices()[0]
+            self.assertNotIn("extra_info", device)
+
     def test_list_runs_orders_most_recent_first(self):
         with tempfile.TemporaryDirectory() as directory:
             storage = Storage(Path(directory) / "db.sqlite")
@@ -130,6 +198,15 @@ class StorageTests(unittest.TestCase):
             storage.create_run("run1", "device")
             storage.create_run("run2", "device")
             self.assertEqual(len(storage.list_runs(limit=1)), 1)
+
+    def test_list_runs_filters_by_device_serial(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = Storage(Path(directory) / "db.sqlite")
+            storage.initialize()
+            storage.create_run("run1", "S1")
+            storage.create_run("run2", "S2")
+            runs = storage.list_runs(device_serial="S1")
+            self.assertEqual([r["id"] for r in runs], ["run1"])
 
     def test_list_running_runs_returns_only_running_status(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -207,6 +284,30 @@ class StorageTests(unittest.TestCase):
             storage.set_baseline("S1", "run1")
             storage.set_baseline("S1", "run2")
             self.assertEqual(storage.get_baseline("S1")["run_id"], "run2")
+
+    def test_baselines_are_scoped_per_scenario_not_shared_across_them(self):
+        # A device's baseline is scoped to a specific scenario -- setting a
+        # baseline for "cold_start" must not answer a lookup for a
+        # completely different scenario like "multi_video_session", since a
+        # heavier scenario naturally uses more resources with no real
+        # regression involved.
+        with tempfile.TemporaryDirectory() as directory:
+            storage = Storage(Path(directory) / "db.sqlite")
+            storage.initialize()
+            storage.create_run("run1", "S1", youtube_scenario="cold_start")
+            storage.set_baseline("S1", "run1")
+
+            self.assertEqual(storage.get_baseline("S1", "cold_start")["run_id"], "run1")
+            self.assertIsNone(storage.get_baseline("S1", "multi_video_session"))
+            self.assertIsNone(storage.get_baseline("S1"))  # the plain/no-scenario baseline
+
+    def test_baseline_scenario_is_derived_from_the_run_not_the_caller(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = Storage(Path(directory) / "db.sqlite")
+            storage.initialize()
+            storage.create_run("run1", "S1", youtube_scenario="like_video")
+            storage.set_baseline("S1", "run1")
+            self.assertEqual(storage.get_baseline("S1", "like_video")["run_id"], "run1")
 
 
 if __name__ == "__main__":

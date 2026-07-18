@@ -72,6 +72,22 @@ class CoreTests(unittest.TestCase):
             self.assertIn("memory.used", names)
             self.assertIn("collector_timeout", events)
 
+    def test_cancel_requested_flag_stops_run_before_full_duration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = Storage(Path(directory) / "cancel.db")
+            storage.initialize()
+            run_id = "cancel-me"
+            storage.create_run(run_id, "device")
+            storage.request_cancel(run_id)
+            started = time.monotonic()
+            result_id = Runner(
+                storage, FakeAdb(), [CpuCollector(0.01)], cancel_check_interval=0.02,
+            ).run("device", 5.0, run_id)
+            elapsed = time.monotonic() - started
+            self.assertEqual(result_id, run_id)
+            self.assertLess(elapsed, 1.0)
+            self.assertEqual(storage.get_run(run_id)["status"], "interrupted")
+
 
 if __name__ == "__main__":
     unittest.main()

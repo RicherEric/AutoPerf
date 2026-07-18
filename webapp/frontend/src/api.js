@@ -15,6 +15,30 @@ export function refreshDevices() {
   return request('/devices/refresh', { method: 'POST' })
 }
 
+export function connectDevice(address) {
+  return request('/devices/connect', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ address }),
+  })
+}
+
+export function pairDevice(address, code) {
+  return request('/devices/pair', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ address, code }),
+  })
+}
+
+export function setDeviceNickname(serial, nickname) {
+  return request(`/devices/${serial}/nickname`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ nickname }),
+  })
+}
+
 export function listRuns() {
   return request('/runs')
 }
@@ -43,8 +67,9 @@ export function getQueueStatus() {
   return request('/queue')
 }
 
-export function getStats(limit = 50) {
-  return request(`/stats?limit=${limit}`)
+export function getStats(limit = 50, deviceSerial = '') {
+  const deviceParam = deviceSerial ? `&device=${encodeURIComponent(deviceSerial)}` : ''
+  return request(`/stats?limit=${limit}${deviceParam}`)
 }
 
 export function getRun(runId) {
@@ -53,6 +78,10 @@ export function getRun(runId) {
 
 export function deleteRun(runId) {
   return request(`/runs/${runId}`, { method: 'DELETE' })
+}
+
+export function cancelRun(runId) {
+  return request(`/runs/${runId}/cancel`, { method: 'POST' })
 }
 
 export function listSamples(runId, sinceId = 0) {

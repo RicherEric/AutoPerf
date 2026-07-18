@@ -1,10 +1,12 @@
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
-from autoperf.adapters import Adapter, AndroidAdapter, ScenarioStep
+from autoperf.adapters import HOME, Adapter, AndroidAdapter, ScenarioStep
 from autoperf.collectors import Collector, CpuCollector
-from autoperf.runner import TestRunner
+from autoperf.runner import DeviceBusyError, TestRunner
 from autoperf.storage import Storage
 
 
@@ -47,6 +49,15 @@ class BoomAdapter(Adapter):
         raise NotImplementedError
 
 
+class RecordingAdapter(AndroidAdapter):
+    def __init__(self):
+        super().__init__()
+        self.key_events = []
+
+    def key_event(self, adb, serial, keycode):
+        self.key_events.append(keycode)
+
+
 class RunnerTests(unittest.TestCase):
     def test_scenario_without_adapter_raises(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -74,6 +85,17 @@ class RunnerTests(unittest.TestCase):
             runner = TestRunner(storage, FakeAdb(), [CpuCollector(0.01)])
             with self.assertRaises(ValueError):
                 runner.run("deviceB", 0.02, run_id="run1")
+
+    def test_run_raises_device_busy_when_another_run_on_same_device_is_running(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = Storage(Path(directory) / "db.sqlite")
+            storage.initialize()
+            storage.create_run("run1", "device")
+            storage.try_start_run("run1")
+            storage.create_run("run2", "device")
+            runner = TestRunner(storage, FakeAdb(), [CpuCollector(0.01)])
+            with self.assertRaises(DeviceBusyError):
+                runner.run("device", 0.02, run_id="run2")
 
     def test_resume_with_same_device_reuses_run(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -141,6 +163,53 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(row[0], "adapter_action")
             self.assertIn('"action": "launch_app"', row[1])
             self.assertIn('"package": "com.example.app"', row[1])
+
+    def test_cancelled_mid_run_presses_home_before_marking_interrupted(self):
+        # A cancelled scenario run leaves whatever app was mid-action on
+        # screen (e.g. a video still playing) -- it must return to the home
+        # screen so the device is clean for whoever runs the next test.
+        with tempfile.TemporaryDirectory() as directory:
+            storage = Storage(Path(directory) / "db.sqlite")
+            storage.initialize()
+            run_id = "cancel-me"
+            adapter = RecordingAdapter()
+
+            def cancel_soon():
+                time.sleep(0.05)
+                storage.request_cancel(run_id)
+
+            threading.Thread(target=cancel_soon, daemon=True).start()
+            TestRunner(
+                storage, FakeAdb(), [CpuCollector(0.01)], adapter=adapter, cancel_check_interval=0.02,
+            ).run("device", 5.0, run_id)
+
+            self.assertIn(HOME, adapter.key_events)
+            self.assertEqual(storage.get_run(run_id)["status"], "interrupted")
+
+    def test_completed_run_also_presses_home(self):
+        # A normally-completed scenario run still leaves whatever app was
+        # driven (e.g. a video mid-playback) on screen -- every run, not
+        # just a cancelled one, should end with the device back at home.
+        with tempfile.TemporaryDirectory() as directory:
+            storage = Storage(Path(directory) / "db.sqlite")
+            storage.initialize()
+            adapter = RecordingAdapter()
+            scenario = [ScenarioStep(0.0, "launch_app", {"package": "com.example.app"})]
+            run_id = TestRunner(
+                storage, FakeAdb(), [CpuCollector(0.01)], adapter=adapter, scenario=scenario
+            ).run("device", 0.05)
+
+            self.assertIn(HOME, adapter.key_events)
+            self.assertEqual(storage.get_run(run_id)["status"], "completed")
+
+    def test_run_without_adapter_never_presses_home(self):
+        # A plain (non-scenario) run has no adapter at all -- key_event must
+        # never be reached for it.
+        with tempfile.TemporaryDirectory() as directory:
+            storage = Storage(Path(directory) / "db.sqlite")
+            storage.initialize()
+            run_id = TestRunner(storage, FakeAdb(), [CpuCollector(0.01)]).run("device", 0.05)
+            self.assertEqual(storage.get_run(run_id)["status"], "completed")
 
 
 if __name__ == "__main__":

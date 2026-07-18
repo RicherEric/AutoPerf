@@ -7,11 +7,19 @@ from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
-from autoperf.adb import AdbClient
+from autoperf.adb import AdbClient, AdbError
 from autoperf.analyzer import compare, compute_stats
 from autoperf.scenarios import youtube as youtube_scenarios
 
-from .services import get_dashboard_stats, get_queue_status, get_storage, trigger_run, trigger_suite
+from .services import (
+    cancel_run,
+    get_dashboard_stats,
+    get_queue_status,
+    get_storage,
+    refresh_devices,
+    trigger_run,
+    trigger_suite,
+)
 
 
 @require_http_methods(["GET"])
@@ -22,11 +30,68 @@ def devices(request):
 @csrf_exempt
 @require_http_methods(["POST"])
 def devices_refresh(request):
+    return JsonResponse(refresh_devices(get_storage(), AdbClient()), safe=False)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def devices_connect(request):
+    """Connects to a device over adb-over-WiFi (classroom demo: students join
+    via WiFi instead of USB) and returns the refreshed device list."""
+    try:
+        body = json.loads(request.body or b"{}")
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "invalid JSON body"}, status=400)
+
+    address = body.get("address")
+    if not address:
+        return JsonResponse({"error": "address is required, e.g. 192.168.1.50:5555"}, status=400)
+
+    try:
+        message = AdbClient().connect(address)
+    except (ValueError, AdbError) as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
+
+    return JsonResponse({"message": message, "devices": refresh_devices(get_storage(), AdbClient())})
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def devices_pair(request):
+    """One-time adb-over-WiFi pairing step (Android 11+ "Wireless debugging
+    -> Pair device with pairing code"), so a student's phone never needs a
+    USB cable at all -- see AdbClient.pair()'s docstring for why this is a
+    separate step (and a separate port) from devices_connect above."""
+    try:
+        body = json.loads(request.body or b"{}")
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "invalid JSON body"}, status=400)
+
+    address = body.get("address")
+    code = body.get("code")
+    if not address or not code:
+        return JsonResponse({"error": "address and code are required"}, status=400)
+
+    try:
+        message = AdbClient().pair(address, code)
+    except (ValueError, AdbError) as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
+
+    return JsonResponse({"message": message})
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def device_nickname(request, serial):
+    try:
+        body = json.loads(request.body or b"{}")
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "invalid JSON body"}, status=400)
+
+    nickname = (body.get("nickname") or "").strip()
     storage = get_storage()
-    found = AdbClient().devices()
-    for device in found:
-        storage.register_device(device)
-    return JsonResponse(storage.list_devices(), safe=False)
+    storage.set_device_nickname(serial, nickname)
+    return JsonResponse({"serial": serial, "nickname": nickname})
 
 
 @csrf_exempt
@@ -64,7 +129,7 @@ def run_detail(request, run_id):
     if request.method == "DELETE":
         if run["status"] in ("pending", "running"):
             return JsonResponse({"error": f"run is still {run['status']} -- cannot delete an in-progress run"}, status=400)
-        baseline_row = storage.get_baseline(run["device_serial"])
+        baseline_row = storage.get_baseline(run["device_serial"], run["youtube_scenario"])
         if baseline_row is not None and baseline_row["run_id"] == run_id:
             return JsonResponse(
                 {"error": "this run is the current baseline for its device -- set a different baseline first"},
@@ -74,6 +139,18 @@ def run_detail(request, run_id):
         return JsonResponse({"deleted": run_id})
 
     return JsonResponse(run)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def run_cancel(request, run_id):
+    try:
+        result = cancel_run(get_storage(), run_id)
+    except ValueError as exc:
+        message = str(exc)
+        status = 404 if message == "run not found" else 400
+        return JsonResponse({"error": message}, status=status)
+    return JsonResponse(result)
 
 
 @require_http_methods(["GET"])
@@ -92,7 +169,9 @@ def run_samples(request, run_id):
 def baseline(request, serial):
     storage = get_storage()
     if request.method == "GET":
-        result = storage.get_baseline(serial)
+        # Baselines are scenario-scoped (see Storage.get_baseline's
+        # docstring) -- omit ?scenario= for the plain/no-scenario baseline.
+        result = storage.get_baseline(serial, request.GET.get("scenario"))
         if result is None:
             return JsonResponse({"error": "no baseline set"}, status=404)
         return JsonResponse(result)
@@ -112,7 +191,7 @@ def baseline(request, serial):
         return JsonResponse({"error": f"run belongs to device {run['device_serial']}, not {serial}"}, status=400)
 
     storage.set_baseline(serial, run_id)
-    return JsonResponse(storage.get_baseline(serial))
+    return JsonResponse(storage.get_baseline(serial, run["youtube_scenario"]))
 
 
 @require_http_methods(["GET"])
@@ -151,7 +230,8 @@ def queue_status(request):
 @require_http_methods(["GET"])
 def stats(request):
     recent_limit = int(request.GET.get("limit", 50))
-    return JsonResponse(get_dashboard_stats(get_storage(), recent_limit=recent_limit))
+    device_serial = request.GET.get("device") or None
+    return JsonResponse(get_dashboard_stats(get_storage(), recent_limit=recent_limit, device_serial=device_serial))
 
 
 @require_http_methods(["GET"])
@@ -160,9 +240,12 @@ def run_comparison(request, run_id):
     run = storage.get_run(run_id)
     if run is None:
         return JsonResponse({"error": "not found"}, status=404)
-    baseline_row = storage.get_baseline(run["device_serial"])
+    baseline_row = storage.get_baseline(run["device_serial"], run["youtube_scenario"])
     if baseline_row is None:
-        return JsonResponse({"error": f"no baseline set for device {run['device_serial']}"}, status=404)
+        scenario_desc = f"scenario {run['youtube_scenario']!r}" if run["youtube_scenario"] else "plain runs"
+        return JsonResponse(
+            {"error": f"no baseline set for device {run['device_serial']} ({scenario_desc})"}, status=404
+        )
 
     threshold_pct = float(request.GET.get("threshold", 20.0))
     baseline_stats = compute_stats(storage.list_samples(baseline_row["run_id"], limit=100_000))

@@ -29,7 +29,30 @@ async def _spawn(argv: list[str]) -> asyncio.subprocess.Process:
     )
 
 
+async def _kill_stale_screenrecord(adb: AdbClient, serial: str) -> None:
+    """Terminating the local `adb exec-out screenrecord` client process does
+    not reliably kill the *remote* on-device screenrecord process -- adb
+    doesn't always propagate that termination over the transport. A leftover
+    remote process holds Android's single screen-capture slot, so the next
+    stream attempt gets zero output and silently times out client-side (the
+    "no video frame arrived" fallback) despite streaming working moments
+    earlier. Called both before starting a new stream (clean up any orphan
+    from a prior crashed/killed session) and after stopping one (make this
+    session's own remote process doesn't become the next orphan). Safe to
+    call when nothing is running -- pkill's no-match exit is not an error.
+    """
+    argv = [adb.executable, "-s", serial, "shell", "pkill -f screenrecord"]
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *argv, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
+        )
+        await asyncio.wait_for(process.wait(), timeout=5)
+    except Exception:
+        pass
+
+
 async def _h264_stream(websocket, adb: AdbClient, serial: str) -> None:
+    await _kill_stale_screenrecord(adb, serial)
     argv = adb.exec_out_args(serial, "screenrecord --output-format=h264 --time-limit=0 -")
     splitter = AnnexBSplitter()
     assembler = AccessUnitAssembler()
@@ -50,6 +73,7 @@ async def _h264_stream(websocket, adb: AdbClient, serial: str) -> None:
         if process.returncode is None:
             process.terminate()
             await process.wait()
+        await _kill_stale_screenrecord(adb, serial)
 
 
 async def _screenshot_stream(websocket, adb: AdbClient, serial: str, interval: float = 0.7) -> None:
@@ -82,6 +106,18 @@ async def handler(websocket) -> None:
 
     if _active_task is not None and not _active_task.done():
         _active_task.cancel()
+        # Cancellation only takes effect at the old task's next await point,
+        # and its cleanup (process.terminate()/wait(), _kill_stale_screenrecord)
+        # runs asynchronously after that -- proceeding immediately without
+        # waiting for it to actually finish is a real race: a fresh Connect
+        # can start spawning a new screenrecord while the old one is still
+        # mid-teardown and still holding Android's single screen-capture
+        # slot, intermittently starving the new attempt of any output (the
+        # empirically observed "needs several clicks to succeed" symptom).
+        try:
+            await _active_task
+        except Exception:
+            pass
     _active_task = asyncio.current_task()
 
     stream_fn = _screenshot_stream if mode == "screenshot" else _h264_stream

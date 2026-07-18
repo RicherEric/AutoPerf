@@ -109,13 +109,17 @@ picks it up on its own worker.
 docker run -d --name autoperf-redis -p 6379:6379 redis:7-alpine
 .\venv\Scripts\python.exe webapp\manage.py runserver 8000
 ```
-In a second terminal, start the Celery worker (`--pool=solo` is required on
+In a second terminal, start the Celery worker via `scripts/start-worker.py`,
+which sizes parallelism to `min(cpu_count, connected_adb_device_count)` and
+picks the right pool for the platform (`--pool=solo` is required on
 Windows -- Celery's default prefork pool isn't supported there, and `solo`
 also happens to satisfy the same "main thread of the main interpreter"
-constraint `TestRunner.run()`'s SIGINT handling needs):
+constraint `TestRunner.run()`'s SIGINT handling needs; see
+`docs/INSTALL.md`'s "Sizing worker parallelism" section for the full
+story, including how same-device runs are still serialized even with
+multiple workers):
 ```powershell
-cd webapp
-..\venv\Scripts\celery.exe -A config worker --pool=solo -l info
+.\venv\Scripts\python.exe scripts\start-worker.py
 ```
 In a third terminal, the frontend:
 ```powershell

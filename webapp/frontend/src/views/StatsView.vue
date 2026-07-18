@@ -1,25 +1,34 @@
 <script setup>
-import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { getStats } from '../api.js'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
+import { getStats, listDevices } from '../api.js'
 import Card from '../components/Card.vue'
 import PassRateBar from '../components/PassRateBar.vue'
 import MetricChart from '../components/MetricChart.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 
+const { t } = useI18n()
 const VERDICT_TONE = { pass: 'success', fail: 'danger', no_baseline: 'neutral' }
-const VERDICT_LABEL = { pass: 'pass', fail: 'fail', no_baseline: '無 baseline' }
 
 const stats = ref(null)
 const error = ref('')
+const devices = ref([])
+const selectedSerial = ref('') // '' = all devices combined
 let pollHandle = null
+
+function deviceLabel(d) {
+  return d.nickname || `${d.model} (${d.serial})`
+}
 
 async function poll() {
   try {
-    stats.value = await getStats()
+    stats.value = await getStats(50, selectedSerial.value)
   } catch (err) {
     error.value = err.message
   }
 }
+
+watch(selectedSerial, poll)
 
 // Worst-first so the page reads as "here's what needs attention" -- entries
 // with no baseline yet (pass_rate === null) sort last since there's nothing
@@ -53,11 +62,14 @@ const recentRuns = computed(() => (stats.value ? stats.value.runs.slice(0, 20) :
 
 function formatRegressedMetrics(metrics) {
   return metrics
-    .map((m) => (m.delta_pct === null ? `${m.name}（無法計算差異）` : `${m.name} ${m.delta_pct > 0 ? '+' : ''}${m.delta_pct.toFixed(0)}%`))
+    .map((m) => (m.delta_pct === null
+      ? t('stats.deltaUnavailable', { name: m.name })
+      : t('stats.deltaValue', { name: m.name, sign: m.delta_pct > 0 ? '+' : '', value: m.delta_pct.toFixed(0) })))
     .join('、')
 }
 
 onMounted(async () => {
+  devices.value = await listDevices()
   await poll()
   pollHandle = setInterval(poll, 5000)
 })
@@ -68,35 +80,42 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <Card title="統計概覽">
+  <Card :title="t('stats.title')">
     <p v-if="error" class="error">{{ error }}</p>
+    <div class="device-filter">
+      <label>
+        {{ t('stats.deviceLabel') }}
+        <select v-model="selectedSerial">
+          <option value="">{{ t('stats.allDevices') }}</option>
+          <option v-for="d in devices" :key="d.serial" :value="d.serial">
+            {{ deviceLabel(d) }}
+          </option>
+        </select>
+      </label>
+    </div>
     <div v-if="stats" class="stat-row">
       <div class="stat-tile">
         <span class="value">{{ overallPassRatePct }}</span>
-        <span class="label">整體通過率</span>
+        <span class="label">{{ t('stats.overallPassRate') }}</span>
       </div>
       <div class="stat-tile">
         <span class="value">{{ stats.runs_today }}</span>
-        <span class="label">今日執行次數</span>
+        <span class="label">{{ t('stats.runsToday') }}</span>
       </div>
       <div class="stat-tile">
         <span class="value">{{ stats.total_runs }}</span>
-        <span class="label">近期總 Run 數</span>
+        <span class="label">{{ t('stats.totalRuns') }}</span>
       </div>
       <div class="stat-tile">
         <span class="value">{{ stats.no_baseline }}</span>
-        <span class="label">尚無 Baseline</span>
+        <span class="label">{{ t('stats.noBaseline') }}</span>
       </div>
     </div>
   </Card>
 
-  <Card title="每個腳本的通過率">
-    <p v-if="stats" class="hint">
-      判定標準:與該裝置的 baseline 相比,任一項 metric(CPU/記憶體/電量/溫度)的平均值變動超過
-      {{ stats.threshold_pct }}%,這個 run 就判定為 fail(不分變高或變低,見下方「近期判定明細」)。
-      還沒設定 baseline 的裝置,run 會顯示「無 baseline」,不計入通過率。
-    </p>
-    <p v-if="stats && !sortedScenarios.length" class="hint">還沒有任何完成的 run。</p>
+  <Card :title="t('stats.passRateTitle')">
+    <p v-if="stats" class="hint">{{ t('stats.criteriaHint', { threshold: stats.threshold_pct }) }}</p>
+    <p v-if="stats && !sortedScenarios.length" class="hint">{{ t('stats.noCompletedRuns') }}</p>
     <PassRateBar
       v-for="entry in sortedScenarios"
       :key="entry.scenario"
@@ -107,34 +126,34 @@ onUnmounted(() => {
     />
   </Card>
 
-  <Card title="近期判定明細">
-    <p v-if="stats && !recentRuns.length" class="hint">還沒有任何完成的 run。</p>
+  <Card :title="t('stats.recentVerdictsTitle')">
+    <p v-if="stats && !recentRuns.length" class="hint">{{ t('stats.noCompletedRuns') }}</p>
     <table v-else>
       <thead>
         <tr>
-          <th>Run</th>
-          <th>腳本</th>
-          <th>判定</th>
-          <th>原因</th>
+          <th>{{ t('stats.colRun') }}</th>
+          <th>{{ t('stats.colScenario') }}</th>
+          <th>{{ t('stats.colVerdict') }}</th>
+          <th>{{ t('stats.colReason') }}</th>
         </tr>
       </thead>
       <tbody>
         <tr v-for="run in recentRuns" :key="run.run_id">
           <td><router-link :to="`/runs/${run.run_id}`">{{ run.run_id.slice(0, 8) }}</router-link></td>
-          <td>{{ run.scenario ?? '(no scenario)' }}</td>
-          <td><StatusBadge :label="VERDICT_LABEL[run.verdict]" :tone="VERDICT_TONE[run.verdict]" /></td>
+          <td>{{ run.scenario ?? t('common.noScenario') }}</td>
+          <td><StatusBadge :label="t(`stats.verdict.${run.verdict}`)" :tone="VERDICT_TONE[run.verdict]" /></td>
           <td>
             <span v-if="run.verdict === 'fail'">{{ formatRegressedMetrics(run.regressed_metrics) }}</span>
-            <span v-else-if="run.verdict === 'no_baseline'" class="hint">此裝置尚未設定 baseline</span>
-            <span v-else class="hint">全部 metric 都在門檻內</span>
+            <span v-else-if="run.verdict === 'no_baseline'" class="hint">{{ t('stats.noBaselineForDevice') }}</span>
+            <span v-else class="hint">{{ t('stats.withinThreshold') }}</span>
           </td>
         </tr>
       </tbody>
     </table>
   </Card>
 
-  <Card title="最近趨勢（各 Metric 隨 Run 歷史的平均值）">
-    <p v-if="stats && !trendMetrics.length" class="hint">還沒有足夠的資料。</p>
+  <Card :title="t('stats.trendTitle')">
+    <p v-if="stats && !trendMetrics.length" class="hint">{{ t('stats.notEnoughData') }}</p>
     <div class="metric-grid">
       <MetricChart
         v-for="name in trendMetrics"
@@ -148,6 +167,9 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+.device-filter {
+  margin-bottom: var(--space-4);
+}
 .stat-row {
   display: flex;
   gap: var(--space-4);

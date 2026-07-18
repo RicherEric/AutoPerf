@@ -6,11 +6,15 @@ import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 
-from .adapters import Adapter, ScenarioStep
+from .adapters import HOME, Adapter, ScenarioStep
 from .adb import AdbClientProtocol
 from .collectors import Collector
 from .models import RunStatus, TestEvent
 from .storage import BatchWriter, Storage
+
+
+class DeviceBusyError(RuntimeError):
+    pass
 
 
 @dataclass(slots=True)
@@ -23,6 +27,7 @@ class TestRunner:
     adapter: Adapter | None = None
     scenario: list[ScenarioStep] | None = None
     adapter_action_timeout: float = 10.0
+    cancel_check_interval: float = 1.0
 
     def run(self, serial: str, duration: float, run_id: str | None = None) -> str:
         if self.scenario and self.adapter is None:
@@ -36,7 +41,21 @@ class TestRunner:
             self.storage.create_run(run_id, serial)
         elif existing["device_serial"] != serial:
             raise ValueError("Run belongs to another device")
-        self.storage.update_run(run_id, RunStatus.RUNNING)
+        else:
+            # A queued (Celery-pending) run can be cancelled before its task
+            # ever executes -- but on a --pool=solo worker that's busy with a
+            # prior task, the revoke control message can't be processed until
+            # the worker frees up, by which point the task may already have
+            # been dequeued and started (the same control-plane blind spot
+            # documented in dashboard.services.get_queue_status). Storage's
+            # cancel_requested flag is checked here, before anything starts,
+            # so a run already marked cancelled is never resurrected back to
+            # running/completed regardless of what Celery's revoke() managed.
+            if existing.get("cancel_requested"):
+                self.storage.update_run(run_id, RunStatus.INTERRUPTED, error="cancelled before starting")
+                return run_id
+        if not self.storage.try_start_run(run_id):
+            raise DeviceBusyError(f"device {serial} already has a run in progress")
         writer = BatchWriter(self.storage)
         writer.start()
         stop = False
@@ -48,6 +67,7 @@ class TestRunner:
         previous = signal.getsignal(signal.SIGINT)
         signal.signal(signal.SIGINT, request_stop)
         started = time.monotonic()
+        last_cancel_check = started
         due = {collector.name: started for collector in self.collectors}
         active: dict[str, tuple[Future, float, Collector]] = {}
         timed_out: set[str] = set()
@@ -63,6 +83,16 @@ class TestRunner:
             writer.put(TestEvent(run_id, "lifecycle", "run started"))
             while not stop and time.monotonic() - started < duration:
                 now = time.monotonic()
+                # Dashboard-triggered runs execute in a separate Celery worker
+                # process, so SIGINT (from a local Ctrl+C) can't reach them --
+                # this is the remote-cancel equivalent, polled at ~1s rather
+                # than every tick to avoid hammering the DB.
+                if now - last_cancel_check >= self.cancel_check_interval:
+                    last_cancel_check = now
+                    current = self.storage.get_run(run_id)
+                    if current and current.get("cancel_requested"):
+                        stop = True
+                        break
                 for name, (future, submitted, collector) in list(active.items()):
                     if future.done():
                         del active[name]
@@ -134,6 +164,17 @@ class TestRunner:
                     writer.put(TestEvent(run_id, "adapter_error", str(exc),
                                          details={"action": step.action, **step.kwargs}))
             status = RunStatus.INTERRUPTED if stop else RunStatus.COMPLETED
+            if self.adapter is not None:
+                # Whether a scenario run ends normally or gets cancelled, it
+                # leaves whatever app was mid-action on screen (e.g. a video
+                # still playing) -- return to the home screen so the device
+                # is in a clean state for whoever runs the next test. Best-
+                # effort: a failure here shouldn't prevent the run's own
+                # status from being recorded.
+                try:
+                    self.adapter.key_event(self.adb, serial, HOME)
+                except Exception as exc:
+                    writer.put(TestEvent(run_id, "adapter_error", str(exc), details={"action": "key_event", "keycode": HOME}))
             writer.put(TestEvent(run_id, "lifecycle", f"run {status}"))
             writer.close()
             self.storage.update_run(run_id, status)

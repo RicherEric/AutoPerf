@@ -40,6 +40,7 @@ def parser() -> argparse.ArgumentParser:
     baseline_set.add_argument("--run", required=True, dest="run_id")
     baseline_show = baseline_commands.add_parser("show")
     baseline_show.add_argument("--serial", required=True)
+    baseline_show.add_argument("--scenario", help="omit for the plain/no-scenario baseline")
 
     compare_cmd = commands.add_parser("compare")
     compare_cmd.add_argument("--run", required=True, dest="run_id")
@@ -108,11 +109,12 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"Run {args.run_id} belongs to device {run['device_serial']}, not {args.serial}")
                 return 1
             storage.set_baseline(args.serial, args.run_id)
-            print(json.dumps(storage.get_baseline(args.serial), indent=2))
+            print(json.dumps(storage.get_baseline(args.serial, run["youtube_scenario"]), indent=2))
         else:
-            baseline = storage.get_baseline(args.serial)
+            baseline = storage.get_baseline(args.serial, args.scenario)
             if baseline is None:
-                print("No baseline set for this device")
+                scenario_desc = f"scenario {args.scenario!r}" if args.scenario else "plain runs"
+                print(f"No baseline set for this device ({scenario_desc})")
                 return 1
             stats = compute_stats(storage.list_samples(baseline["run_id"], limit=100_000))
             print(json.dumps({
@@ -125,9 +127,10 @@ def main(argv: list[str] | None = None) -> int:
         if run is None:
             print("Run not found")
             return 1
-        baseline = storage.get_baseline(run["device_serial"])
+        baseline = storage.get_baseline(run["device_serial"], run["youtube_scenario"])
         if baseline is None:
-            print(f"No baseline set for device {run['device_serial']}")
+            scenario_desc = f"scenario {run['youtube_scenario']!r}" if run["youtube_scenario"] else "plain runs"
+            print(f"No baseline set for device {run['device_serial']} ({scenario_desc})")
             return 1
         baseline_stats = compute_stats(storage.list_samples(baseline["run_id"], limit=100_000))
         candidate_stats = compute_stats(storage.list_samples(args.run_id, limit=100_000))

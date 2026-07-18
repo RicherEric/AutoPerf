@@ -2,7 +2,7 @@ import asyncio
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from livescreen.server import _PATH_RE, _h264_stream, _screenshot_stream, handler
+from livescreen.server import _PATH_RE, _h264_stream, _kill_stale_screenrecord, _screenshot_stream, handler
 
 SPS = b"\x67\x64\x00\x34\xaa"
 IDR = b"\x65\x88\x84\xab\xab"
@@ -54,6 +54,44 @@ class HandlerRoutingTests(unittest.IsolatedAsyncioTestCase):
         ws.close.assert_awaited_once()
         self.assertEqual(ws.close.call_args.kwargs["code"], 1008)
 
+    async def test_new_connection_awaits_old_connections_cleanup_before_streaming(self):
+        # Regression test for a real, empirically-observed bug: cancel()
+        # alone only *schedules* cancellation -- the old stream's cleanup
+        # (which includes _kill_stale_screenrecord, itself needed to avoid a
+        # DIFFERENT orphaned-process bug) runs asynchronously afterwards. A
+        # new connection that doesn't wait for that to actually finish can
+        # start a fresh screenrecord while the old one still holds Android's
+        # single screen-capture slot -- the "needs several clicks on Connect
+        # to succeed" symptom this fix addresses.
+        order = []
+        calls = {"n": 0}
+
+        async def fake_stream(websocket, adb, serial):
+            calls["n"] += 1
+            n = calls["n"]
+            order.append(f"start-{n}")
+            if n == 1:
+                try:
+                    await asyncio.sleep(10)
+                except asyncio.CancelledError:
+                    order.append("cancelled-1")
+                    await asyncio.sleep(0.02)  # simulate cleanup taking a moment
+                    order.append("cleanup-done-1")
+                    raise
+            else:
+                order.append(f"done-{n}")
+
+        with patch("livescreen.server._h264_stream", fake_stream):
+            ws1 = FakeWebSocket("/stream/S1")
+            task1 = asyncio.ensure_future(handler(ws1))
+            await asyncio.sleep(0.01)  # let the first handler start streaming
+
+            ws2 = FakeWebSocket("/stream/S1")
+            await handler(ws2)
+            await task1
+
+        self.assertEqual(order, ["start-1", "cancelled-1", "cleanup-done-1", "start-2", "done-2"])
+
 
 def _fake_process(stdout_chunks):
     process = MagicMock()
@@ -76,7 +114,8 @@ class H264StreamTests(unittest.IsolatedAsyncioTestCase):
         process = _fake_process([stream, b""])
         ws = FakeWebSocket("/stream/S1")
 
-        with patch("livescreen.server._spawn", AsyncMock(return_value=process)):
+        with patch("livescreen.server._spawn", AsyncMock(return_value=process)), \
+             patch("livescreen.server._kill_stale_screenrecord", AsyncMock()):
             adb = MagicMock()
             adb.exec_out_args.return_value = ["adb", "-s", "S1", "exec-out", "screenrecord ..."]
             await _h264_stream(ws, adb, "S1")
@@ -84,6 +123,37 @@ class H264StreamTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(ws.sent), 2)
         self.assertEqual(ws.sent[0][:1], b"\x01")  # key unit prefix
         self.assertEqual(ws.sent[1][:1], b"\x00")  # delta unit prefix
+
+    async def test_kills_stale_remote_screenrecord_before_and_after_streaming(self):
+        # Regression test for a real, empirically-observed bug: killing the
+        # local adb exec-out client does not reliably kill the remote
+        # on-device screenrecord process, which then holds Android's single
+        # screen-capture slot and starves the *next* stream attempt of any
+        # output. Both the pre-stream cleanup (clears a prior orphan) and the
+        # post-stream cleanup (avoid leaving a new one behind) must run.
+        stream = annexb(SPS, IDR) + b"\x00\x00\x00\x01"
+        process = _fake_process([stream, b""])
+        ws = FakeWebSocket("/stream/S1")
+        kill_mock = AsyncMock()
+
+        with patch("livescreen.server._spawn", AsyncMock(return_value=process)), \
+             patch("livescreen.server._kill_stale_screenrecord", kill_mock):
+            adb = MagicMock()
+            adb.exec_out_args.return_value = ["adb", "-s", "S1", "exec-out", "screenrecord ..."]
+            await _h264_stream(ws, adb, "S1")
+
+        self.assertEqual(kill_mock.await_count, 2)
+        kill_mock.assert_any_await(adb, "S1")
+
+    async def test_kill_stale_screenrecord_ignores_a_failing_subprocess(self):
+        # pkill exits non-zero when there's nothing to kill -- that's the
+        # normal case, not an error, and must never propagate.
+        adb = MagicMock()
+        adb.executable = "adb"
+        broken_process = MagicMock()
+        broken_process.wait = AsyncMock(side_effect=OSError("boom"))
+        with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=broken_process)):
+            await _kill_stale_screenrecord(adb, "S1")  # must not raise
 
 
 class ScreenshotStreamTests(unittest.IsolatedAsyncioTestCase):

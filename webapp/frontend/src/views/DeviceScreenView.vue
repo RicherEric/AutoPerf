@@ -1,11 +1,18 @@
 <script setup>
-import { onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { listDevices } from '../api.js'
 import Card from '../components/Card.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 
+const { t } = useI18n()
 const LIVESCREEN_HOST = 'ws://127.0.0.1:8100'
-const FIRST_FRAME_TIMEOUT_MS = 3000
+// The server now runs a pre-stream cleanup pass (_kill_stale_screenrecord)
+// before spawning screenrecord, on top of the usual adb handshake + first
+// SPS/PPS/IDR emission latency -- 3000ms was cutting it too close on a cold
+// first connect, so most attempts fell back to screenshots even when H.264
+// would have worked fine given another second or two.
+const FIRST_FRAME_TIMEOUT_MS = 6000
 
 const devices = ref([])
 const selectedSerial = ref('')
@@ -17,6 +24,15 @@ let socket = null
 let decoder = null
 let firstFrameTimer = null
 let gotFirstFrame = false
+let switching = false // suppresses the auto-reconnect watcher while Prev/Next itself drives the change
+
+function deviceLabel(d) {
+  const name = d.nickname || d.model
+  const badge = d.connection === 'wifi' ? 'WiFi' : 'USB'
+  return `${name} (${d.serial}) [${badge}]`
+}
+
+const selectedIndex = computed(() => devices.value.findIndex((d) => d.serial === selectedSerial.value))
 
 async function loadDevices() {
   devices.value = await listDevices()
@@ -25,15 +41,41 @@ async function loadDevices() {
   }
 }
 
+function switchTo(serial) {
+  switching = true
+  selectedSerial.value = serial
+  onConnect()
+  switching = false
+}
+
+function onPrevDevice() {
+  if (devices.value.length < 2) return
+  const idx = (selectedIndex.value - 1 + devices.value.length) % devices.value.length
+  switchTo(devices.value[idx].serial)
+}
+
+function onNextDevice() {
+  if (devices.value.length < 2) return
+  const idx = (selectedIndex.value + 1) % devices.value.length
+  switchTo(devices.value[idx].serial)
+}
+
 function drawBitmapToCanvas(bitmap) {
   const el = canvas.value
   if (!el) return
-  if (el.width !== bitmap.width || el.height !== bitmap.height) {
-    el.width = bitmap.width
-    el.height = bitmap.height
+  // A decoded VideoFrame has no plain .width/.height (only displayWidth/
+  // displayHeight) -- only ImageBitmap (the screenshot fallback path) does.
+  // Reading bitmap.width on a VideoFrame silently gives undefined, which
+  // resizes the canvas to 0x0 and makes drawImage a no-op: exactly the
+  // "streaming badge shows but the canvas stays blank" symptom.
+  const width = bitmap.displayWidth ?? bitmap.width
+  const height = bitmap.displayHeight ?? bitmap.height
+  if (el.width !== width || el.height !== height) {
+    el.width = width
+    el.height = height
   }
   const ctx = el.getContext('2d')
-  ctx.drawImage(bitmap, 0, 0)
+  ctx.drawImage(bitmap, 0, 0, width, height)
 }
 
 function stopEverything() {
@@ -79,12 +121,12 @@ function startFallback() {
       const bitmap = await createImageBitmap(new Blob([event.data], { type: 'image/png' }))
       drawBitmapToCanvas(bitmap)
     } catch (err) {
-      errorMessage.value = `Failed to decode screenshot frame: ${err.message}`
+      errorMessage.value = t('screen.screenshotDecodeFailed', { message: err.message })
     }
   }
   socket.onerror = () => {
     connectionState.value = 'error'
-    errorMessage.value = 'Screenshot stream connection failed.'
+    errorMessage.value = t('screen.screenshotConnectionFailed')
   }
 }
 
@@ -111,7 +153,7 @@ function startH264() {
     },
     error: (err) => {
       console.error('VideoDecoder error', err)
-      errorMessage.value = `WebCodecs decoder error, falling back: ${err.message}`
+      errorMessage.value = t('screen.decoderError', { message: err.message })
       startFallback()
     },
   })
@@ -147,19 +189,19 @@ function startH264() {
       }
     } catch (err) {
       console.error('WebCodecs decode failed', err)
-      errorMessage.value = `WebCodecs decode failed, falling back: ${err.message}`
+      errorMessage.value = t('screen.decodeFailed', { message: err.message })
       startFallback()
     }
   }
   socket.onerror = () => {
-    errorMessage.value = 'H.264 stream connection failed, falling back to screenshots.'
+    errorMessage.value = t('screen.connectionFailed')
     startFallback()
   }
 
   firstFrameTimer = setTimeout(() => {
     if (!gotFirstFrame) {
       console.warn(`No frame after ${FIRST_FRAME_TIMEOUT_MS}ms: received ${messageCount} WS message(s), configured=${configured}`)
-      errorMessage.value = `No video frame arrived in time (received ${messageCount} message(s) from the server), falling back to screenshots.`
+      errorMessage.value = t('screen.noFrameArrived', { count: messageCount })
       startFallback()
     }
   }, FIRST_FRAME_TIMEOUT_MS)
@@ -169,45 +211,60 @@ function onConnect() {
   errorMessage.value = ''
   stopEverything()
   if (typeof VideoDecoder === 'undefined') {
-    errorMessage.value = 'This browser has no WebCodecs support; using periodic screenshots.'
+    errorMessage.value = t('screen.noWebCodecs')
     startFallback()
   } else {
     startH264()
   }
 }
 
+watch(selectedSerial, (next, prev) => {
+  // Quick-switch UX: once a stream is already up, picking a different device
+  // from the dropdown jumps straight to it instead of requiring a manual
+  // "Connect" click each time -- this is the "one device at a time, fast
+  // switching" mode the classroom demo needs. `switching` guards against a
+  // redundant double-connect when switchTo() (Prev/Next) already reconnected.
+  if (switching || !prev || next === prev) return
+  if (connectionState.value !== 'idle') onConnect()
+})
+
 onMounted(loadDevices)
 onUnmounted(stopEverything)
 </script>
 
 <template>
-  <Card title="Device screen">
+  <Card :title="t('screen.title')">
     <p v-if="errorMessage" class="error">{{ errorMessage }}</p>
-    <div>
+    <div class="controls">
       <label>
-        Device:
+        {{ t('screen.deviceLabel') }}
         <select v-model="selectedSerial">
           <option v-for="d in devices" :key="d.serial" :value="d.serial">
-            {{ d.model }} ({{ d.serial }})
+            {{ deviceLabel(d) }}
           </option>
         </select>
       </label>
-      <button @click="onConnect" :disabled="!selectedSerial">Connect</button>
+      <button @click="onConnect" :disabled="!selectedSerial">{{ t('screen.connectButton') }}</button>
+      <button @click="onPrevDevice" :disabled="devices.length < 2" :title="t('screen.prevTitle')">{{ t('screen.prevButton') }}</button>
+      <button @click="onNextDevice" :disabled="devices.length < 2" :title="t('screen.nextTitle')">{{ t('screen.nextButton') }}</button>
       <StatusBadge
         v-if="connectionState !== 'idle'"
-        :label="connectionState"
+        :label="t(`screen.state.${connectionState}`)"
         :tone="connectionState === 'streaming' ? 'success' : connectionState === 'error' ? 'danger' : 'warning'"
       />
     </div>
-    <p class="hint">
-      View-only for now — tapping the preview does not control the device.
-      Requires <code>python webapp/livescreen/server.py --port 8100</code> running separately.
-    </p>
+    <p class="hint">{{ t('screen.hint') }}</p>
     <canvas ref="canvas" class="screen-canvas"></canvas>
   </Card>
 </template>
 
 <style scoped>
+.controls {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
 .screen-canvas {
   max-width: 100%;
   border: 1px solid var(--color-border);
