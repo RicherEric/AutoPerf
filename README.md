@@ -47,13 +47,21 @@ Run tests without third-party dependencies: `python -m unittest discover -s test
 `adapters.py`'s `screen_size()` (parses `adb shell wm size`) lets `scenarios/coords.py`
 express taps/swipes as fractions of the screen (0..1) instead of hardcoded pixels,
 resolved to absolute coordinates once per run -- so the same scenario works across
-different screen resolutions. `scenarios/youtube.py` has 19 named presets (cold
+different screen resolutions. `scenarios/youtube.py` has 23 named presets (cold
 start, search+play, home feed scroll, Shorts browsing, quality switch, like,
 comment scroll, fullscreen, seek/scrub, long-press skip, background/foreground
 resume, app-switch cycling, PiP, multi-video session, subscriptions/library
 browsing) built purely from `launch_app`/`stop_app`/`tap`/`swipe`/`key_event` --
 no playback-correctness verification is included by design; these only drive
 the UI, the same way `--app` does.
+
+Four of those (`play_golden`, `play_baby_groot_dancing`, `play_suis_moi`,
+`play_rickroll`) deep-link straight to a specific, known YouTube video via
+`launch_app`'s `data` param (`am start -a android.intent.action.VIEW -d
+<url>`) instead of the blind search-and-tap taps the rest use -- replaying
+the exact same video every run gives reproducible length/resolution/content,
+which matters for baseline-vs-candidate comparisons. `scenarios/youtube.py`'s
+`NAMED_VIDEOS` tuple is where to add more of the same theme.
 
 Each preset has a `name`, a Traditional Chinese `description` of exactly what it
 does (shown in the dashboard's scenario dropdown as a tooltip and hint text, and
@@ -182,5 +190,15 @@ only `{codec, hardwareAcceleration, optimizeForLatency}` -- no `description`,
 no `avc` field -- matching `@yume-chan/scrcpy-decoder-webcodecs` (used by
 ws-scrcpy/tango), a real production scrcpy-in-browser implementation: omitting
 `description` for an `avc1.*` codec is what signals Annex-B to Chrome. View-only
-for now -- tapping the preview does not drive the device. One stream at a time; a new connection cancels
-whatever was previously streaming.
+for now -- tapping the preview does not drive the device. One stream at a time
+*per device* (`livescreen/server.py`'s `_active_tasks` is keyed by serial); a
+new connection to the *same* device cancels whatever was previously streaming
+to it, but watching two different devices at once (e.g. two Run Detail tabs)
+doesn't cancel each other.
+
+The same WebCodecs connect/decode/fallback logic is shared (via the
+`useDeviceScreen()` composable, `frontend/src/composables/useDeviceScreen.js`)
+between the standalone `/screen` page and a `LiveScreenPanel` embedded
+directly in Run Detail: while a run is `running`, its device's live screen
+connects automatically right next to the metric charts, so you can watch the
+screen and the performance graphs update together without a separate tab.

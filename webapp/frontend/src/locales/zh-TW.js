@@ -108,6 +108,8 @@ export default {
     baselineHintScopeStrong: '不同腳本要各自設定一次基準線',
     cancelButton: '取消這次執行',
     deleteButton: '刪除這次執行',
+    liveScreenTitle: '即時畫面',
+    liveScreenIdleHint: '測試進行中時會自動連線顯示即時畫面。',
     metricsTitle: '監測指標',
     noSamplesYet: '尚無取樣資料。',
     rawSamplesSummary: '原始取樣資料（最近 {count} 筆）',

@@ -11,6 +11,7 @@ _PACKAGE_RE = re.compile(r"^[A-Za-z][\w]*(\.[A-Za-z][\w]*)+$")
 _ACTIVITY_RE = re.compile(r"^\.?[A-Za-z][\w.]*$")
 _KEYCODE_RE = re.compile(r"^KEYCODE_[A-Z0-9_]+$")
 _WM_SIZE_RE = re.compile(r"Physical size:\s*(\d+)x(\d+)")
+_URI_RE = re.compile(r"^https://[A-Za-z0-9./:?=_&%-]+$")
 
 HOME = "KEYCODE_HOME"
 BACK = "KEYCODE_BACK"
@@ -35,12 +36,19 @@ def _require_keycode(keycode: str) -> str:
     return keycode
 
 
+def _require_uri(uri: str) -> str:
+    if not _URI_RE.fullmatch(uri):
+        raise ValueError(f"Invalid or unsafe URI: {uri!r}")
+    return uri
+
+
 @dataclass(slots=True)
 class Adapter(ABC):
     name: str = "adapter"
 
     @abstractmethod
-    def launch_app(self, adb: AdbClientProtocol, serial: str, package: str, activity: str | None = None) -> None: ...
+    def launch_app(self, adb: AdbClientProtocol, serial: str, package: str, activity: str | None = None,
+                    data: str | None = None) -> None: ...
 
     @abstractmethod
     def stop_app(self, adb: AdbClientProtocol, serial: str, package: str) -> None: ...
@@ -72,9 +80,11 @@ class AndroidAdapter(Adapter):
     def __init__(self):
         super().__init__("android")
 
-    def launch_app(self, adb, serial, package, activity=None):
+    def launch_app(self, adb, serial, package, activity=None, data=None):
         package = _require_package(package)
-        if activity:
+        if data:
+            adb.shell(serial, f'am start -a android.intent.action.VIEW -d "{_require_uri(data)}" {package}')
+        elif activity:
             adb.shell(serial, f"am start -n {package}/{_require_activity(activity)}")
         else:
             adb.shell(serial, f"monkey -p {package} -c android.intent.category.LAUNCHER 1")

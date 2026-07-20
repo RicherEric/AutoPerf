@@ -7,6 +7,7 @@ import Card from '../components/Card.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import DeltaBar from '../components/DeltaBar.vue'
 import MetricChart from '../components/MetricChart.vue'
+import LiveScreenPanel from '../components/LiveScreenPanel.vue'
 
 const props = defineProps({ id: String })
 const router = useRouter()
@@ -191,6 +192,10 @@ onUnmounted(() => {
         {{ deleting ? t('common.deleting') : t('runDetail.deleteButton') }}
       </button>
     </div>
+  </Card>
+
+  <Card v-if="run" :title="t('runDetail.liveScreenTitle')">
+    <LiveScreenPanel :serial="run.device_serial" :active="run.status === 'running'" />
   </Card>
 
   <Card :title="t('runDetail.metricsTitle')">

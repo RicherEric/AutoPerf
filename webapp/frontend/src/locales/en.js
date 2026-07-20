@@ -108,6 +108,8 @@ export default {
     baselineHintScopeStrong: 'Each scenario needs its own baseline',
     cancelButton: 'Cancel this run',
     deleteButton: 'Delete this run',
+    liveScreenTitle: 'Live screen',
+    liveScreenIdleHint: 'Live screen connects automatically while this run is in progress.',
     metricsTitle: 'Metrics',
     noSamplesYet: 'No samples yet.',
     rawSamplesSummary: 'Raw samples (last {count})',

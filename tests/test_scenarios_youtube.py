@@ -81,6 +81,19 @@ class YoutubeScenarioRegistryTests(unittest.TestCase):
         self.assertTrue(descriptions)
         self.assertTrue(all(d["tier"] == youtube.TIER_REGRESSION for d in descriptions))
 
+    def test_named_video_presets_deep_link_to_the_expected_video(self):
+        for video in youtube.NAMED_VIDEOS:
+            with self.subTest(video=video.key):
+                name = f"play_{video.key}"
+                self.assertIn(name, youtube.REGISTRY)
+                steps = youtube.build(name, SCREEN)
+                self.assertEqual(len(steps), 1)
+                step = steps[0]
+                self.assertEqual(step.action, "launch_app")
+                self.assertEqual(step.kwargs["package"], youtube.PACKAGE)
+                self.assertEqual(step.kwargs["data"], f"https://www.youtube.com/watch?v={video.video_id}")
+                self.assertEqual(len(video.video_id), 11)
+
 
 if __name__ == "__main__":
     unittest.main()

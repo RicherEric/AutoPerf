@@ -32,6 +32,40 @@ def _launch(at: float = 0.0) -> ScenarioStep:
     return ScenarioStep(at, "launch_app", {"package": PACKAGE})
 
 
+@dataclass(frozen=True, slots=True)
+class NamedVideo:
+    key: str
+    video_id: str
+    title: str  # human-readable, goes into the preset's description
+
+
+# Deep-links straight to a specific, known video (via launch_app's `data` /
+# Android VIEW-intent support) instead of the blind search-and-tap taps
+# _enter_video_steps uses -- unlike those, replaying the *same* video every
+# run gives reproducible length/resolution/content, which matters for
+# baseline-vs-candidate performance comparisons. Add another NamedVideo here
+# for more of the same theme; each becomes its own `play_<key>` preset below.
+NAMED_VIDEOS = (
+    NamedVideo("golden", "TlFrIH6GQhk", "HUNTR/X《Golden》(獵魔女團主題曲)"),
+    NamedVideo("baby_groot_dancing", "DfNSBeFliIg", "《星際異攻隊2》Baby Groot 開場跳舞片段"),
+    NamedVideo("suis_moi", "b0IaM4_I_Nk", "《小王子》主題曲 Suis-moi"),
+    # The classic rickroll -- deliberately included, not a mistake. Note the
+    # `&list=RDdQw4w9WgXcQ` (auto-play radio queue) from the original URL is
+    # dropped: only the video ID is used, same as every other NamedVideo,
+    # so the video's own end doesn't roll into an unpredictable playlist --
+    # that would defeat the fixed-content reproducibility this whole
+    # mechanism exists for.
+    NamedVideo("rickroll", "dQw4w9WgXcQ", "Rick Astley《Never Gonna Give You Up》"),
+)
+
+
+def _play_named_video(video: NamedVideo) -> Callable[[tuple[int, int]], list[ScenarioStep]]:
+    def build_fn(screen: tuple[int, int]) -> list[ScenarioStep]:
+        url = f"https://www.youtube.com/watch?v={video.video_id}"
+        return [ScenarioStep(0.0, "launch_app", {"package": PACKAGE, "data": url})]
+    return build_fn
+
+
 def _enter_video_steps(screen, start_at: float = 0.0) -> list[ScenarioStep]:
     """Launch, search, and tap into a result -- lands on a playing video by ~start_at+8.0."""
     return [
@@ -209,6 +243,11 @@ REGISTRY: dict[str, ScenarioPreset] = {
         ScenarioPreset("app_switch_cycle", "播放中連續使用「最近使用 App」鍵切換,測試多工切換穩定度。", TIER_REGRESSION, app_switch_cycle),
         ScenarioPreset("pip_minimize", "進入畫中畫模式並拖曳懸浮視窗。", TIER_REGRESSION, pip_minimize),
         ScenarioPreset("multi_video_session", "連續觀看多支影片(進入影片 A → 返回 → 影片 B → 返回 → 影片 C),測試長時間連續切換的穩定度。", TIER_REGRESSION, multi_video_session),
+        *(
+            ScenarioPreset(f"play_{video.key}", f"直接開啟並播放{video.title},固定內容、可重現的效能測試情境。",
+                            TIER_FUNCTIONAL, _play_named_video(video))
+            for video in NAMED_VIDEOS
+        ),
     )
 }
 

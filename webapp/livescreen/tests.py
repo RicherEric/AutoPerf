@@ -92,6 +92,44 @@ class HandlerRoutingTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(order, ["start-1", "cancelled-1", "cleanup-done-1", "start-2", "done-2"])
 
+    async def test_a_different_serial_does_not_cancel_an_in_progress_stream(self):
+        # Regression test: streams used to be tracked by a single global
+        # task, so watching device B would cancel device A's still-running
+        # stream even though they're unrelated. Now keyed per-serial.
+        order = []
+
+        async def fake_stream(websocket, adb, serial):
+            order.append(f"start-{serial}")
+            try:
+                await asyncio.sleep(10)
+                order.append(f"finished-{serial}")
+            except asyncio.CancelledError:
+                order.append(f"cancelled-{serial}")
+                raise
+
+        with patch("livescreen.server._h264_stream", fake_stream):
+            ws1 = FakeWebSocket("/stream/S1")
+            task1 = asyncio.ensure_future(handler(ws1))
+            await asyncio.sleep(0.01)
+
+            ws2 = FakeWebSocket("/stream/S2")
+            task2 = asyncio.ensure_future(handler(ws2))
+            await asyncio.sleep(0.01)
+
+            self.assertFalse(task1.done())
+            task1.cancel()
+            task2.cancel()
+            for task in (task1, task2):
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+        # Both must have started before either was cancelled -- the bug this
+        # guards against is S2 starting causing an immediate "cancelled-S1"
+        # to appear here, ahead of (or instead of) "start-S2".
+        self.assertEqual(order[:2], ["start-S1", "start-S2"])
+
 
 def _fake_process(stdout_chunks):
     process = MagicMock()

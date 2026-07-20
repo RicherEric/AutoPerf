@@ -55,6 +55,29 @@ class AndroidAdapterTests(unittest.TestCase):
             AndroidAdapter().launch_app(adb, "device", "com.example; reboot")
         self.assertEqual(adb.calls, [])
 
+    def test_launch_app_with_data_uses_view_intent(self):
+        adb = RecordingAdb()
+        AndroidAdapter().launch_app(adb, "device", "com.example.app", data="https://www.youtube.com/watch?v=abc123")
+        self.assertEqual(adb.calls, [(
+            "device",
+            'am start -a android.intent.action.VIEW -d "https://www.youtube.com/watch?v=abc123" com.example.app',
+            10,
+        )])
+
+    def test_launch_app_data_takes_precedence_over_activity(self):
+        adb = RecordingAdb()
+        AndroidAdapter().launch_app(adb, "device", "com.example.app", activity="com.example.app.MainActivity",
+                                     data="https://example.com/x")
+        self.assertEqual(adb.calls, [(
+            "device", 'am start -a android.intent.action.VIEW -d "https://example.com/x" com.example.app', 10,
+        )])
+
+    def test_launch_app_rejects_invalid_data_without_calling_shell(self):
+        adb = RecordingAdb()
+        with self.assertRaises(ValueError):
+            AndroidAdapter().launch_app(adb, "device", "com.example.app", data='https://x"; reboot; echo "')
+        self.assertEqual(adb.calls, [])
+
     def test_launch_app_rejects_invalid_activity_without_calling_shell(self):
         adb = RecordingAdb()
         with self.assertRaises(ValueError):

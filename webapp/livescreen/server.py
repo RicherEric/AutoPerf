@@ -17,10 +17,13 @@ logger = logging.getLogger("autoperf.livescreen")
 
 _PATH_RE = re.compile(r"^/stream/(?P<serial>[A-Za-z0-9._:-]+)$")
 
-# One active stream at a time (last-connect-wins) -- this is a local,
-# single-developer tool with no auth; a new connection simply cancels
-# whatever stream is currently running rather than sharing/queuing.
-_active_task: asyncio.Task | None = None
+# One active stream per device at a time (last-connect-wins) -- this is a
+# local, single-developer tool with no auth; a new connection to a given
+# serial simply cancels whatever stream is currently running for *that*
+# serial rather than sharing/queuing. Keyed by serial (not a single global)
+# so watching two different devices at once -- e.g. two Run Detail tabs for
+# two different in-progress runs -- doesn't have one cancel the other.
+_active_tasks: dict[str, asyncio.Task] = {}
 
 
 async def _spawn(argv: list[str]) -> asyncio.subprocess.Process:
@@ -93,8 +96,6 @@ async def _screenshot_stream(websocket, adb: AdbClient, serial: str, interval: f
 
 
 async def handler(websocket) -> None:
-    global _active_task
-
     parsed = urlparse(websocket.request.path)
     match = _PATH_RE.match(parsed.path)
     if not match:
@@ -104,8 +105,9 @@ async def handler(websocket) -> None:
     mode = parse_qs(parsed.query).get("mode", ["h264"])[0]
     adb = AdbClient()
 
-    if _active_task is not None and not _active_task.done():
-        _active_task.cancel()
+    previous = _active_tasks.get(serial)
+    if previous is not None and not previous.done():
+        previous.cancel()
         # Cancellation only takes effect at the old task's next await point,
         # and its cleanup (process.terminate()/wait(), _kill_stale_screenrecord)
         # runs asynchronously after that -- proceeding immediately without
@@ -115,10 +117,10 @@ async def handler(websocket) -> None:
         # slot, intermittently starving the new attempt of any output (the
         # empirically observed "needs several clicks to succeed" symptom).
         try:
-            await _active_task
+            await previous
         except Exception:
             pass
-    _active_task = asyncio.current_task()
+    _active_tasks[serial] = asyncio.current_task()
 
     stream_fn = _screenshot_stream if mode == "screenshot" else _h264_stream
     logger.info("streaming %s to %s (mode=%s)", serial, websocket.remote_address, mode)
