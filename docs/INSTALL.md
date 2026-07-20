@@ -6,7 +6,7 @@ AutoPerf has three independent layers you can install separately:
 |---|---|---|
 | **Core CLI** (`autoperf ...`) | Python 3.11+, `adb` on PATH | Required |
 | **Dashboard** (Django + Vue) | + Node.js 18+, Redis, Celery | Optional |
-| **Live screen** (`/screen`) | nothing extra beyond core | Optional |
+| **Live screen** (`/screen`) | nothing extra beyond core; `ffmpeg` if you also want run replay | Optional |
 
 Everything talks to the phone through `adb`, so `adb` must be reachable
 regardless of which layers you install.
@@ -19,6 +19,7 @@ regardless of which layers you install.
 | Node.js 18+ (dashboard only) | `winget install OpenJS.NodeJS.LTS` | `brew install node` | `sudo apt install nodejs npm` |
 | Android platform-tools (`adb`) | `winget install Google.PlatformTools` | `brew install android-platform-tools` | `sudo apt install android-tools-adb` |
 | Redis (dashboard only) | Docker Desktop | `brew install redis` or Docker Desktop | `sudo apt install redis-server` |
+| ffmpeg (optional, run replay) | `winget install Gyan.FFmpeg` | `brew install ffmpeg` | `sudo apt install ffmpeg` |
 
 After installing `adb`, plug in a phone with **USB debugging** enabled
 (Settings -> Developer options -> USB debugging) and confirm the RSA

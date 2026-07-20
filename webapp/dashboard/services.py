@@ -19,6 +19,25 @@ def get_storage() -> Storage:
     return Storage(settings.AUTOPERF_DB_PATH)
 
 
+def recording_path(run_id: str):
+    """Where livescreen/server.py's ffmpeg remux (see its _start_recording)
+    writes a run's screen recording, if one was ever made -- a run only gets
+    one if someone had the live screen panel open while it ran."""
+    return settings.RECORDINGS_ROOT / f"{run_id}.mp4"
+
+
+def get_recording_info(run_id: str) -> dict:
+    path = recording_path(run_id)
+    if not path.is_file():
+        return {"exists": False, "url": None}
+    return {"exists": True, "url": f"{settings.RECORDINGS_URL}{run_id}.mp4"}
+
+
+def delete_recording(run_id: str) -> None:
+    path = recording_path(run_id)
+    path.unlink(missing_ok=True)
+
+
 # adb-over-WiFi devices show up in `adb devices -l` with the connect address
 # itself (host:port) as their serial, unlike USB devices' hardware serials --
 # this is a free way to label connection type with no extra adb round-trip.

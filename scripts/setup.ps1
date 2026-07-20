@@ -4,9 +4,10 @@ Sets up a local AutoPerf dev environment on Windows: creates ./venv, does an
 editable install of all optional extras, and installs the frontend's npm
 deps. See docs/INSTALL.md for the full manual walkthrough this mirrors.
 
-By default this only *checks* for adb/Node.js/Redis and prints install
+By default this only *checks* for adb/Node.js/Redis/ffmpeg (ffmpeg is
+optional -- only needed for run screen replay) and prints install
 instructions -- it does not touch anything outside the repo. Pass
--InstallDeps to also install those three via winget.
+-InstallDeps to also install these via winget.
 #>
 param(
     [switch]$InstallDeps
@@ -90,6 +91,18 @@ if ($redisUp) {
 } else {
     Write-Warn "No Redis detected on localhost:6379. Start one with:"
     Write-Warn "  docker run -d --name autoperf-redis -p 6379:6379 redis:7-alpine"
+}
+
+# --- ffmpeg (optional, run screen replay) -------------------------------
+Write-Step "ffmpeg (optional -- run screen replay)"
+if (Test-Command "ffmpeg") {
+    Write-Ok "ffmpeg found: $((Get-Command ffmpeg).Source)"
+} elseif ($InstallDeps) {
+    winget install --id Gyan.FFmpeg -e
+} else {
+    Write-Warn "ffmpeg not found on PATH -- run screen replay will be skipped."
+    Write-Warn "  winget install --id Gyan.FFmpeg"
+    Write-Warn "(or re-run this script with -InstallDeps)"
 }
 
 Write-Step "Done"

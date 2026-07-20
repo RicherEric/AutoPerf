@@ -4,9 +4,10 @@
 # editable install of all optional extras, and installs the frontend's npm
 # deps. See docs/INSTALL.md for the full manual walkthrough this mirrors.
 #
-# By default this only *checks* for adb/Node.js/Redis and prints install
+# By default this only *checks* for adb/Node.js/Redis/ffmpeg (ffmpeg is
+# optional -- only needed for run screen replay) and prints install
 # instructions -- it does not touch anything outside the repo. Pass
-# --install-deps to also install those three via Homebrew.
+# --install-deps to also install these via Homebrew.
 
 set -euo pipefail
 
@@ -94,6 +95,18 @@ else
     warn "No Redis detected on localhost:6379. Start one with:"
     warn "  brew install redis && brew services start redis"
     warn "  (or) docker run -d --name autoperf-redis -p 6379:6379 redis:7-alpine"
+fi
+
+# --- ffmpeg (optional, run screen replay) ---------------------------------
+step "ffmpeg (optional -- run screen replay)"
+if have ffmpeg; then
+    ok "ffmpeg found: $(command -v ffmpeg)"
+elif [ "$INSTALL_DEPS" -eq 1 ] && have brew; then
+    brew install ffmpeg
+else
+    warn "ffmpeg not found on PATH -- run screen replay will be skipped."
+    warn "  brew install ffmpeg"
+    warn "(or re-run this script with --install-deps)"
 fi
 
 step "Done"

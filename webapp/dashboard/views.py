@@ -13,8 +13,10 @@ from autoperf.scenarios import youtube as youtube_scenarios
 
 from .services import (
     cancel_run,
+    delete_recording,
     get_dashboard_stats,
     get_queue_status,
+    get_recording_info,
     get_storage,
     refresh_devices,
     trigger_run,
@@ -136,9 +138,17 @@ def run_detail(request, run_id):
                 status=400,
             )
         storage.delete_run(run_id)
+        delete_recording(run_id)
         return JsonResponse({"deleted": run_id})
 
     return JsonResponse(run)
+
+
+@require_http_methods(["GET"])
+def run_recording(request, run_id):
+    if get_storage().get_run(run_id) is None:
+        return JsonResponse({"error": "not found"}, status=404)
+    return JsonResponse(get_recording_info(run_id))
 
 
 @csrf_exempt

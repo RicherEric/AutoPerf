@@ -96,6 +96,10 @@ export function setBaseline(serial, runId) {
   })
 }
 
+export function getRunRecording(runId) {
+  return request(`/runs/${runId}/recording`)
+}
+
 export async function getComparison(runId) {
   const response = await fetch(`/api/runs/${runId}/comparison`)
   if (response.status === 404) {

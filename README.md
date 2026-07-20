@@ -143,7 +143,7 @@ Run the API tests with `python webapp\manage.py test dashboard` -- they call
 the Celery task function directly (bypassing `.delay()`), so they need
 neither Redis nor a running worker.
 
-The dashboard has four pages (teal/cyan theme in `frontend/src/theme.css`,
+The dashboard has five of these pages (teal/cyan theme in `frontend/src/theme.css`,
 palette validated against the project's dataviz method -- see that file's
 header comment):
 
@@ -157,11 +157,24 @@ header comment):
   counted as pass or fail.
 - **Run List** (`/runs`) -- device picker, duration, a YouTube scenario
   dropdown grouped by tier (with each option's description as a tooltip),
-  "Run \<tier\> suite" buttons, and the run history table.
+  "Run \<tier\> suite" buttons, and the run history table with a
+  `DeviceMoodBadge` emoji per device (derived from `battery_level` --
+  CPU%/temperature are per-run metrics, not device properties, so they
+  can't drive this outside an active run).
 - **Run Detail** (`/runs/:id`) -- one small SVG line chart per metric
   (`components/MetricChart.vue`; each metric gets its own y-axis since
   cpu %, memory KiB, and battery °C don't share a scale), a "set as
   baseline" button, and a baseline comparison table with a `DeltaBar` per row.
+  The live screen panel overlays the latest metric values as a HUD on the
+  canvas itself, and a toast + short beep fire the moment a metric crosses
+  its regression threshold *during* a run (not just afterward in the
+  comparison table). Once the run finishes, the live panel is replaced by a
+  native `<video controls>` replay if one was recorded (see "Live device
+  screen" below).
+- **Mission Control** (`/mission-control`) -- every currently-running run at
+  once, each as a `LiveScreenPanel` + a `MiniSparkline` of its `cpu.total`,
+  polling `GET /api/queue`'s `running_runs`. A grid version of Run Detail's
+  live panel for watching several devices run in parallel simultaneously.
 - **Task Queue** (`/queue`) -- polls `GET /api/queue`, which wraps Celery's
   `control.inspect()`. No worker replying within the timeout is a normal,
   clearly-labeled state (distinct from the broker itself being unreachable),
@@ -202,3 +215,20 @@ between the standalone `/screen` page and a `LiveScreenPanel` embedded
 directly in Run Detail: while a run is `running`, its device's live screen
 connects automatically right next to the metric charts, so you can watch the
 screen and the performance graphs update together without a separate tab.
+
+**Run replay (optional, needs `ffmpeg`)**: when a `LiveScreenPanel` is opened
+with a `run_id` (Run Detail, Mission Control), the server also tees the raw
+H.264 stream into `ffmpeg -c copy` (a cheap remux, no re-encode) writing
+`webapp/recordings/<run_id>.mp4`. This deliberately reuses the *existing*
+live stream rather than spawning a second, independent screen-capture
+session -- Android only allows one per device at a time. The tradeoff: a
+run is only recorded for whatever portion of it someone had a live panel
+open for (in practice, the whole run, since Run Detail's panel auto-connects
+the moment the page opens). Once a run finishes, `GET /api/runs/<id>/recording`
+reports whether a file exists, and Run Detail renders a native
+`<video controls>` if so -- the browser's own seek bar is the scrub UI, no
+custom scrubber needed. If `ffmpeg` isn't installed, recording is silently
+skipped (logged once) and live streaming is unaffected either way.
+Recordings are served in dev via `django.views.static.serve` (`RECORDINGS_ROOT`/
+`RECORDINGS_URL` in `config/settings.py`), which handles the HTTP Range
+requests `<video>` seeking needs. Deleting a run also deletes its recording.

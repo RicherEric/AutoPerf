@@ -6,7 +6,8 @@ WSL and does the same three things regardless of environment:
   2. editable-install autoperf with all optional extras into that venv
   3. `npm install` the dashboard frontend, if Node.js is available
 
-By default it only *checks* for adb/Node.js/Redis and prints the right
+By default it only *checks* for adb/Node.js/Redis/ffmpeg (ffmpeg is
+optional -- only needed for run screen replay) and prints the right
 install command for the detected platform. Pass --install-deps to also
 run those install commands (winget on Windows, Homebrew on macOS,
 apt on Ubuntu/Debian/WSL) automatically.
@@ -113,8 +114,9 @@ def install_missing_deps(target_os, missing):
         winget_ids = {
             "adb": "Google.PlatformTools",
             "node": "OpenJS.NodeJS.LTS",
+            "ffmpeg": "Gyan.FFmpeg",
         }
-        for tool in ("adb", "node"):
+        for tool in ("adb", "node", "ffmpeg"):
             if tool in missing:
                 run(["winget", "install", "--id", winget_ids[tool], "-e"])
         if "redis" in missing:
@@ -132,13 +134,15 @@ def install_missing_deps(target_os, missing):
             run(["brew", "install", "android-platform-tools"])
         if "node" in missing:
             run(["brew", "install", "node"])
+        if "ffmpeg" in missing:
+            run(["brew", "install", "ffmpeg"])
         if "redis" in missing:
             run(["brew", "install", "redis"])
             run(["brew", "services", "start", "redis"])
     else:  # linux / wsl
         if not have("apt-get"):
             warn("No apt-get found -- this script only automates Debian/Ubuntu "
-                 "derivatives. Install adb/nodejs/redis with your distro's "
+                 "derivatives. Install adb/nodejs/redis/ffmpeg with your distro's "
                  "package manager, then re-run without --install-deps.")
             return
         run(["sudo", "apt-get", "update"])
@@ -146,6 +150,8 @@ def install_missing_deps(target_os, missing):
             run(["sudo", "apt-get", "install", "-y", "android-tools-adb"])
         if "node" in missing:
             run(["sudo", "apt-get", "install", "-y", "nodejs", "npm"])
+        if "ffmpeg" in missing:
+            run(["sudo", "apt-get", "install", "-y", "ffmpeg"])
         if "redis" in missing:
             run(["sudo", "apt-get", "install", "-y", "redis-server"])
             run(["sudo", "service", "redis-server", "start"])
@@ -162,7 +168,7 @@ def redis_reachable(host="localhost", port=6379, timeout=1.0):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--install-deps", action="store_true",
-                         help="also install missing adb/node/redis automatically")
+                         help="also install missing adb/node/redis/ffmpeg automatically")
     args = parser.parse_args()
 
     target_os = detect_os()
@@ -193,7 +199,7 @@ def main():
          ".[dashboard,worker,livescreen,dev]"], cwd=str(REPO_ROOT))
     ok("Python package installed")
 
-    step("Checking system tools (adb, node, redis)")
+    step("Checking system tools (adb, node, redis, ffmpeg)")
     missing = []
     if have("adb"):
         ok("adb found: " + shutil.which("adb"))
@@ -210,6 +216,11 @@ def main():
     else:
         missing.append("redis")
         warn("no Redis detected on localhost:6379 (needed for the dashboard)")
+    if have("ffmpeg"):
+        ok("ffmpeg found: " + shutil.which("ffmpeg"))
+    else:
+        missing.append("ffmpeg")
+        warn("ffmpeg not found on PATH (optional -- only needed for run screen replay)")
 
     if missing and args.install_deps:
         step("Installing missing dependencies: " + ", ".join(missing))

@@ -13,6 +13,7 @@ urlpatterns = [
     path("runs/<str:run_id>/cancel", views.run_cancel, name="run_cancel"),
     path("runs/<str:run_id>/samples", views.run_samples, name="run_samples"),
     path("runs/<str:run_id>/comparison", views.run_comparison, name="run_comparison"),
+    path("runs/<str:run_id>/recording", views.run_recording, name="run_recording"),
     path("devices/<str:serial>/baseline", views.baseline, name="baseline"),
     path("youtube-scenarios", views.youtube_scenarios_list, name="youtube_scenarios_list"),
     path("queue", views.queue_status, name="queue_status"),

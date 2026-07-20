@@ -4,7 +4,9 @@ import argparse
 import asyncio
 import logging
 import re
+import shutil
 import time
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import websockets
@@ -16,6 +18,13 @@ from autoperf.screen_stream import AccessUnitAssembler, AnnexBSplitter
 logger = logging.getLogger("autoperf.livescreen")
 
 _PATH_RE = re.compile(r"^/stream/(?P<serial>[A-Za-z0-9._:-]+)$")
+_RUN_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+# Same directory Django serves recordings from (RECORDINGS_ROOT in
+# webapp/config/settings.py) -- webapp/recordings/, resolved relative to
+# this file rather than the process's CWD so it's correct regardless of
+# where `python -m livescreen.server` was launched from.
+RECORDINGS_ROOT = Path(__file__).resolve().parent.parent / "recordings"
 
 # One active stream per device at a time (last-connect-wins) -- this is a
 # local, single-developer tool with no auth; a new connection to a given
@@ -54,17 +63,59 @@ async def _kill_stale_screenrecord(adb: AdbClient, serial: str) -> None:
         pass
 
 
-async def _h264_stream(websocket, adb: AdbClient, serial: str) -> None:
+async def _start_recording(run_id: str) -> asyncio.subprocess.Process | None:
+    """Tees the raw H.264 elementary stream into an MP4 via ffmpeg (`-c copy`,
+    a cheap remux with no re-encode -- no re-parsing of NAL units needed on
+    our end) so a finished run gets a real, seekable `<video>` to scrub.
+
+    Deliberately reuses the *existing* live-stream's screenrecord process
+    rather than spawning a second, independent screen-capture session --
+    Android only allows one screen-capture session per device at a time, so
+    a separate always-on recorder would fight the live view for that slot.
+    The tradeoff: a run only gets recorded for however much of it someone
+    had the live panel open for (in practice, the whole run, since Run
+    Detail's panel auto-connects the moment the page opens).
+
+    Returns None (recording silently skipped, live streaming unaffected) if
+    ffmpeg isn't installed.
+    """
+    if shutil.which("ffmpeg") is None:
+        logger.warning("ffmpeg not found on PATH -- skipping recording for run %s", run_id)
+        return None
+    RECORDINGS_ROOT.mkdir(parents=True, exist_ok=True)
+    mp4_path = RECORDINGS_ROOT / f"{run_id}.mp4"
+    return await asyncio.create_subprocess_exec(
+        "ffmpeg", "-y", "-loglevel", "error", "-f", "h264", "-i", "pipe:0", "-c", "copy", str(mp4_path),
+        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+    )
+
+
+async def _stop_recording(recorder: asyncio.subprocess.Process | None) -> None:
+    if recorder is None:
+        return
+    try:
+        if recorder.stdin is not None:
+            recorder.stdin.close()
+        await asyncio.wait_for(recorder.wait(), timeout=10)
+    except Exception:
+        logger.warning("ffmpeg recording process didn't exit cleanly")
+
+
+async def _h264_stream(websocket, adb: AdbClient, serial: str, run_id: str | None = None) -> None:
     await _kill_stale_screenrecord(adb, serial)
     argv = adb.exec_out_args(serial, "screenrecord --output-format=h264 --time-limit=0 -")
     splitter = AnnexBSplitter()
     assembler = AccessUnitAssembler()
     process = await _spawn(argv)
+    recorder = await _start_recording(run_id) if run_id else None
     try:
         while True:
             chunk = await process.stdout.read(65536)
             if not chunk:
                 break
+            if recorder is not None:
+                recorder.stdin.write(chunk)
+                await recorder.stdin.drain()
             for nal_type, payload in splitter.feed(chunk):
                 result = assembler.feed(nal_type, payload)
                 if result is None:
@@ -77,6 +128,7 @@ async def _h264_stream(websocket, adb: AdbClient, serial: str) -> None:
             process.terminate()
             await process.wait()
         await _kill_stale_screenrecord(adb, serial)
+        await _stop_recording(recorder)
 
 
 async def _screenshot_stream(websocket, adb: AdbClient, serial: str, interval: float = 0.7) -> None:
@@ -102,7 +154,11 @@ async def handler(websocket) -> None:
         await websocket.close(code=1008, reason="expected path /stream/<serial>")
         return
     serial = match.group("serial")
-    mode = parse_qs(parsed.query).get("mode", ["h264"])[0]
+    query = parse_qs(parsed.query)
+    mode = query.get("mode", ["h264"])[0]
+    run_id = query.get("run_id", [None])[0]
+    if run_id is not None and not _RUN_ID_RE.fullmatch(run_id):
+        run_id = None
     adb = AdbClient()
 
     previous = _active_tasks.get(serial)
@@ -122,11 +178,13 @@ async def handler(websocket) -> None:
             pass
     _active_tasks[serial] = asyncio.current_task()
 
-    stream_fn = _screenshot_stream if mode == "screenshot" else _h264_stream
-    logger.info("streaming %s to %s (mode=%s)", serial, websocket.remote_address, mode)
+    logger.info("streaming %s to %s (mode=%s, run_id=%s)", serial, websocket.remote_address, mode, run_id)
     started = time.monotonic()
     try:
-        await stream_fn(websocket, adb, serial)
+        if mode == "screenshot":
+            await _screenshot_stream(websocket, adb, serial)
+        else:
+            await _h264_stream(websocket, adb, serial, run_id)
     except (websockets.exceptions.ConnectionClosed, asyncio.CancelledError):
         pass
     finally:

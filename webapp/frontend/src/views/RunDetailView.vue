@@ -2,12 +2,13 @@
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
-import { cancelRun, deleteRun, getComparison, getRun, listDevices, listSamples, setBaseline } from '../api.js'
+import { cancelRun, deleteRun, getComparison, getRun, getRunRecording, listDevices, listSamples, setBaseline } from '../api.js'
 import Card from '../components/Card.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import DeltaBar from '../components/DeltaBar.vue'
 import MetricChart from '../components/MetricChart.vue'
 import LiveScreenPanel from '../components/LiveScreenPanel.vue'
+import Toast from '../components/Toast.vue'
 
 const props = defineProps({ id: String })
 const router = useRouter()
@@ -26,6 +27,8 @@ const RAW_TABLE_CAP = 200
 const run = ref(null)
 const device = ref(null)
 const comparison = ref(null)
+const recordingUrl = ref(null)
+const recordingChecked = ref(false)
 const error = ref('')
 const sinceId = ref(0)
 const settingBaseline = ref(false)
@@ -39,6 +42,53 @@ const recentRaw = ref([])
 
 let pollHandle = null
 const TERMINAL_STATUSES = ['completed', 'failed', 'interrupted']
+
+// Live regression-breach alert: a toast + beep the moment a metric crosses
+// its threshold *during* a run, rather than only finding out from the
+// comparison table after it's done. `alertedMetrics` stops the same metric
+// re-alerting every 2s poll once it's already flagged.
+const toasts = ref([])
+let nextToastId = 0
+const alertedMetrics = new Set()
+let audioCtx = null
+
+function pushToast(message) {
+  const id = nextToastId++
+  toasts.value.push({ id, message })
+  setTimeout(() => {
+    toasts.value = toasts.value.filter((toast) => toast.id !== id)
+  }, 5000)
+}
+
+function beep() {
+  try {
+    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)()
+    const oscillator = audioCtx.createOscillator()
+    const gain = audioCtx.createGain()
+    oscillator.type = 'sine'
+    oscillator.frequency.value = 880
+    gain.gain.setValueAtTime(0.2, audioCtx.currentTime)
+    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.4)
+    oscillator.connect(gain)
+    gain.connect(audioCtx.destination)
+    oscillator.start()
+    oscillator.stop(audioCtx.currentTime + 0.4)
+  } catch {
+    // Web Audio unavailable/blocked (e.g. no user gesture yet) -- the toast
+    // itself still shows regardless; the sound is a bonus, not load-bearing.
+  }
+}
+
+function checkForNewRegressions() {
+  if (run.value?.status !== 'running') return
+  for (const metric of comparison.value?.metrics ?? []) {
+    if (metric.regressed && !alertedMetrics.has(metric.name)) {
+      alertedMetrics.add(metric.name)
+      pushToast(t('runDetail.regressionAlert', { metric: metric.name, delta: metric.delta_pct?.toFixed(1) ?? '?' }))
+      beep()
+    }
+  }
+}
 
 const metricNames = computed(() => Object.keys(samplesByMetric).sort())
 
@@ -58,8 +108,33 @@ const comparisonByMetric = computed(() => {
   return map
 })
 
+// Latest value per metric, formatted for the live-screen HUD overlay --
+// reuses the samples already being polled, no extra network calls.
+const hudStats = computed(() =>
+  metricNames.value.map((name) => {
+    const samples = samplesByMetric[name]
+    const latest = samples[samples.length - 1]
+    return `${name} ${latest.value}${latest.unit}`
+  })
+)
+
 async function loadComparison() {
   comparison.value = await getComparison(props.id)
+}
+
+async function checkRecording() {
+  if (recordingChecked.value) return
+  recordingChecked.value = true
+  // The recording only finalizes once the live-screen WebSocket actually
+  // closes server-side (network round trip + ffmpeg flushing the MP4) --
+  // give that a moment rather than racing it with an immediate check.
+  await new Promise((resolve) => setTimeout(resolve, 1500))
+  try {
+    const info = await getRunRecording(props.id)
+    recordingUrl.value = info.exists ? info.url : null
+  } catch {
+    recordingUrl.value = null
+  }
 }
 
 function bufferSamples(newSamples) {
@@ -86,8 +161,10 @@ async function poll() {
     bufferSamples(result.samples)
     sinceId.value = result.next_since_id
     await loadComparison()
+    checkForNewRegressions()
     if (run.value && TERMINAL_STATUSES.includes(run.value.status)) {
       clearInterval(pollHandle)
+      checkRecording()
     }
   } catch (err) {
     error.value = err.message
@@ -147,6 +224,9 @@ onUnmounted(() => {
 <template>
   <p><router-link to="/runs">{{ t('runDetail.backLink') }}</router-link></p>
   <p v-if="error" class="error">{{ error }}</p>
+  <div class="toast-stack">
+    <Toast v-for="toast in toasts" :key="toast.id" :message="toast.message" tone="danger" />
+  </div>
 
   <Card :title="t('runDetail.runTitle', { id: id.slice(0, 8) })">
     <div v-if="run">
@@ -194,8 +274,16 @@ onUnmounted(() => {
     </div>
   </Card>
 
-  <Card v-if="run" :title="t('runDetail.liveScreenTitle')">
-    <LiveScreenPanel :serial="run.device_serial" :active="run.status === 'running'" />
+  <Card v-if="run" :title="TERMINAL_STATUSES.includes(run.status) ? t('runDetail.replayTitle') : t('runDetail.liveScreenTitle')">
+    <LiveScreenPanel
+      v-if="!TERMINAL_STATUSES.includes(run.status)"
+      :serial="run.device_serial" :active="run.status === 'running'" :stats="hudStats" :run-id="id"
+    />
+    <template v-else>
+      <video v-if="recordingUrl" controls :src="recordingUrl" class="replay-video"></video>
+      <p v-else-if="recordingChecked" class="hint">{{ t('runDetail.noRecordingHint') }}</p>
+      <p v-else class="hint">{{ t('runDetail.checkingRecordingHint') }}</p>
+    </template>
   </Card>
 
   <Card :title="t('runDetail.metricsTitle')">
@@ -272,11 +360,23 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+.toast-stack {
+  position: fixed;
+  top: var(--space-4);
+  right: var(--space-4);
+  z-index: 100;
+  max-width: 320px;
+}
 .metric-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
   gap: var(--space-4);
   margin-bottom: var(--space-4);
+}
+.replay-video {
+  max-width: 100%;
+  border-radius: var(--radius-md);
+  background: var(--color-surface-alt);
 }
 details {
   margin-top: var(--space-3);

@@ -4,6 +4,7 @@ export default {
     runs: '執行紀錄',
     queue: '任務佇列',
     screen: '裝置畫面',
+    missionControl: '戰情室',
     join: '教室加入',
   },
   common: {
@@ -110,6 +111,10 @@ export default {
     deleteButton: '刪除這次執行',
     liveScreenTitle: '即時畫面',
     liveScreenIdleHint: '測試進行中時會自動連線顯示即時畫面。',
+    regressionAlert: '⚠ {metric} 剛剛超標了(較 baseline 變化 {delta}%)',
+    replayTitle: '重播',
+    checkingRecordingHint: '正在確認是否有錄影……',
+    noRecordingHint: '這次測試沒有畫面錄影(執行期間沒有開啟即時畫面面板,或是沒有安裝 ffmpeg)。',
     metricsTitle: '監測指標',
     noSamplesYet: '尚無取樣資料。',
     rawSamplesSummary: '原始取樣資料（最近 {count} 筆）',
@@ -174,6 +179,11 @@ export default {
     decodeFailed: 'WebCodecs 解碼失敗,改用備援模式:{message}',
     connectionFailed: 'H.264 串流連線失敗,改用備援截圖模式。',
     noFrameArrived: '在時限內沒有收到影像畫面（已收到 {count} 則伺服器訊息）,改用備援截圖模式。',
+  },
+  missionControl: {
+    title: '戰情室',
+    hint: '目前所有執行中的裝置,即時畫面與 CPU 趨勢並排顯示。',
+    noneRunning: '目前沒有任何測試在執行。',
   },
   join: {
     title: '教室展示:讓手機加入（全程免 USB 線）',

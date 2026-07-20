@@ -4,6 +4,7 @@ export default {
     runs: 'Run List',
     queue: 'Task Queue',
     screen: 'Device Screen',
+    missionControl: 'Mission Control',
     join: 'Classroom Join',
   },
   common: {
@@ -110,6 +111,10 @@ export default {
     deleteButton: 'Delete this run',
     liveScreenTitle: 'Live screen',
     liveScreenIdleHint: 'Live screen connects automatically while this run is in progress.',
+    regressionAlert: '⚠ {metric} just regressed ({delta}% vs baseline)',
+    replayTitle: 'Replay',
+    checkingRecordingHint: 'Checking for a screen recording…',
+    noRecordingHint: 'No screen recording available for this run (the live screen panel wasn\'t open while it ran, or ffmpeg isn\'t installed).',
     metricsTitle: 'Metrics',
     noSamplesYet: 'No samples yet.',
     rawSamplesSummary: 'Raw samples (last {count})',
@@ -174,6 +179,11 @@ export default {
     decodeFailed: 'WebCodecs decode failed, falling back: {message}',
     connectionFailed: 'H.264 stream connection failed, falling back to screenshots.',
     noFrameArrived: 'No video frame arrived in time (received {count} message(s) from the server), falling back to screenshots.',
+  },
+  missionControl: {
+    title: 'Mission Control',
+    hint: 'Every currently-running device, live screen + CPU trend side by side.',
+    noneRunning: 'Nothing is running right now.',
   },
   join: {
     title: 'Classroom Demo: Join Without a USB Cable',

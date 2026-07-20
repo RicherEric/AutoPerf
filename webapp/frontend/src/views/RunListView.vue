@@ -15,6 +15,7 @@ import {
 } from '../api.js'
 import Card from '../components/Card.vue'
 import StatusBadge from '../components/StatusBadge.vue'
+import DeviceMoodBadge from '../components/DeviceMoodBadge.vue'
 
 const { t } = useI18n()
 
@@ -253,6 +254,7 @@ onUnmounted(() => {
           <th>{{ t('runs.colBattery') }}</th>
           <th></th>
           <th></th>
+          <th></th>
         </tr>
       </thead>
       <tbody>
@@ -275,6 +277,7 @@ onUnmounted(() => {
           </td>
           <td>{{ d.android_version ?? '—' }}</td>
           <td>{{ d.battery_level ?? '—' }}{{ d.battery_level != null ? '%' : '' }}</td>
+          <td><DeviceMoodBadge :device="d" /></td>
           <td>
             <button v-if="d.serial !== selectedSerial" @click="selectedSerial = d.serial">{{ t('common.select') }}</button>
             <StatusBadge v-else :label="t('common.selected')" tone="success" />

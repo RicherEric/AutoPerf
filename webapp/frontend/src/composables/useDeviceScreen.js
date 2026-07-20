@@ -22,11 +22,39 @@ export function useDeviceScreen() {
   const canvas = ref(null)
   const connectionState = ref('idle') // idle | connecting | streaming | fallback | error
   const errorMessage = ref('')
+  // Array of pre-formatted strings (e.g. "CPU 12.3%"), or null to hide the
+  // HUD -- the composable stays agnostic about metric semantics/formatting;
+  // that's the caller's job via updateStats().
+  const hudLines = ref(null)
 
   let socket = null
   let decoder = null
   let firstFrameTimer = null
   let gotFirstFrame = false
+
+  function updateStats(lines) {
+    hudLines.value = lines && lines.length ? lines : null
+  }
+
+  function drawHud(ctx, canvasWidth) {
+    if (!hudLines.value) return
+    const padding = 8
+    const lineHeight = 18
+    ctx.save()
+    ctx.font = '13px monospace'
+    ctx.textBaseline = 'top'
+    const textWidth = Math.max(...hudLines.value.map((line) => ctx.measureText(line).width))
+    const boxWidth = textWidth + padding * 2
+    const boxHeight = hudLines.value.length * lineHeight + padding * 2
+    const boxX = canvasWidth - boxWidth - 8
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.55)'
+    ctx.fillRect(boxX, 8, boxWidth, boxHeight)
+    ctx.fillStyle = '#fff'
+    hudLines.value.forEach((line, i) => {
+      ctx.fillText(line, boxX + padding, 8 + padding + i * lineHeight)
+    })
+    ctx.restore()
+  }
 
   function drawBitmapToCanvas(bitmap) {
     const el = canvas.value
@@ -44,6 +72,7 @@ export function useDeviceScreen() {
     }
     const ctx = el.getContext('2d')
     ctx.drawImage(bitmap, 0, 0, width, height)
+    drawHud(ctx, width)
   }
 
   function stopEverything() {
@@ -83,6 +112,9 @@ export function useDeviceScreen() {
     stopEverything()
     connectionState.value = 'fallback'
     socket = new WebSocket(`${LIVESCREEN_HOST}/stream/${serial}?mode=screenshot`)
+    // No run_id here: the server only records the h264 path (see
+    // livescreen/server.py's _start_recording) -- there's no recording to
+    // tie a screenshot-fallback session to anyway.
     socket.binaryType = 'arraybuffer'
     socket.onmessage = async (event) => {
       try {
@@ -98,7 +130,7 @@ export function useDeviceScreen() {
     }
   }
 
-  function startH264(serial) {
+  function startH264(serial, runId) {
     connectionState.value = 'connecting'
     gotFirstFrame = false
     let configured = false // tracked locally rather than re-reading decoder.state --
@@ -126,7 +158,13 @@ export function useDeviceScreen() {
       },
     })
 
-    socket = new WebSocket(`${LIVESCREEN_HOST}/stream/${serial}`)
+    // A run_id here (when watching from Run Detail / Mission Control) tells
+    // the server to also remux this stream to an MP4 via ffmpeg for later
+    // replay -- see livescreen/server.py's _start_recording.
+    const streamUrl = runId
+      ? `${LIVESCREEN_HOST}/stream/${serial}?run_id=${encodeURIComponent(runId)}`
+      : `${LIVESCREEN_HOST}/stream/${serial}`
+    socket = new WebSocket(streamUrl)
     socket.binaryType = 'arraybuffer'
     socket.onmessage = (event) => {
       messageCount += 1
@@ -175,21 +213,22 @@ export function useDeviceScreen() {
     }, FIRST_FRAME_TIMEOUT_MS)
   }
 
-  function connect(serial) {
+  function connect(serial, { runId } = {}) {
     errorMessage.value = ''
     stopEverything()
     if (typeof VideoDecoder === 'undefined') {
       errorMessage.value = t('screen.noWebCodecs')
       startFallback(serial)
     } else {
-      startH264(serial)
+      startH264(serial, runId)
     }
   }
 
   function disconnect() {
     stopEverything()
     connectionState.value = 'idle'
+    hudLines.value = null
   }
 
-  return { canvas, connectionState, errorMessage, connect, disconnect }
+  return { canvas, connectionState, errorMessage, connect, disconnect, updateStats }
 }

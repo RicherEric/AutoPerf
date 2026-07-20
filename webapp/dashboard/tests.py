@@ -21,7 +21,10 @@ class DashboardApiTests(SimpleTestCase):
         self.db_path = Path(self._tempdir.name) / "test.db"
         self.storage = Storage(self.db_path)
         self.storage.initialize()
-        self._settings_override = override_settings(AUTOPERF_DB_PATH=self.db_path)
+        self.recordings_root = Path(self._tempdir.name) / "recordings"
+        self._settings_override = override_settings(
+            AUTOPERF_DB_PATH=self.db_path, RECORDINGS_ROOT=self.recordings_root,
+        )
         self._settings_override.enable()
         self.client = Client()
 
@@ -146,6 +149,34 @@ class DashboardApiTests(SimpleTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), {"deleted": "run1"})
         self.assertIsNone(self.storage.get_run("run1"))
+
+    def test_run_detail_delete_removes_the_recording_file_too(self):
+        self.storage.create_run("run1", "S1")
+        self.storage.update_run("run1", "completed")
+        self.recordings_root.mkdir(parents=True)
+        recording = self.recordings_root / "run1.mp4"
+        recording.write_bytes(b"fake mp4 bytes")
+        response = self.client.delete("/api/runs/run1")
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(recording.exists())
+
+    def test_run_recording_returns_not_exists_when_no_file(self):
+        self.storage.create_run("run1", "S1")
+        response = self.client.get("/api/runs/run1/recording")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"exists": False, "url": None})
+
+    def test_run_recording_returns_exists_and_url_once_file_present(self):
+        self.storage.create_run("run1", "S1")
+        self.recordings_root.mkdir(parents=True)
+        (self.recordings_root / "run1.mp4").write_bytes(b"fake mp4 bytes")
+        response = self.client.get("/api/runs/run1/recording")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"exists": True, "url": "/recordings/run1.mp4"})
+
+    def test_run_recording_returns_404_for_missing_run(self):
+        response = self.client.get("/api/runs/missing-run/recording")
+        self.assertEqual(response.status_code, 404)
 
     def test_run_detail_delete_returns_404_for_missing_run(self):
         response = self.client.delete("/api/runs/missing-run")

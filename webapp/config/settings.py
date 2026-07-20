@@ -91,6 +91,13 @@ AUTOPERF_DB_PATH = BASE_DIR.parent / "autoperf.db"
 CELERY_BROKER_URL = os.environ.get("AUTOPERF_CELERY_BROKER_URL", "redis://localhost:6379/0")
 CELERY_TASK_IGNORE_RESULT = True
 
+# Where livescreen/server.py remuxes a run's screen recording to (<run_id>.mp4,
+# via ffmpeg -c copy -- see that module's _start_recording docstring). Same
+# path both processes agree on: this one is BASE_DIR-relative, that one is
+# resolved relative to its own file, but both land on webapp/recordings/.
+RECORDINGS_ROOT = BASE_DIR / "recordings"
+RECORDINGS_URL = "/recordings/"
+
 
 # Internationalization
 # https://docs.djangoproject.com/en/5.2/topics/i18n/

@@ -9,3 +9,4 @@ artifacts/
 webapp/webapp.sqlite3
 webapp/frontend/node_modules/
 webapp/frontend/dist/
+webapp/recordings/

@@ -1,8 +1,18 @@
 import asyncio
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from livescreen.server import _PATH_RE, _h264_stream, _kill_stale_screenrecord, _screenshot_stream, handler
+from livescreen.server import (
+    _PATH_RE,
+    _h264_stream,
+    _kill_stale_screenrecord,
+    _screenshot_stream,
+    _start_recording,
+    _stop_recording,
+    handler,
+)
 
 SPS = b"\x67\x64\x00\x34\xaa"
 IDR = b"\x65\x88\x84\xab\xab"
@@ -66,7 +76,7 @@ class HandlerRoutingTests(unittest.IsolatedAsyncioTestCase):
         order = []
         calls = {"n": 0}
 
-        async def fake_stream(websocket, adb, serial):
+        async def fake_stream(websocket, adb, serial, run_id=None):
             calls["n"] += 1
             n = calls["n"]
             order.append(f"start-{n}")
@@ -98,7 +108,7 @@ class HandlerRoutingTests(unittest.IsolatedAsyncioTestCase):
         # stream even though they're unrelated. Now keyed per-serial.
         order = []
 
-        async def fake_stream(websocket, adb, serial):
+        async def fake_stream(websocket, adb, serial, run_id=None):
             order.append(f"start-{serial}")
             try:
                 await asyncio.sleep(10)
@@ -183,6 +193,40 @@ class H264StreamTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kill_mock.await_count, 2)
         kill_mock.assert_any_await(adb, "S1")
 
+    async def test_with_run_id_tees_chunks_to_the_recording_process(self):
+        stream = annexb(SPS, IDR, DELTA) + b"\x00\x00\x00\x01"
+        process = _fake_process([stream, b""])
+        ws = FakeWebSocket("/stream/S1")
+        recorder = MagicMock()
+        recorder.stdin = MagicMock()
+        recorder.stdin.drain = AsyncMock()
+
+        with patch("livescreen.server._spawn", AsyncMock(return_value=process)), \
+             patch("livescreen.server._kill_stale_screenrecord", AsyncMock()), \
+             patch("livescreen.server._start_recording", AsyncMock(return_value=recorder)) as start_mock, \
+             patch("livescreen.server._stop_recording", AsyncMock()) as stop_mock:
+            adb = MagicMock()
+            adb.exec_out_args.return_value = ["adb", "-s", "S1", "exec-out", "screenrecord ..."]
+            await _h264_stream(ws, adb, "S1", run_id="run123")
+
+        start_mock.assert_awaited_once_with("run123")
+        self.assertTrue(recorder.stdin.write.called)
+        stop_mock.assert_awaited_once_with(recorder)
+
+    async def test_without_run_id_never_starts_recording(self):
+        stream = annexb(SPS, IDR) + b"\x00\x00\x00\x01"
+        process = _fake_process([stream, b""])
+        ws = FakeWebSocket("/stream/S1")
+
+        with patch("livescreen.server._spawn", AsyncMock(return_value=process)), \
+             patch("livescreen.server._kill_stale_screenrecord", AsyncMock()), \
+             patch("livescreen.server._start_recording", AsyncMock()) as start_mock:
+            adb = MagicMock()
+            adb.exec_out_args.return_value = ["adb", "-s", "S1", "exec-out", "screenrecord ..."]
+            await _h264_stream(ws, adb, "S1")
+
+        start_mock.assert_not_called()
+
     async def test_kill_stale_screenrecord_ignores_a_failing_subprocess(self):
         # pkill exits non-zero when there's nothing to kill -- that's the
         # normal case, not an error, and must never propagate.
@@ -192,6 +236,38 @@ class H264StreamTests(unittest.IsolatedAsyncioTestCase):
         broken_process.wait = AsyncMock(side_effect=OSError("boom"))
         with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=broken_process)):
             await _kill_stale_screenrecord(adb, "S1")  # must not raise
+
+
+class RecordingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_start_recording_returns_none_when_ffmpeg_missing(self):
+        with patch("livescreen.server.shutil.which", return_value=None):
+            result = await _start_recording("run123")
+        self.assertIsNone(result)
+
+    async def test_start_recording_spawns_ffmpeg_remux_when_available(self):
+        fake_process = MagicMock()
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("livescreen.server.shutil.which", return_value="/usr/bin/ffmpeg"), \
+                 patch("livescreen.server.asyncio.create_subprocess_exec",
+                       AsyncMock(return_value=fake_process)) as spawn_mock, \
+                 patch("livescreen.server.RECORDINGS_ROOT", Path(tmp) / "recordings"):
+                result = await _start_recording("run123")
+
+        self.assertIs(result, fake_process)
+        args = spawn_mock.call_args.args
+        self.assertIn("ffmpeg", args)
+        self.assertIn("-c", args)
+        self.assertTrue(args[-1].endswith("run123.mp4"))
+
+    async def test_stop_recording_closes_stdin_and_awaits_exit(self):
+        recorder = MagicMock()
+        recorder.wait = AsyncMock()
+        await _stop_recording(recorder)
+        recorder.stdin.close.assert_called_once()
+        recorder.wait.assert_awaited_once()
+
+    async def test_stop_recording_handles_none(self):
+        await _stop_recording(None)  # must not raise
 
 
 class ScreenshotStreamTests(unittest.IsolatedAsyncioTestCase):

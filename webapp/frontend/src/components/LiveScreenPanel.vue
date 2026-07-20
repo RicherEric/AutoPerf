@@ -14,20 +14,28 @@ import StatusBadge from './StatusBadge.vue'
 const props = defineProps({
   serial: { type: String, default: '' },
   active: { type: Boolean, default: false },
+  // Pre-formatted lines (e.g. "CPU 12.3%") to overlay on the canvas as a
+  // small HUD -- omit/leave empty to show no overlay.
+  stats: { type: Array, default: () => [] },
+  // When set, tells the livescreen server to also remux this stream to an
+  // MP4 for later replay (see useDeviceScreen.js / livescreen/server.py's
+  // _start_recording) -- pass the run this device screen belongs to.
+  runId: { type: String, default: '' },
 })
 
 const { t } = useI18n()
-const { canvas, connectionState, errorMessage, connect, disconnect } = useDeviceScreen()
+const { canvas, connectionState, errorMessage, connect, disconnect, updateStats } = useDeviceScreen()
 
 function sync() {
   if (props.active && props.serial) {
-    connect(props.serial)
+    connect(props.serial, { runId: props.runId })
   } else {
     disconnect()
   }
 }
 
-watch(() => [props.serial, props.active], sync, { immediate: true })
+watch(() => [props.serial, props.active, props.runId], sync, { immediate: true })
+watch(() => props.stats, updateStats, { immediate: true })
 onUnmounted(disconnect)
 </script>
 
