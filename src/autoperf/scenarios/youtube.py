@@ -244,8 +244,8 @@ REGISTRY: dict[str, ScenarioPreset] = {
         ScenarioPreset("pip_minimize", "進入畫中畫模式並拖曳懸浮視窗。", TIER_REGRESSION, pip_minimize),
         ScenarioPreset("multi_video_session", "連續觀看多支影片(進入影片 A → 返回 → 影片 B → 返回 → 影片 C),測試長時間連續切換的穩定度。", TIER_REGRESSION, multi_video_session),
         *(
-            ScenarioPreset(f"play_{video.key}", f"直接開啟並播放{video.title},固定內容、可重現的效能測試情境。",
-                            TIER_FUNCTIONAL, _play_named_video(video))
+            ScenarioPreset(f"play_{video.key}", f"直接開啟並播放{video.title},固定內容、可重現的效能測試情境,適合作為 regression 比對基準。",
+                            TIER_REGRESSION, _play_named_video(video))
             for video in NAMED_VIDEOS
         ),
     )

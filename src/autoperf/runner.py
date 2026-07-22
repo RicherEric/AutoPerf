@@ -167,14 +167,26 @@ class TestRunner:
             if self.adapter is not None:
                 # Whether a scenario run ends normally or gets cancelled, it
                 # leaves whatever app was mid-action on screen (e.g. a video
-                # still playing) -- return to the home screen so the device
-                # is in a clean state for whoever runs the next test. Best-
-                # effort: a failure here shouldn't prevent the run's own
-                # status from being recorded.
+                # still playing) -- clean up so the device is in a clean
+                # state for whoever runs the next test. Force-stopping the
+                # app (rather than just pressing Home) is what actually
+                # matters here: many apps (YouTube included) keep playing in
+                # the background/as a notification once merely backgrounded,
+                # so Home alone doesn't stop playback. The package comes from
+                # the scenario's own first step, which is always a
+                # `launch_app` with a `package` kwarg (see the "requires a
+                # scenario" checks in run()); fall back to Home if that's
+                # ever not the case. Best-effort: a failure here shouldn't
+                # prevent the run's own status from being recorded.
+                package = self.scenario[0].kwargs.get("package") if self.scenario else None
                 try:
-                    self.adapter.key_event(self.adb, serial, HOME)
+                    if package:
+                        self.adapter.stop_app(self.adb, serial, package)
+                    else:
+                        self.adapter.key_event(self.adb, serial, HOME)
                 except Exception as exc:
-                    writer.put(TestEvent(run_id, "adapter_error", str(exc), details={"action": "key_event", "keycode": HOME}))
+                    action = {"action": "stop_app", "package": package} if package else {"action": "key_event", "keycode": HOME}
+                    writer.put(TestEvent(run_id, "adapter_error", str(exc), details=action))
             writer.put(TestEvent(run_id, "lifecycle", f"run {status}"))
             writer.close()
             self.storage.update_run(run_id, status)

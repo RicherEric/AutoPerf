@@ -63,6 +63,17 @@ async def _kill_stale_screenrecord(adb: AdbClient, serial: str) -> None:
         pass
 
 
+def _recording_paths(run_id: str) -> tuple[Path, Path]:
+    """(final_path, partial_path) -- recording is written to partial_path and
+    only renamed to final_path once ffmpeg has actually exited cleanly (see
+    _stop_recording). Never expose partial_path to readers: a reader
+    (GET /api/runs/<id>/recording) that opened it mid-write would see a file
+    with no moov atom/trailer yet -- a real MP4 file that exists but has no
+    valid duration or sample index, which is exactly the browser's "0:00,
+    spins forever" symptom for a <video> that can never finish loading."""
+    return RECORDINGS_ROOT / f"{run_id}.mp4", RECORDINGS_ROOT / f"{run_id}.mp4.part"
+
+
 async def _start_recording(run_id: str) -> asyncio.subprocess.Process | None:
     """Tees the raw H.264 elementary stream into an MP4 via ffmpeg (`-c copy`,
     a cheap remux with no re-encode -- no re-parsing of NAL units needed on
@@ -76,6 +87,13 @@ async def _start_recording(run_id: str) -> asyncio.subprocess.Process | None:
     had the live panel open for (in practice, the whole run, since Run
     Detail's panel auto-connects the moment the page opens).
 
+    `-use_wallclock_as_timestamps` matters because a raw H.264 elementary
+    stream carries no timing info of its own (no PTS/DTS) -- without it,
+    ffmpeg has to guess a constant frame rate for the whole file, which can
+    produce a wildly wrong (including near-zero) duration; timestamping each
+    chunk as it actually arrives makes the muxed file's duration match how
+    long the recording really ran.
+
     Returns None (recording silently skipped, live streaming unaffected) if
     ffmpeg isn't installed.
     """
@@ -83,22 +101,32 @@ async def _start_recording(run_id: str) -> asyncio.subprocess.Process | None:
         logger.warning("ffmpeg not found on PATH -- skipping recording for run %s", run_id)
         return None
     RECORDINGS_ROOT.mkdir(parents=True, exist_ok=True)
-    mp4_path = RECORDINGS_ROOT / f"{run_id}.mp4"
+    _, partial_path = _recording_paths(run_id)
     return await asyncio.create_subprocess_exec(
-        "ffmpeg", "-y", "-loglevel", "error", "-f", "h264", "-i", "pipe:0", "-c", "copy", str(mp4_path),
+        "ffmpeg", "-y", "-loglevel", "error",
+        "-f", "h264", "-use_wallclock_as_timestamps", "1", "-i", "pipe:0",
+        "-c", "copy", str(partial_path),
         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
     )
 
 
-async def _stop_recording(recorder: asyncio.subprocess.Process | None) -> None:
+async def _stop_recording(recorder: asyncio.subprocess.Process | None, run_id: str | None) -> None:
     if recorder is None:
         return
+    final_path, partial_path = _recording_paths(run_id)
     try:
         if recorder.stdin is not None:
             recorder.stdin.close()
         await asyncio.wait_for(recorder.wait(), timeout=10)
     except Exception:
-        logger.warning("ffmpeg recording process didn't exit cleanly")
+        logger.warning("ffmpeg recording process didn't exit cleanly for run %s", run_id)
+        return
+    if recorder.returncode == 0 and partial_path.exists():
+        partial_path.replace(final_path)  # atomic on the same filesystem
+    else:
+        logger.warning("ffmpeg exited %s for run %s -- discarding partial recording",
+                        recorder.returncode, run_id)
+        partial_path.unlink(missing_ok=True)
 
 
 async def _h264_stream(websocket, adb: AdbClient, serial: str, run_id: str | None = None) -> None:
@@ -128,7 +156,7 @@ async def _h264_stream(websocket, adb: AdbClient, serial: str, run_id: str | Non
             process.terminate()
             await process.wait()
         await _kill_stale_screenrecord(adb, serial)
-        await _stop_recording(recorder)
+        await _stop_recording(recorder, run_id)
 
 
 async def _screenshot_stream(websocket, adb: AdbClient, serial: str, interval: float = 0.7) -> None:

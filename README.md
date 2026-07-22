@@ -71,7 +71,7 @@ in `autoperf youtube-scenarios list`), and a `tier`:
 |---|---|---|
 | `smoke` | Fast, fundamental checks -- does the app even launch and reach basic content. Run often. | `cold_start`, `cold_start_and_stop`, `search_and_play`, `home_feed_scroll` |
 | `functional` | Common everyday interactions. | `home_feed_tap_video`, `like_video`, `shorts_browsing`, `shorts_like_and_next`, `subscriptions_feed_browse`, `library_and_downloads_browse`, `comment_scroll`, `fullscreen_toggle_cycle` |
-| `regression` | Deeper/edge-case flows, worth a slower cadence (e.g. nightly) precisely because they take longer and touch less-common paths. | `quality_switch_manual`, `seek_scrub_forward`, `seek_long_press_skip`, `background_foreground_resume`, `app_switch_cycle`, `pip_minimize`, `multi_video_session` |
+| `regression` | Deeper/edge-case flows, worth a slower cadence (e.g. nightly) precisely because they take longer and touch less-common paths. Includes the four deep-linked specific-video presets -- their fixed content is exactly what baseline-vs-candidate comparisons need. | `quality_switch_manual`, `seek_scrub_forward`, `seek_long_press_skip`, `background_foreground_resume`, `app_switch_cycle`, `pip_minimize`, `multi_video_session`, `play_golden`, `play_baby_groot_dancing`, `play_suis_moi`, `play_rickroll` |
 
 ```powershell
 autoperf youtube-scenarios list --tier smoke
@@ -218,17 +218,40 @@ screen and the performance graphs update together without a separate tab.
 
 **Run replay (optional, needs `ffmpeg`)**: when a `LiveScreenPanel` is opened
 with a `run_id` (Run Detail, Mission Control), the server also tees the raw
-H.264 stream into `ffmpeg -c copy` (a cheap remux, no re-encode) writing
-`webapp/recordings/<run_id>.mp4`. This deliberately reuses the *existing*
-live stream rather than spawning a second, independent screen-capture
-session -- Android only allows one per device at a time. The tradeoff: a
-run is only recorded for whatever portion of it someone had a live panel
-open for (in practice, the whole run, since Run Detail's panel auto-connects
-the moment the page opens). Once a run finishes, `GET /api/runs/<id>/recording`
-reports whether a file exists, and Run Detail renders a native
-`<video controls>` if so -- the browser's own seek bar is the scrub UI, no
-custom scrubber needed. If `ffmpeg` isn't installed, recording is silently
-skipped (logged once) and live streaming is unaffected either way.
-Recordings are served in dev via `django.views.static.serve` (`RECORDINGS_ROOT`/
-`RECORDINGS_URL` in `config/settings.py`), which handles the HTTP Range
-requests `<video>` seeking needs. Deleting a run also deletes its recording.
+H.264 stream into `ffmpeg -c copy -use_wallclock_as_timestamps 1` (a cheap
+remux, no re-encode; the wallclock-timestamps flag matters because a raw
+H.264 elementary stream carries no PTS/DTS of its own, so without it ffmpeg
+has to guess a constant frame rate for the whole file -- which can produce a
+wildly wrong, including near-zero, duration) writing
+`webapp/recordings/<run_id>.mp4.part`. This deliberately reuses the
+*existing* live stream rather than spawning a second, independent
+screen-capture session -- Android only allows one per device at a time. The
+tradeoff: a run is only recorded for whatever portion of it someone had a
+live panel open for (in practice, the whole run, since Run Detail's panel
+auto-connects the moment the page opens).
+
+The `.part` file is only renamed to its final `<run_id>.mp4` name once
+ffmpeg has actually exited cleanly (`_stop_recording`) -- a reader checking
+`GET /api/runs/<id>/recording` for the *final* name can never see a
+partially-written file. (Without this, a reader could open the file while
+ffmpeg was still mid-write, before its moov atom/trailer existed at all --
+the real, empirically-observed cause of a browser `<video>` showing "0:00,
+spins forever": the file existed, but had no valid duration or sample index
+yet.) Run Detail polls that endpoint a few times, a couple seconds apart,
+after a run finishes to give ffmpeg's flush time to actually complete.
+
+Once ready, Run Detail renders a native `<video controls>` -- the browser's
+own seek bar is the scrub UI, no custom scrubber needed. If `ffmpeg` isn't
+installed, recording is silently skipped (logged once) and live streaming is
+unaffected either way. Recordings are served in dev via
+`django.views.static.serve` (`RECORDINGS_ROOT`/`RECORDINGS_URL` in
+`config/settings.py`), which handles the HTTP Range requests `<video>`
+seeking needs. Deleting a run also deletes its recording.
+
+Audio is not captured -- only video. `adb shell screenrecord` (what this
+pipes from) has no device-audio capture capability at all; getting YouTube's
+actual audio track would need Android's `MediaProjection`
+`AudioPlaybackCapture` API (Android 12+), which requires a companion app
+running on the device (this is exactly what scrcpy's audio forwarding does)
+-- a materially bigger undertaking than the current pure-`adb`-shell
+pipeline, not a small addition on top of it.

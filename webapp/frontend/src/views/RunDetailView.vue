@@ -122,19 +122,31 @@ async function loadComparison() {
   comparison.value = await getComparison(props.id)
 }
 
+const RECORDING_CHECK_ATTEMPTS = 6
+const RECORDING_CHECK_INTERVAL_MS = 2000
+
 async function checkRecording() {
   if (recordingChecked.value) return
-  recordingChecked.value = true
-  // The recording only finalizes once the live-screen WebSocket actually
-  // closes server-side (network round trip + ffmpeg flushing the MP4) --
-  // give that a moment rather than racing it with an immediate check.
-  await new Promise((resolve) => setTimeout(resolve, 1500))
-  try {
-    const info = await getRunRecording(props.id)
-    recordingUrl.value = info.exists ? info.url : null
-  } catch {
-    recordingUrl.value = null
+  // The recording only finalizes (and atomically appears under its final
+  // name -- see livescreen/server.py's _stop_recording) once the live-screen
+  // WebSocket actually closes server-side and ffmpeg finishes flushing the
+  // MP4 -- that can take a few seconds, so poll a few times rather than
+  // checking once and giving up.
+  for (let attempt = 0; attempt < RECORDING_CHECK_ATTEMPTS; attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, RECORDING_CHECK_INTERVAL_MS))
+    try {
+      const info = await getRunRecording(props.id)
+      if (info.exists) {
+        recordingUrl.value = info.url
+        recordingChecked.value = true
+        return
+      }
+    } catch {
+      // transient error -- keep trying rather than giving up early
+    }
   }
+  recordingUrl.value = null
+  recordingChecked.value = true
 }
 
 function bufferSamples(newSamples) {

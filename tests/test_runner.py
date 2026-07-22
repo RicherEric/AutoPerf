@@ -53,9 +53,13 @@ class RecordingAdapter(AndroidAdapter):
     def __init__(self):
         super().__init__()
         self.key_events = []
+        self.stopped_apps = []
 
     def key_event(self, adb, serial, keycode):
         self.key_events.append(keycode)
+
+    def stop_app(self, adb, serial, package):
+        self.stopped_apps.append(package)
 
 
 class RunnerTests(unittest.TestCase):
@@ -165,9 +169,10 @@ class RunnerTests(unittest.TestCase):
             self.assertIn('"package": "com.example.app"', row[1])
 
     def test_cancelled_mid_run_presses_home_before_marking_interrupted(self):
-        # A cancelled scenario run leaves whatever app was mid-action on
-        # screen (e.g. a video still playing) -- it must return to the home
-        # screen so the device is clean for whoever runs the next test.
+        # No scenario is set here, so there's no package to force-stop --
+        # cleanup falls back to pressing Home (see
+        # test_completed_run_force_stops_the_scenarios_app for the more
+        # common case where a scenario's app gets force-stopped instead).
         with tempfile.TemporaryDirectory() as directory:
             storage = Storage(Path(directory) / "db.sqlite")
             storage.initialize()
@@ -186,10 +191,12 @@ class RunnerTests(unittest.TestCase):
             self.assertIn(HOME, adapter.key_events)
             self.assertEqual(storage.get_run(run_id)["status"], "interrupted")
 
-    def test_completed_run_also_presses_home(self):
+    def test_completed_run_force_stops_the_scenarios_app(self):
         # A normally-completed scenario run still leaves whatever app was
         # driven (e.g. a video mid-playback) on screen -- every run, not
-        # just a cancelled one, should end with the device back at home.
+        # just a cancelled one, should end with it cleaned up. Force-stopping
+        # (not just pressing Home) is what's needed here: many apps, YouTube
+        # included, keep playing in the background once merely backgrounded.
         with tempfile.TemporaryDirectory() as directory:
             storage = Storage(Path(directory) / "db.sqlite")
             storage.initialize()
@@ -199,7 +206,8 @@ class RunnerTests(unittest.TestCase):
                 storage, FakeAdb(), [CpuCollector(0.01)], adapter=adapter, scenario=scenario
             ).run("device", 0.05)
 
-            self.assertIn(HOME, adapter.key_events)
+            self.assertIn("com.example.app", adapter.stopped_apps)
+            self.assertNotIn(HOME, adapter.key_events)
             self.assertEqual(storage.get_run(run_id)["status"], "completed")
 
     def test_run_without_adapter_never_presses_home(self):

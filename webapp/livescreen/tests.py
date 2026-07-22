@@ -8,6 +8,7 @@ from livescreen.server import (
     _PATH_RE,
     _h264_stream,
     _kill_stale_screenrecord,
+    _recording_paths,
     _screenshot_stream,
     _start_recording,
     _stop_recording,
@@ -211,7 +212,7 @@ class H264StreamTests(unittest.IsolatedAsyncioTestCase):
 
         start_mock.assert_awaited_once_with("run123")
         self.assertTrue(recorder.stdin.write.called)
-        stop_mock.assert_awaited_once_with(recorder)
+        stop_mock.assert_awaited_once_with(recorder, "run123")
 
     async def test_without_run_id_never_starts_recording(self):
         stream = annexb(SPS, IDR) + b"\x00\x00\x00\x01"
@@ -257,17 +258,50 @@ class RecordingTests(unittest.IsolatedAsyncioTestCase):
         args = spawn_mock.call_args.args
         self.assertIn("ffmpeg", args)
         self.assertIn("-c", args)
-        self.assertTrue(args[-1].endswith("run123.mp4"))
+        self.assertIn("-use_wallclock_as_timestamps", args)
+        # Written to a .part path, not the final name directly -- see
+        # _stop_recording's atomic-rename tests below for why.
+        self.assertTrue(args[-1].endswith("run123.mp4.part"))
 
-    async def test_stop_recording_closes_stdin_and_awaits_exit(self):
-        recorder = MagicMock()
-        recorder.wait = AsyncMock()
-        await _stop_recording(recorder)
-        recorder.stdin.close.assert_called_once()
-        recorder.wait.assert_awaited_once()
+    async def test_stop_recording_renames_partial_file_to_final_name_on_clean_exit(self):
+        # Regression test: a reader (GET /api/runs/<id>/recording) checking
+        # the *final* .mp4 name must never see a file ffmpeg is still
+        # writing -- that produced the real, empirically-observed "0:00
+        # duration, spins forever" browser symptom (a real file existed, but
+        # with no moov atom/trailer yet). Renaming only after a clean exit
+        # makes the final path all-or-nothing.
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("livescreen.server.RECORDINGS_ROOT", Path(tmp)):
+                final_path, partial_path = _recording_paths("run123")
+                partial_path.write_bytes(b"fake mp4 bytes")
+                recorder = MagicMock()
+                recorder.wait = AsyncMock()
+                recorder.returncode = 0
+
+                await _stop_recording(recorder, "run123")
+
+                recorder.stdin.close.assert_called_once()
+                recorder.wait.assert_awaited_once()
+                self.assertFalse(partial_path.exists())
+                self.assertTrue(final_path.exists())
+                self.assertEqual(final_path.read_bytes(), b"fake mp4 bytes")
+
+    async def test_stop_recording_discards_partial_file_on_nonzero_exit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch("livescreen.server.RECORDINGS_ROOT", Path(tmp)):
+                final_path, partial_path = _recording_paths("run123")
+                partial_path.write_bytes(b"broken mp4 bytes")
+                recorder = MagicMock()
+                recorder.wait = AsyncMock()
+                recorder.returncode = 1
+
+                await _stop_recording(recorder, "run123")
+
+                self.assertFalse(partial_path.exists())
+                self.assertFalse(final_path.exists())
 
     async def test_stop_recording_handles_none(self):
-        await _stop_recording(None)  # must not raise
+        await _stop_recording(None, "run123")  # must not raise
 
 
 class ScreenshotStreamTests(unittest.IsolatedAsyncioTestCase):

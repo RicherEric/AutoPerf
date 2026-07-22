@@ -43,7 +43,11 @@ class MemoryCollector(Collector):
 
 
 class BatteryCollector(Collector):
-    def __init__(self, interval: float = 60.0):
+    def __init__(self, interval: float = 10.0):
+        # Battery level/temperature change slowly, but a run shorter than one
+        # interval only ever gets a single sample -- no trend line at all on
+        # the dashboard's chart. 10s (vs cpu/memory's 5s) still cuts the
+        # dumpsys call rate in half while giving most runs several points.
         super().__init__(interval, "battery")
 
     def collect(self, adb: AdbClientProtocol, serial: str, run_id: str) -> list[MetricSample]:
