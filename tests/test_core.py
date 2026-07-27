@@ -27,7 +27,8 @@ class CoreTests(unittest.TestCase):
         for collector in (CpuCollector(), MemoryCollector(), BatteryCollector()):
             samples.extend(collector.collect(adb, "device", "run"))
         self.assertEqual({s.name: s.value for s in samples}, {
-            "cpu.total": 12.5, "memory.used": 5000000.0,
+            "cpu.total": 12.5, "cpu.user": 8.0, "cpu.kernel": 4.5,
+            "memory.used": 5000000.0,
             "battery.level": 88.0, "battery.temperature": 31.5,
         })
 

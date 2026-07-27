@@ -5,7 +5,10 @@ from . import views
 urlpatterns = [
     path("devices", views.devices, name="devices"),
     path("devices/refresh", views.devices_refresh, name="devices_refresh"),
+    path("devices/<str:serial>/control", views.device_control, name="device_control"),
+    path("devices/mdns", views.devices_mdns, name="devices_mdns"),
     path("devices/connect", views.devices_connect, name="devices_connect"),
+    path("devices/connect-discovered", views.devices_connect_discovered, name="devices_connect_discovered"),
     path("devices/pair", views.devices_pair, name="devices_pair"),
     path("devices/<str:serial>/nickname", views.device_nickname, name="device_nickname"),
     path("runs", views.runs, name="runs"),

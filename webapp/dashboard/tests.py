@@ -10,6 +10,7 @@ from django.test import Client, SimpleTestCase, override_settings
 from autoperf.adb import AdbError
 from autoperf.models import Device, MetricSample
 from autoperf.runner import DeviceBusyError
+from autoperf.scenarios.youtube import list_scenarios
 from autoperf.storage import BatchWriter, Storage
 from dashboard.services import trigger_run
 from dashboard.tasks import DEVICE_BUSY_RETRY_COUNTDOWN, run_test_task
@@ -127,10 +128,11 @@ class DashboardApiTests(SimpleTestCase):
         )
         self.assertEqual(response.status_code, 202)
         payload = response.json()
+        expected_count = len(list_scenarios("smoke"))
         self.assertEqual(payload["tier"], "smoke")
-        self.assertEqual(payload["count"], 4)
-        self.assertEqual(len(payload["run_ids"]), 4)
-        self.assertEqual(mock_task.apply_async.call_count, 4)
+        self.assertEqual(payload["count"], expected_count)
+        self.assertEqual(len(payload["run_ids"]), expected_count)
+        self.assertEqual(mock_task.apply_async.call_count, expected_count)
 
     def test_run_detail_returns_404_for_missing_run(self):
         response = self.client.get("/api/runs/missing-run")
@@ -276,6 +278,7 @@ class DashboardApiTests(SimpleTestCase):
     @patch("dashboard.tasks.AdbClient")
     def test_run_test_task_executes_directly_and_completes(self, mock_adb_client):
         mock_adb_client.return_value.shell.side_effect = lambda serial, command, timeout=10: {
+            "getprop ro.build.characteristics": "phone",
             "dumpsys cpuinfo": "1.0% TOTAL: 1.0% user + 0.0% kernel",
             "cat /proc/meminfo": "MemTotal: 100 kB\nMemAvailable: 50 kB\n",
             "dumpsys battery": " level: 50\n temperature: 300\n",
@@ -306,20 +309,42 @@ class DashboardApiTests(SimpleTestCase):
     @patch("dashboard.tasks.AdbClient")
     def test_run_test_task_with_youtube_scenario_drives_adapter(self, mock_adb_client):
         mock_adb_client.return_value.shell.side_effect = lambda serial, command, timeout=10: {
+            "getprop ro.build.characteristics": "phone",
             "dumpsys cpuinfo": "1.0% TOTAL: 1.0% user + 0.0% kernel",
             "cat /proc/meminfo": "MemTotal: 100 kB\nMemAvailable: 50 kB\n",
             "dumpsys battery": " level: 50\n temperature: 300\n",
             "wm size": "Physical size: 1080x2340\n",
             "monkey -p com.google.android.youtube -c android.intent.category.LAUNCHER 1": "",
         }[command]
-        run_test_task(str(self.db_path), "S1", 0.05, "run1", "cold_start")
+        run_test_task(str(self.db_path), "S1", 0.2, "run1", "cold_start")
         self.assertEqual(self.storage.get_run("run1")["status"], "completed")
+        self.assertEqual(self.storage.get_baseline("S1", "cold_start")["run_id"], "run1")
         conn = self.storage.connect()
         try:
             kinds = {row[0] for row in conn.execute("SELECT kind FROM test_events WHERE run_id=?", ("run1",))}
         finally:
             conn.close()
         self.assertIn("adapter_action", kinds)
+
+    @patch("dashboard.views.AdbClient")
+    def test_device_control_sends_allowlisted_key_event(self, mock_adb_client):
+        response = self.client.post(
+            "/api/devices/S1/control",
+            data=json.dumps({"action": "home"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200)
+        mock_adb_client.return_value.shell.assert_called_once_with("S1", "input keyevent KEYCODE_HOME")
+
+    @patch("dashboard.views.AdbClient")
+    def test_device_control_rejects_unknown_action(self, mock_adb_client):
+        response = self.client.post(
+            "/api/devices/S1/control",
+            data=json.dumps({"action": "shell", "command": "reboot"}),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 400)
+        mock_adb_client.return_value.shell.assert_not_called()
 
     @patch("dashboard.services.celery_app")
     def test_queue_status_reports_online_workers(self, mock_celery_app):
@@ -587,6 +612,38 @@ class DashboardApiTests(SimpleTestCase):
         )
         self.assertEqual(response.status_code, 400)
         self.assertIn("cannot connect", response.json()["error"])
+
+    @patch("dashboard.views.AdbClient")
+    def test_devices_mdns_returns_discovered_services(self, mock_adb_client):
+        mock_adb_client.return_value.mdns_services.return_value = {
+            "raw": "List of discovered mdns services",
+            "services": [{
+                "name": "adb-S1-code",
+                "service_type": "_adb-tls-connect._tcp",
+                "address": "192.168.1.50:5555",
+                "kind": "connect",
+            }],
+        }
+        response = self.client.get("/api/devices/mdns")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["services"][0]["kind"], "connect")
+
+    @patch("dashboard.views.AdbClient")
+    def test_devices_connect_discovered_connects_only_paired_services(self, mock_adb_client):
+        adb = mock_adb_client.return_value
+        adb.mdns_services.return_value = {
+            "raw": "",
+            "services": [
+                {"name": "one", "address": "192.168.1.50:5555", "kind": "connect"},
+                {"name": "two", "address": "192.168.1.51:37000", "kind": "pairing"},
+            ],
+        }
+        adb.connect.return_value = "connected to 192.168.1.50:5555"
+        adb.devices.return_value = []
+        response = self.client.post("/api/devices/connect-discovered")
+        self.assertEqual(response.status_code, 200)
+        adb.connect.assert_called_once_with("192.168.1.50:5555")
+        self.assertTrue(response.json()["results"][0]["ok"])
 
     @patch("dashboard.views.AdbClient")
     def test_devices_pair_requires_address_and_code(self, mock_adb_client):

@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { listDevices } from '../api.js'
+import { controlDevice, listDevices } from '../api.js'
 import { useDeviceScreen } from '../composables/useDeviceScreen.js'
 import Card from '../components/Card.vue'
 import StatusBadge from '../components/StatusBadge.vue'
@@ -11,6 +11,7 @@ const { canvas, connectionState, errorMessage, connect, disconnect } = useDevice
 
 const devices = ref([])
 const selectedSerial = ref('')
+const controlError = ref('')
 
 let switching = false // suppresses the auto-reconnect watcher while Prev/Next itself drives the change
 
@@ -52,6 +53,25 @@ function onNextDevice() {
   switchTo(devices.value[idx].serial)
 }
 
+async function sendControl(action, payload = {}) {
+  if (!selectedSerial.value) return
+  controlError.value = ''
+  try {
+    await controlDevice(selectedSerial.value, action, payload)
+  } catch (err) {
+    controlError.value = err.message
+  }
+}
+
+function onCanvasClick(event) {
+  const el = canvas.value
+  if (!el || !el.width || !el.height) return
+  const rect = el.getBoundingClientRect()
+  const x = Math.round((event.clientX - rect.left) * el.width / rect.width)
+  const y = Math.round((event.clientY - rect.top) * el.height / rect.height)
+  sendControl('tap', { x, y })
+}
+
 watch(selectedSerial, (next, prev) => {
   // Quick-switch UX: once a stream is already up, picking a different device
   // from the dropdown jumps straight to it instead of requiring a manual
@@ -88,7 +108,25 @@ onUnmounted(disconnect)
       />
     </div>
     <p class="hint">{{ t('screen.hint') }}</p>
-    <canvas ref="canvas" class="screen-canvas"></canvas>
+    <div class="screen-layout">
+      <canvas ref="canvas" class="screen-canvas" @click="onCanvasClick"></canvas>
+      <div class="remote-control">
+        <h3>{{ t('screen.controllerTitle') }}</h3>
+        <p v-if="controlError" class="error">{{ controlError }}</p>
+        <div class="dpad">
+          <button class="up" @click="sendControl('up')">▲</button>
+          <button class="left" @click="sendControl('left')">◀</button>
+          <button class="enter" @click="sendControl('enter')">OK</button>
+          <button class="right" @click="sendControl('right')">▶</button>
+          <button class="down" @click="sendControl('down')">▼</button>
+        </div>
+        <div class="system-buttons">
+          <button @click="sendControl('back')">{{ t('screen.backButton') }}</button>
+          <button @click="sendControl('home')">{{ t('screen.homeButton') }}</button>
+        </div>
+        <p class="hint">{{ t('screen.controllerHint') }}</p>
+      </div>
+    </div>
   </Card>
 </template>
 
@@ -105,6 +143,41 @@ onUnmounted(disconnect)
   border-radius: var(--radius-md);
   margin-top: var(--space-3);
   background: var(--color-surface-alt);
+  cursor: crosshair;
+  min-width: 0;
+}
+.screen-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 220px;
+  gap: var(--space-4);
+  align-items: start;
+}
+.remote-control {
+  margin-top: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+.remote-control h3 { margin-top: 0; }
+.dpad {
+  display: grid;
+  grid-template: repeat(3, 48px) / repeat(3, 48px);
+  justify-content: center;
+  gap: var(--space-1);
+}
+.dpad .up { grid-area: 1 / 2; }
+.dpad .left { grid-area: 2 / 1; }
+.dpad .enter { grid-area: 2 / 2; }
+.dpad .right { grid-area: 2 / 3; }
+.dpad .down { grid-area: 3 / 2; }
+.system-buttons {
+  display: flex;
+  justify-content: center;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+@media (max-width: 760px) {
+  .screen-layout { grid-template-columns: 1fr; }
 }
 .hint {
   color: var(--color-text-muted);

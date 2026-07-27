@@ -8,6 +8,9 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
 from autoperf.adb import AdbClient, AdbError
+from autoperf.adapters import (
+    BACK, HOME, DPAD_CENTER, DPAD_DOWN, DPAD_LEFT, DPAD_RIGHT, DPAD_UP,
+)
 from autoperf.analyzer import compare, compute_stats
 from autoperf.scenarios import youtube as youtube_scenarios
 
@@ -37,6 +40,35 @@ def devices_refresh(request):
 
 @csrf_exempt
 @require_http_methods(["POST"])
+def device_control(request, serial):
+    try:
+        body = json.loads(request.body or b"{}")
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "invalid JSON body"}, status=400)
+
+    action = body.get("action")
+    keycodes = {
+        "home": HOME, "back": BACK, "up": DPAD_UP, "down": DPAD_DOWN,
+        "left": DPAD_LEFT, "right": DPAD_RIGHT, "enter": DPAD_CENTER,
+    }
+    adb = AdbClient()
+    try:
+        if action in keycodes:
+            adb.shell(serial, f"input keyevent {keycodes[action]}")
+        elif action == "tap":
+            x, y = int(body.get("x")), int(body.get("y"))
+            if x < 0 or y < 0:
+                raise ValueError("tap coordinates must be non-negative")
+            adb.shell(serial, f"input tap {x} {y}")
+        else:
+            return JsonResponse({"error": "unsupported control action"}, status=400)
+    except (TypeError, ValueError, AdbError) as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
+    return JsonResponse({"ok": True, "action": action})
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
 def devices_connect(request):
     """Connects to a device over adb-over-WiFi (classroom demo: students join
     via WiFi instead of USB) and returns the refreshed device list."""
@@ -55,6 +87,50 @@ def devices_connect(request):
         return JsonResponse({"error": str(exc)}, status=400)
 
     return JsonResponse({"message": message, "devices": refresh_devices(get_storage(), AdbClient())})
+
+
+@require_http_methods(["GET"])
+def devices_mdns(request):
+    """Discovers Android wireless-debugging services advertised over mDNS."""
+    try:
+        return JsonResponse(AdbClient().mdns_services())
+    except AdbError as exc:
+        return JsonResponse({"error": str(exc)}, status=503)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def devices_connect_discovered(request):
+    """Discovers and connects every already-paired ADB-over-WiFi service.
+
+    Pairing services are deliberately ignored because Android requires the
+    user-visible six-digit code before they can be trusted.
+    """
+    adb = AdbClient()
+    try:
+        discovery = adb.mdns_services()
+    except AdbError as exc:
+        return JsonResponse({"error": str(exc)}, status=503)
+
+    results = []
+    seen = set()
+    for service in discovery["services"]:
+        address = service["address"]
+        if service["kind"] != "connect" or address in seen:
+            continue
+        seen.add(address)
+        try:
+            message = adb.connect(address)
+            results.append({"address": address, "ok": True, "message": message})
+        except (ValueError, AdbError) as exc:
+            results.append({"address": address, "ok": False, "error": str(exc)})
+
+    devices = refresh_devices(get_storage(), adb)
+    return JsonResponse({
+        "services": discovery["services"],
+        "results": results,
+        "devices": devices,
+    })
 
 
 @csrf_exempt

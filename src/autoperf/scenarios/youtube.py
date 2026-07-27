@@ -7,6 +7,7 @@ from ..adapters import APP_SWITCH, BACK, HOME, ScenarioStep
 from . import coords
 
 PACKAGE = "com.google.android.youtube"
+SETTINGS_PACKAGE = "com.android.settings"
 
 # Depth tiers, shallow to deep -- the same idea as smoke tests vs. a full
 # daily regression suite: SMOKE only checks "does the app even launch and
@@ -79,6 +80,17 @@ def _enter_video_steps(screen, start_at: float = 0.0) -> list[ScenarioStep]:
 
 def cold_start(screen) -> list[ScenarioStep]:
     return [_launch(0.0)]
+
+
+def device_settings_scroll(screen) -> list[ScenarioStep]:
+    """Visible smoke flow supported by both phones and Android TV."""
+    return [
+        ScenarioStep(0.0, "launch_app", {"package": SETTINGS_PACKAGE}),
+        ScenarioStep(3.0, "swipe", coords.rel_swipe(screen, 0.5, 0.8, 0.5, 0.3)),
+        ScenarioStep(6.0, "swipe", coords.rel_swipe(screen, 0.5, 0.8, 0.5, 0.3)),
+        ScenarioStep(9.0, "swipe", coords.rel_swipe(screen, 0.5, 0.3, 0.5, 0.8)),
+        ScenarioStep(12.0, "key_event", {"keycode": HOME}),
+    ]
 
 
 def cold_start_and_stop(screen) -> list[ScenarioStep]:
@@ -224,6 +236,12 @@ def library_and_downloads_browse(screen) -> list[ScenarioStep]:
 REGISTRY: dict[str, ScenarioPreset] = {
     preset.name: preset
     for preset in (
+        ScenarioPreset(
+            "device_settings_scroll",
+            "開啟系統設定、上下滑動並返回桌面；手機與 Android TV 都能看到明顯操作。",
+            TIER_SMOKE,
+            device_settings_scroll,
+        ),
         ScenarioPreset("cold_start", "冷啟動開啟 YouTube App,最基本的存活檢查(能不能正常開啟)。", TIER_SMOKE, cold_start),
         ScenarioPreset("cold_start_and_stop", "開啟 YouTube 後強制關閉,驗證啟動與關閉流程都正常。", TIER_SMOKE, cold_start_and_stop),
         ScenarioPreset("search_and_play", "開啟搜尋、輸入關鍵字、點擊建議、播放第一個結果影片,涵蓋搜尋到播放的核心流程。", TIER_SMOKE, search_and_play),

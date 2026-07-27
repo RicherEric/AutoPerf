@@ -187,6 +187,13 @@ header comment):
 
 ## Live device screen (view-only)
 
+手機與 Android TV 採用不同的 Live Screen 策略：手機優先使用 H.264
+WebCodecs 串流，失敗時使用縮圖 screenshot fallback；Chromecast／Google
+TV／Android TV 則直接使用 960 px 寬的 screenshot 串流，避免等待
+`screenrecord` 首幀而頻繁 timeout。完整的裝置辨識、解析度、更新頻率、
+自動重連、fallback 與錄影差異請見
+[`docs/LIVE_SCREEN.md`](docs/LIVE_SCREEN.md)。
+
 ```powershell
 .\venv\Scripts\python.exe -m pip install -e .[livescreen]
 cd webapp
@@ -197,8 +204,11 @@ own standalone asyncio process (not Django Channels -- it never touches
 Storage/SQLite, just `adb exec-out screenrecord --output-format=h264 -` piped
 over a WebSocket) and decodes in-browser via WebCodecs
 (`VideoDecoder`, Annex-B format, Chrome/Edge 94+) with an automatic fallback to
-periodic PNG screenshots (`adb exec-out screencap -p`) if WebCodecs isn't
-available or the H.264 path fails. `VideoDecoder.configure()` is called with
+periodic screenshots (`adb exec-out screencap -p`) if WebCodecs isn't
+available or the H.264 path fails. Screenshot frames are resized and converted
+to JPEG before WebSocket transmission when ffmpeg is available. TV devices
+select this screenshot path immediately instead of first waiting for H.264.
+`VideoDecoder.configure()` is called with
 only `{codec, hardwareAcceleration, optimizeForLatency}` -- no `description`,
 no `avc` field -- matching `@yume-chan/scrcpy-decoder-webcodecs` (used by
 ws-scrcpy/tango), a real production scrcpy-in-browser implementation: omitting

@@ -9,6 +9,7 @@ from livescreen.server import (
     _h264_stream,
     _kill_stale_screenrecord,
     _recording_paths,
+    _resize_screenshot,
     _screenshot_stream,
     _start_recording,
     _stop_recording,
@@ -321,6 +322,27 @@ class ScreenshotStreamTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertGreaterEqual(len(ws.sent), 1)
         self.assertEqual(ws.sent[0], b"\x89PNGfake-png")
+
+    async def test_resizes_before_sending_when_max_width_is_set(self):
+        capture = MagicMock()
+        capture.communicate = AsyncMock(return_value=(b"\x89PNGlarge", b""))
+        ws = FakeWebSocket("/stream/S1")
+        adb = MagicMock()
+        adb.exec_out_args.return_value = ["adb"]
+
+        with patch("livescreen.server._spawn", AsyncMock(return_value=capture)), \
+             patch("livescreen.server._resize_screenshot",
+                   AsyncMock(return_value=b"\xff\xd8small-jpeg")) as resize:
+            task = asyncio.ensure_future(
+                _screenshot_stream(ws, adb, "S1", interval=10, max_width=960)
+            )
+            await asyncio.sleep(0.01)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+
+        resize.assert_awaited_once_with(b"\x89PNGlarge", 960)
+        self.assertEqual(ws.sent[0], b"\xff\xd8small-jpeg")
 
 
 if __name__ == "__main__":

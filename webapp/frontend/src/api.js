@@ -15,6 +15,22 @@ export function refreshDevices() {
   return request('/devices/refresh', { method: 'POST' })
 }
 
+export function controlDevice(serial, action, payload = {}) {
+  return request(`/devices/${encodeURIComponent(serial)}/control`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action, ...payload }),
+  })
+}
+
+export function discoverMdnsDevices() {
+  return request('/devices/mdns')
+}
+
+export function connectDiscoveredDevices() {
+  return request('/devices/connect-discovered', { method: 'POST' })
+}
+
 export function connectDevice(address) {
   return request('/devices/connect', {
     method: 'POST',

@@ -77,6 +77,24 @@ class Storage:
                         "FROM baselines_old b LEFT JOIN test_runs t ON t.id = b.run_id"
                     )
                     conn.execute("DROP TABLE baselines_old")
+                # Automatically seed only missing baselines from the earliest
+                # successful run that actually has metrics. INSERT OR IGNORE
+                # preserves every baseline a user explicitly selected.
+                conn.execute(
+                    """INSERT OR IGNORE INTO baselines(device_serial, scenario, run_id, created_at)
+                       SELECT t.device_serial, COALESCE(t.youtube_scenario, ''), t.id, ?
+                       FROM test_runs t
+                       WHERE t.status='completed'
+                         AND EXISTS (SELECT 1 FROM metric_samples m WHERE m.run_id=t.id)
+                         AND t.rowid=(
+                           SELECT MIN(t2.rowid) FROM test_runs t2
+                           WHERE t2.device_serial=t.device_serial
+                             AND COALESCE(t2.youtube_scenario, '')=COALESCE(t.youtube_scenario, '')
+                             AND t2.status='completed'
+                             AND EXISTS (SELECT 1 FROM metric_samples m2 WHERE m2.run_id=t2.id)
+                         )""",
+                    (utc_now(),),
+                )
 
     def register_device(
         self, device: Device, *,

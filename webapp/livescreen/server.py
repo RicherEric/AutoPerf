@@ -159,7 +159,38 @@ async def _h264_stream(websocket, adb: AdbClient, serial: str, run_id: str | Non
         await _stop_recording(recorder, run_id)
 
 
-async def _screenshot_stream(websocket, adb: AdbClient, serial: str, interval: float = 0.7) -> None:
+async def _resize_screenshot(data: bytes, max_width: int) -> bytes:
+    """Downscale and JPEG-compress a PNG before it crosses the WebSocket.
+
+    Stock Android ``screencap`` cannot resize at capture time.  ffmpeg is
+    already an optional runtime dependency of this service for recordings,
+    and lets us cut a 2-4 MB TV PNG to a small monitoring frame without
+    adding a heavyweight image library to the project.
+    """
+    if max_width <= 0 or shutil.which("ffmpeg") is None:
+        return data
+    process = await asyncio.create_subprocess_exec(
+        "ffmpeg", "-loglevel", "error",
+        "-i", "pipe:0",
+        "-vf", f"scale='min({max_width},iw)':-2",
+        "-frames:v", "1",
+        "-q:v", "5",
+        "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    resized, _ = await process.communicate(data)
+    return resized if process.returncode == 0 and resized else data
+
+
+async def _screenshot_stream(
+    websocket,
+    adb: AdbClient,
+    serial: str,
+    interval: float = 0.7,
+    max_width: int = 0,
+) -> None:
     """Fallback for browsers without WebCodecs: periodic PNG screenshots.
 
     `adb shell screencap -p` outputs PNG (not JPEG, despite the `-p` flag's
@@ -171,6 +202,7 @@ async def _screenshot_stream(websocket, adb: AdbClient, serial: str, interval: f
         process = await _spawn(argv)
         data, _ = await process.communicate()
         if data:
+            data = await _resize_screenshot(data, max_width)
             await websocket.send(data)
         await asyncio.sleep(interval)
 
@@ -185,6 +217,14 @@ async def handler(websocket) -> None:
     query = parse_qs(parsed.query)
     mode = query.get("mode", ["h264"])[0]
     run_id = query.get("run_id", [None])[0]
+    try:
+        screenshot_interval = min(5.0, max(0.4, float(query.get("interval", ["0.7"])[0])))
+    except (TypeError, ValueError):
+        screenshot_interval = 0.7
+    try:
+        screenshot_max_width = min(1920, max(0, int(query.get("max_width", ["0"])[0])))
+    except (TypeError, ValueError):
+        screenshot_max_width = 0
     if run_id is not None and not _RUN_ID_RE.fullmatch(run_id):
         run_id = None
     adb = AdbClient()
@@ -210,7 +250,9 @@ async def handler(websocket) -> None:
     started = time.monotonic()
     try:
         if mode == "screenshot":
-            await _screenshot_stream(websocket, adb, serial)
+            await _screenshot_stream(
+                websocket, adb, serial, screenshot_interval, screenshot_max_width
+            )
         else:
             await _h264_stream(websocket, adb, serial, run_id)
     except (websockets.exceptions.ConnectionClosed, asyncio.CancelledError):
