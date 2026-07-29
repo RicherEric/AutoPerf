@@ -310,5 +310,178 @@ class StorageTests(unittest.TestCase):
             self.assertEqual(storage.get_baseline("S1", "like_video")["run_id"], "run1")
 
 
+def _storage_with_samples(directory, run_id="run1", samples=()):
+    storage = Storage(Path(directory) / "db.sqlite")
+    storage.initialize()
+    storage.create_run(run_id, "device")
+    writer = BatchWriter(storage)
+    writer.start()
+    for sample in samples:
+        writer.put(sample)
+    writer.close()
+    return storage
+
+
+class AggregateSamplesTests(unittest.TestCase):
+    def test_matches_compute_stats_on_the_same_data(self):
+        from autoperf.analyzer import compute_stats, stats_from_aggregates
+
+        samples = [
+            MetricSample("run1", "cpu", "cpu.total", float(value), "%")
+            for value in (10, 20, 30, 40, 55)
+        ] + [
+            MetricSample("run1", "memory", "memory.used", float(value), "KiB")
+            for value in (2_000_000, 2_400_000, 2_100_000)
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            storage = _storage_with_samples(directory, samples=samples)
+            aggregated = stats_from_aggregates(storage.aggregate_samples("run1"))
+            direct = compute_stats(storage.list_samples("run1", limit=100_000))
+
+        self.assertEqual(set(aggregated), set(direct))
+        for name, stat in direct.items():
+            self.assertEqual(aggregated[name].count, stat.count)
+            self.assertAlmostEqual(aggregated[name].mean, stat.mean, places=6)
+            self.assertAlmostEqual(aggregated[name].stdev, stat.stdev, places=6)
+            self.assertAlmostEqual(aggregated[name].minimum, stat.minimum, places=6)
+            self.assertAlmostEqual(aggregated[name].maximum, stat.maximum, places=6)
+
+    def test_sees_samples_beyond_the_old_100k_row_limit(self):
+        """The regression this method exists to prevent.
+
+        `compute_stats(list_samples(limit=100_000))` orders by id ASC, so on a
+        run longer than ~8 hours it silently dropped the tail -- the part of a
+        soak run where a leak actually shows. Here the tail is deliberately
+        the only place the maximum lives: a truncating implementation reports
+        the wrong maximum and a mean pulled toward the early values.
+        """
+        from autoperf.analyzer import compute_stats, stats_from_aggregates
+
+        low = [MetricSample("run1", "cpu", "cpu.total", 10.0, "%") for _ in range(120)]
+        high = [MetricSample("run1", "cpu", "cpu.total", 90.0, "%") for _ in range(30)]
+        with tempfile.TemporaryDirectory() as directory:
+            storage = _storage_with_samples(directory, samples=low + high)
+            aggregated = stats_from_aggregates(storage.aggregate_samples("run1"))
+            truncated = compute_stats(storage.list_samples("run1", limit=120))
+
+        self.assertEqual(aggregated["cpu.total"].count, 150)
+        self.assertEqual(aggregated["cpu.total"].maximum, 90.0)
+        # The truncated view sees only the healthy opening stretch.
+        self.assertEqual(truncated["cpu.total"].count, 120)
+        self.assertEqual(truncated["cpu.total"].maximum, 10.0)
+
+    def test_single_sample_metric_reports_zero_stdev(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = _storage_with_samples(
+                directory, samples=[MetricSample("run1", "battery", "battery.level", 80.0, "%")]
+            )
+            rows = {row["name"]: row for row in storage.aggregate_samples("run1")}
+        from autoperf.analyzer import stats_from_aggregates
+
+        stats = stats_from_aggregates(list(rows.values()))
+        self.assertEqual(stats["battery.level"].count, 1)
+        self.assertEqual(stats["battery.level"].stdev, 0.0)
+
+    def test_empty_run_aggregates_to_nothing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = _storage_with_samples(directory)
+            self.assertEqual(storage.aggregate_samples("run1"), [])
+
+
+class DownsampleSamplesTests(unittest.TestCase):
+    def test_caps_points_per_metric_independently(self):
+        # cpu samples 10x more often than battery; each must still get the
+        # full bucket budget rather than battery being crowded out.
+        samples = [MetricSample("run1", "cpu", "cpu.total", float(i), "%") for i in range(500)]
+        samples += [MetricSample("run1", "battery", "battery.level", float(i), "%") for i in range(50)]
+        with tempfile.TemporaryDirectory() as directory:
+            storage = _storage_with_samples(directory, samples=samples)
+            rows = storage.downsample_samples("run1", buckets=10)
+
+        counts = {}
+        for row in rows:
+            counts[row["name"]] = counts.get(row["name"], 0) + 1
+        self.assertEqual(counts, {"cpu.total": 10, "battery.level": 10})
+
+    def test_preserves_extremes_inside_a_bucket(self):
+        # A single spike must survive bucketing -- averaging it away would
+        # defeat the point of watching a long run.
+        values = [10.0] * 99 + [500.0]
+        samples = [MetricSample("run1", "cpu", "cpu.total", v, "%") for v in values]
+        with tempfile.TemporaryDirectory() as directory:
+            storage = _storage_with_samples(directory, samples=samples)
+            rows = storage.downsample_samples("run1", buckets=5)
+        self.assertEqual(max(row["maximum"] for row in rows), 500.0)
+
+    def test_fewer_samples_than_buckets_yields_one_point_each(self):
+        samples = [MetricSample("run1", "cpu", "cpu.total", float(i), "%") for i in range(3)]
+        with tempfile.TemporaryDirectory() as directory:
+            storage = _storage_with_samples(directory, samples=samples)
+            rows = storage.downsample_samples("run1", buckets=50)
+        self.assertEqual(len(rows), 3)
+        self.assertEqual([row["count"] for row in rows], [1, 1, 1])
+
+
+class CampaignStorageTests(unittest.TestCase):
+    def test_migrates_database_predating_campaign_id_column(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = Path(directory) / "db.sqlite"
+            conn = sqlite3.connect(str(db_path))
+            conn.execute(
+                "CREATE TABLE test_runs (id TEXT PRIMARY KEY, device_serial TEXT NOT NULL, status TEXT NOT NULL,"
+                " started_at TEXT, finished_at TEXT, checkpoint TEXT, error TEXT)"
+            )
+            conn.execute("INSERT INTO test_runs VALUES ('legacy','devX','completed',null,null,null,null)")
+            conn.commit()
+            conn.close()
+
+            storage = Storage(db_path)
+            storage.initialize()
+            storage.initialize()  # the added index must not break a second pass
+            self.assertIsNotNone(storage.get_run("legacy"))
+            self.assertIsNone(storage.get_run("legacy")["campaign_id"])
+
+    def test_lists_campaigns_with_child_run_counts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = Storage(Path(directory) / "db.sqlite")
+            storage.initialize()
+            storage.create_campaign("c1", "repeat", "devA", 30.0, tier="smoke", iterations=2)
+            for index, status in enumerate([RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.PENDING]):
+                storage.create_run(f"r{index}", "devA", "cold_start", campaign_id="c1")
+                storage.update_run(f"r{index}", status)
+
+            campaign = storage.list_campaigns()[0]
+            self.assertEqual(campaign["run_count"], 3)
+            self.assertEqual(campaign["completed_count"], 1)
+            self.assertEqual(campaign["failed_count"], 1)
+            self.assertEqual([r["id"] for r in storage.list_campaign_runs("c1")], ["r0", "r1", "r2"])
+
+    def test_cancel_flags_only_unfinished_runs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = Storage(Path(directory) / "db.sqlite")
+            storage.initialize()
+            storage.create_campaign("c1", "repeat", "devA", 30.0, scenario="cold_start", iterations=3)
+            storage.create_run("done", "devA", campaign_id="c1")
+            storage.update_run("done", RunStatus.COMPLETED)
+            storage.create_run("queued", "devA", campaign_id="c1")
+
+            self.assertEqual(storage.cancel_campaign_runs("c1"), 1)
+            self.assertEqual(storage.get_run("queued")["cancel_requested"], 1)
+            self.assertEqual(storage.get_run("done")["cancel_requested"], 0)
+
+    def test_delete_campaign_removes_its_runs_and_returns_their_ids(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = Storage(Path(directory) / "db.sqlite")
+            storage.initialize()
+            storage.create_campaign("c1", "soak", "devA", 3600.0, scenario="play_golden")
+            storage.create_run("child", "devA", campaign_id="c1")
+            storage.create_run("unrelated", "devA")
+
+            self.assertEqual(storage.delete_campaign("c1"), ["child"])
+            self.assertIsNone(storage.get_campaign("c1"))
+            self.assertIsNone(storage.get_run("child"))
+            self.assertIsNotNone(storage.get_run("unrelated"))
+
+
 if __name__ == "__main__":
     unittest.main()

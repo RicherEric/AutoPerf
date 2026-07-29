@@ -16,6 +16,11 @@ _URI_RE = re.compile(r"^https://[A-Za-z0-9./:?=_&%-]+$")
 HOME = "KEYCODE_HOME"
 BACK = "KEYCODE_BACK"
 APP_SWITCH = "KEYCODE_APP_SWITCH"
+DPAD_UP = "KEYCODE_DPAD_UP"
+DPAD_DOWN = "KEYCODE_DPAD_DOWN"
+DPAD_LEFT = "KEYCODE_DPAD_LEFT"
+DPAD_RIGHT = "KEYCODE_DPAD_RIGHT"
+DPAD_CENTER = "KEYCODE_DPAD_CENTER"
 
 
 def _require_package(package: str) -> str:
@@ -107,6 +112,37 @@ class AndroidAdapter(Adapter):
         if not match:
             raise ValueError("Unable to parse screen size")
         return int(match.group(1)), int(match.group(2))
+
+
+class AndroidTvAdapter(AndroidAdapter):
+    """Maps phone-oriented scenarios onto Android TV packages and DPAD input."""
+
+    _PACKAGE_MAP = {
+        "com.android.settings": ("com.android.tv.settings", ".MainSettings"),
+        "com.google.android.youtube": ("com.google.android.youtube.tv", None),
+    }
+
+    def __init__(self):
+        Adapter.__init__(self, "android-tv")
+
+    def launch_app(self, adb, serial, package, activity=None, data=None):
+        package, mapped_activity = self._PACKAGE_MAP.get(package, (package, None))
+        super().launch_app(adb, serial, package, mapped_activity or activity, data)
+
+    def stop_app(self, adb, serial, package):
+        package, _ = self._PACKAGE_MAP.get(package, (package, None))
+        super().stop_app(adb, serial, package)
+
+    def tap(self, adb, serial, x, y):
+        self.key_event(adb, serial, DPAD_CENTER)
+
+    def swipe(self, adb, serial, x1, y1, x2, y2, duration_ms=300):
+        dx, dy = int(x2) - int(x1), int(y2) - int(y1)
+        if abs(dy) >= abs(dx):
+            keycode = DPAD_DOWN if dy < 0 else DPAD_UP
+        else:
+            keycode = DPAD_RIGHT if dx < 0 else DPAD_LEFT
+        self.key_event(adb, serial, keycode)
 
 
 @dataclass(frozen=True, slots=True)

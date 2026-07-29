@@ -7,7 +7,7 @@ from dataclasses import asdict
 
 from .adapters import AndroidAdapter, ScenarioStep
 from .adb import AdbClient
-from .analyzer import compare, compute_stats
+from .analyzer import compare, stats_from_aggregates
 from .collectors import default_collectors
 from .runner import TestRunner
 from .scenarios import youtube as youtube_scenarios
@@ -116,7 +116,7 @@ def main(argv: list[str] | None = None) -> int:
                 scenario_desc = f"scenario {args.scenario!r}" if args.scenario else "plain runs"
                 print(f"No baseline set for this device ({scenario_desc})")
                 return 1
-            stats = compute_stats(storage.list_samples(baseline["run_id"], limit=100_000))
+            stats = stats_from_aggregates(storage.aggregate_samples(baseline["run_id"]))
             print(json.dumps({
                 "run_id": baseline["run_id"],
                 "created_at": baseline["created_at"],
@@ -132,8 +132,8 @@ def main(argv: list[str] | None = None) -> int:
             scenario_desc = f"scenario {run['youtube_scenario']!r}" if run["youtube_scenario"] else "plain runs"
             print(f"No baseline set for device {run['device_serial']} ({scenario_desc})")
             return 1
-        baseline_stats = compute_stats(storage.list_samples(baseline["run_id"], limit=100_000))
-        candidate_stats = compute_stats(storage.list_samples(args.run_id, limit=100_000))
+        baseline_stats = stats_from_aggregates(storage.aggregate_samples(baseline["run_id"]))
+        candidate_stats = stats_from_aggregates(storage.aggregate_samples(args.run_id))
         results = compare(baseline_stats, candidate_stats, threshold_pct=args.threshold)
         print(json.dumps({
             "baseline_run_id": baseline["run_id"],

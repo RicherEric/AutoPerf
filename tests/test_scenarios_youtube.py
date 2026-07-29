@@ -22,12 +22,13 @@ class YoutubeScenarioRegistryTests(unittest.TestCase):
                     self.assertIn(step.action, KNOWN_ACTIONS)
                     self.assertGreaterEqual(step.at, 0.0)
 
-    def test_every_preset_launches_youtube_first(self):
+    def test_every_preset_launches_its_target_app_first(self):
         for name in youtube.list_scenarios():
             with self.subTest(scenario=name):
                 steps = youtube.build(name, SCREEN)
                 self.assertEqual(steps[0].action, "launch_app")
-                self.assertEqual(steps[0].kwargs["package"], youtube.PACKAGE)
+                expected = youtube.SETTINGS_PACKAGE if name == "device_settings_scroll" else youtube.PACKAGE
+                self.assertEqual(steps[0].kwargs["package"], expected)
 
     def test_steps_within_a_preset_are_chronologically_ordered(self):
         for name in youtube.list_scenarios():

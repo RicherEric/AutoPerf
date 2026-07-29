@@ -1,5 +1,6 @@
 import { ref } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { listDevices } from '../api.js'
 
 const LIVESCREEN_HOST = 'ws://127.0.0.1:8100'
 // The server now runs a pre-stream cleanup pass (_kill_stale_screenrecord)
@@ -7,7 +8,8 @@ const LIVESCREEN_HOST = 'ws://127.0.0.1:8100'
 // SPS/PPS/IDR emission latency -- 3000ms was cutting it too close on a cold
 // first connect, so most attempts fell back to screenshots even when H.264
 // would have worked fine given another second or two.
-const FIRST_FRAME_TIMEOUT_MS = 6000
+const FIRST_FRAME_TIMEOUT_MS = 20000
+const RECONNECT_DELAYS_MS = [1000, 2000, 5000, 10000]
 
 // Shared WebCodecs/canvas connect-decode-fallback logic behind a live
 // `/stream/<serial>` WebSocket, extracted from the standalone device-screen
@@ -20,7 +22,7 @@ export function useDeviceScreen() {
   const { t } = useI18n()
 
   const canvas = ref(null)
-  const connectionState = ref('idle') // idle | connecting | streaming | fallback | error
+  const connectionState = ref('idle') // idle | connecting | streaming | fallback | retrying | error
   const errorMessage = ref('')
   // Array of pre-formatted strings (e.g. "CPU 12.3%"), or null to hide the
   // HUD -- the composable stays agnostic about metric semantics/formatting;
@@ -31,6 +33,32 @@ export function useDeviceScreen() {
   let decoder = null
   let firstFrameTimer = null
   let gotFirstFrame = false
+  let reconnectTimer = null
+  let reconnectAttempt = 0
+  let desiredConnection = null
+  let manuallyStopped = false
+  let connectGeneration = 0
+
+  async function isTvDevice(serial) {
+    try {
+      const devices = await listDevices()
+      const device = devices.find((item) => item.serial === serial)
+      if (!device) return false
+      const identity = [
+        device.model,
+        device.product,
+        device.manufacturer,
+        device.brand,
+        device.device,
+        device.nickname,
+      ].filter(Boolean).join(' ').toLowerCase()
+      return /(chromecast|google\s*tv|android\s*tv|smart\s*tv|sabrina|bravia|shield)/i.test(identity)
+    } catch {
+      // Device metadata is only an optimization. If it is temporarily
+      // unavailable, retain the normal H.264 -> screenshot fallback.
+      return false
+    }
+  }
 
   function updateStats(lines) {
     hudLines.value = lines && lines.length ? lines : null
@@ -77,6 +105,7 @@ export function useDeviceScreen() {
 
   function stopEverything() {
     clearTimeout(firstFrameTimer)
+    clearTimeout(reconnectTimer)
     if (decoder && decoder.state !== 'closed') {
       try {
         decoder.close()
@@ -91,6 +120,28 @@ export function useDeviceScreen() {
       socket.close()
     }
     socket = null
+  }
+
+  function scheduleReconnect() {
+    if (manuallyStopped || !desiredConnection || reconnectTimer) return
+    stopEverything()
+    connectionState.value = 'retrying'
+    const delay = RECONNECT_DELAYS_MS[Math.min(reconnectAttempt, RECONNECT_DELAYS_MS.length - 1)]
+    reconnectAttempt += 1
+    errorMessage.value = t('screen.reconnecting', {
+      seconds: Math.round(delay / 1000),
+      attempt: reconnectAttempt,
+    })
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null
+      if (!manuallyStopped && desiredConnection) {
+        if (desiredConnection.preferScreenshot) {
+          startFallback(desiredConnection.serial, desiredConnection.runId)
+        } else {
+          startH264(desiredConnection.serial, desiredConnection.runId)
+        }
+      }
+    }, delay)
   }
 
   function parseCodecFromSps(bytes) {
@@ -108,26 +159,40 @@ export function useDeviceScreen() {
     return `avc1.${hex(profileIdc)}${hex(constraintFlags)}${hex(levelIdc)}`
   }
 
-  function startFallback(serial) {
+  function startFallback(serial, runId) {
     stopEverything()
     connectionState.value = 'fallback'
-    socket = new WebSocket(`${LIVESCREEN_HOST}/stream/${serial}?mode=screenshot`)
+    // TV screenshots are much larger than phone screenshots (often 3+ MB).
+    // A slower cadence keeps ADB and the browser responsive without delaying
+    // the first frame; the server captures immediately before its first sleep.
+    const isTv = desiredConnection?.preferScreenshot
+    const interval = isTv ? 1.2 : 0.7
+    const maxWidth = isTv ? 960 : 720
+    socket = new WebSocket(
+      `${LIVESCREEN_HOST}/stream/${serial}?mode=screenshot&interval=${interval}&max_width=${maxWidth}`,
+    )
     // No run_id here: the server only records the h264 path (see
     // livescreen/server.py's _start_recording) -- there's no recording to
     // tie a screenshot-fallback session to anyway.
     socket.binaryType = 'arraybuffer'
     socket.onmessage = async (event) => {
       try {
-        const bitmap = await createImageBitmap(new Blob([event.data], { type: 'image/png' }))
+        // The service normally sends a resized JPEG; if ffmpeg isn't
+        // available it transparently falls back to the original PNG.
+        // Leaving the MIME type unset lets the browser sniff either format.
+        const bitmap = await createImageBitmap(new Blob([event.data]))
         drawBitmapToCanvas(bitmap)
+        reconnectAttempt = 0
+        errorMessage.value = ''
       } catch (err) {
         errorMessage.value = t('screen.screenshotDecodeFailed', { message: err.message })
       }
     }
     socket.onerror = () => {
-      connectionState.value = 'error'
       errorMessage.value = t('screen.screenshotConnectionFailed')
+      scheduleReconnect()
     }
+    socket.onclose = () => scheduleReconnect()
   }
 
   function startH264(serial, runId) {
@@ -146,7 +211,9 @@ export function useDeviceScreen() {
     decoder = new VideoDecoder({
       output: (frame) => {
         gotFirstFrame = true
+        reconnectAttempt = 0
         connectionState.value = 'streaming'
+        errorMessage.value = ''
         clearTimeout(firstFrameTimer)
         drawBitmapToCanvas(frame)
         frame.close()
@@ -154,7 +221,7 @@ export function useDeviceScreen() {
       error: (err) => {
         console.error('VideoDecoder error', err)
         errorMessage.value = t('screen.decoderError', { message: err.message })
-        startFallback(serial)
+        startFallback(serial, runId)
       },
     })
 
@@ -201,30 +268,53 @@ export function useDeviceScreen() {
     }
     socket.onerror = () => {
       errorMessage.value = t('screen.connectionFailed')
-      startFallback(serial)
+      startFallback(serial, runId)
+    }
+    socket.onclose = () => {
+      if (!gotFirstFrame) startFallback(serial, runId)
+      else scheduleReconnect()
     }
 
     firstFrameTimer = setTimeout(() => {
       if (!gotFirstFrame) {
         console.warn(`No frame after ${FIRST_FRAME_TIMEOUT_MS}ms: received ${messageCount} WS message(s), configured=${configured}`)
         errorMessage.value = t('screen.noFrameArrived', { count: messageCount })
-        startFallback(serial)
+        startFallback(serial, runId)
       }
     }, FIRST_FRAME_TIMEOUT_MS)
   }
 
-  function connect(serial, { runId } = {}) {
+  async function connect(serial, { runId } = {}) {
+    const generation = ++connectGeneration
     errorMessage.value = ''
+    manuallyStopped = false
+    desiredConnection = { serial, runId, preferScreenshot: false }
+    reconnectAttempt = 0
     stopEverything()
+
+    // Chromecast / Android TV frequently takes a long time to start
+    // screenrecord and may not emit an IDR before the first-frame timeout.
+    // Discover the form factor first and go directly to the reliable
+    // screenshot transport instead of making the user wait for that timeout.
+    const preferScreenshot = await isTvDevice(serial)
+    if (generation !== connectGeneration || manuallyStopped || desiredConnection?.serial !== serial) return
+    desiredConnection.preferScreenshot = preferScreenshot
+    if (preferScreenshot) {
+      startFallback(serial, runId)
+      return
+    }
     if (typeof VideoDecoder === 'undefined') {
       errorMessage.value = t('screen.noWebCodecs')
-      startFallback(serial)
+      startFallback(serial, runId)
     } else {
       startH264(serial, runId)
     }
   }
 
   function disconnect() {
+    connectGeneration += 1
+    manuallyStopped = true
+    desiredConnection = null
     stopEverything()
     connectionState.value = 'idle'
     hudLines.value = null

@@ -1,6 +1,6 @@
 import unittest
 
-from autoperf.adapters import HOME, AndroidAdapter
+from autoperf.adapters import HOME, AndroidAdapter, AndroidTvAdapter
 
 
 class RecordingAdb:
@@ -105,6 +105,32 @@ class AndroidAdapterTests(unittest.TestCase):
         adb = RecordingAdb(response="no size info here")
         with self.assertRaises(ValueError):
             AndroidAdapter().screen_size(adb, "device")
+
+    def test_tv_adapter_maps_settings_to_tv_activity(self):
+        adb = RecordingAdb()
+        AndroidTvAdapter().launch_app(adb, "tv", "com.android.settings")
+        self.assertEqual(
+            adb.calls,
+            [("tv", "am start -n com.android.tv.settings/.MainSettings", 10)],
+        )
+
+    def test_tv_adapter_maps_youtube_package(self):
+        adb = RecordingAdb()
+        AndroidTvAdapter().launch_app(adb, "tv", "com.google.android.youtube")
+        self.assertEqual(
+            adb.calls,
+            [("tv", "monkey -p com.google.android.youtube.tv -c android.intent.category.LAUNCHER 1", 10)],
+        )
+
+    def test_tv_adapter_maps_touch_gestures_to_dpad(self):
+        adb = RecordingAdb()
+        adapter = AndroidTvAdapter()
+        adapter.tap(adb, "tv", 100, 200)
+        adapter.swipe(adb, "tv", 500, 800, 500, 300)
+        self.assertEqual(adb.calls, [
+            ("tv", "input keyevent KEYCODE_DPAD_CENTER", 10),
+            ("tv", "input keyevent KEYCODE_DPAD_DOWN", 10),
+        ])
 
 
 if __name__ == "__main__":

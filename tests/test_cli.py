@@ -231,7 +231,7 @@ class CliTests(unittest.TestCase):
             results = json.loads(out.getvalue())
             self.assertEqual(
                 sorted(r["scenario"] for r in results),
-                ["cold_start", "cold_start_and_stop", "home_feed_scroll", "search_and_play"],
+                ["cold_start", "cold_start_and_stop", "device_settings_scroll", "home_feed_scroll", "search_and_play"],
             )
             self.assertTrue(all(r["status"] == "completed" for r in results))
 

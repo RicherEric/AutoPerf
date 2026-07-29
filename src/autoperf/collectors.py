@@ -18,15 +18,41 @@ class Collector(ABC):
 
 
 class CpuCollector(Collector):
-    def __init__(self, interval: float = 5.0):
+    def __init__(self, interval: float = 1.0):
         super().__init__(interval, "cpu")
 
     def collect(self, adb: AdbClientProtocol, serial: str, run_id: str) -> list[MetricSample]:
+        try:
+            top_output = adb.shell(serial, "top -b -n 1 -m 1")
+            top_match = re.search(
+                r"([\d.]+)%cpu\s+([\d.]+)%user.*?([\d.]+)%sys\s+([\d.]+)%idle",
+                top_output,
+                re.IGNORECASE,
+            )
+        except Exception:
+            top_match = None
+        if top_match:
+            capacity, user, kernel, idle = map(float, top_match.groups())
+            if capacity > 0:
+                return [
+                    MetricSample(run_id, self.name, "cpu.total", (capacity - idle) / capacity * 100, "%"),
+                    MetricSample(run_id, self.name, "cpu.user", user / capacity * 100, "%"),
+                    MetricSample(run_id, self.name, "cpu.kernel", kernel / capacity * 100, "%"),
+                ]
+
         output = adb.shell(serial, "dumpsys cpuinfo")
-        match = re.search(r"([\d.]+)%\s+TOTAL", output, re.IGNORECASE)
+        match = re.search(
+            r"([\d.]+)%\s+TOTAL:\s+([\d.]+)%\s+user\s+\+\s+([\d.]+)%\s+kernel",
+            output,
+            re.IGNORECASE,
+        )
         if not match:
             raise ValueError("Unable to parse total CPU usage")
-        return [MetricSample(run_id, self.name, "cpu.total", float(match.group(1)), "%")]
+        return [
+            MetricSample(run_id, self.name, "cpu.total", float(match.group(1)), "%"),
+            MetricSample(run_id, self.name, "cpu.user", float(match.group(2)), "%"),
+            MetricSample(run_id, self.name, "cpu.kernel", float(match.group(3)), "%"),
+        ]
 
 
 class MemoryCollector(Collector):

@@ -1,0 +1,3 @@
+# Install AutoPerf and every dependency group used by development and deployment.
+# Version constraints are maintained in pyproject.toml to keep one source of truth.
+-e .[dashboard,worker,livescreen,dev]

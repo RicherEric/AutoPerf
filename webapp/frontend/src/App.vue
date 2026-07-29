@@ -21,6 +21,7 @@ function toggleLocale() {
     </router-link>
     <router-link to="/" active-class="nav-active">{{ t('nav.stats') }}</router-link>
     <router-link to="/runs" :class="{ 'nav-active': isRunSection }">{{ t('nav.runs') }}</router-link>
+    <router-link to="/campaigns" active-class="nav-active">{{ t('nav.campaigns') }}</router-link>
     <router-link to="/queue" active-class="nav-active">{{ t('nav.queue') }}</router-link>
     <router-link to="/screen" active-class="nav-active">{{ t('nav.screen') }}</router-link>
     <router-link to="/mission-control" active-class="nav-active">{{ t('nav.missionControl') }}</router-link>
