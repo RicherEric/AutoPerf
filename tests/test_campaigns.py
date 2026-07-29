@@ -8,27 +8,12 @@ from autoperf.campaigns import CampaignSpec
 from autoperf.models import MetricSample, RunStatus
 from autoperf.scenarios.youtube import list_scenarios
 from autoperf.storage import BatchWriter, Storage
+from tests.support import DeviceAdb
 
 
-class FakeAdb:
-    """Answers every shell command a scenario-driven run makes."""
-
-    def __init__(self):
-        self.commands = []
-
-    def shell(self, serial, command, timeout=10):
-        self.commands.append(command)
-        if command == "getprop ro.build.characteristics":
-            return "phone\n"
-        if command == "wm size":
-            return "Physical size: 1080x2340\n"
-        if command == "dumpsys cpuinfo":
-            return "1.0% TOTAL: 1.0% user + 0.0% kernel"
-        if command == "cat /proc/meminfo":
-            return "MemTotal: 100 kB\nMemAvailable: 50 kB\n"
-        if command == "dumpsys battery":
-            return " level: 50\n temperature: 300\n"
-        return ""
+def FakeAdb():
+    """A phone that answers everything a scenario-driven run asks it."""
+    return DeviceAdb(metrics=True)
 
 
 def _storage(directory):
@@ -142,25 +127,14 @@ class ExecuteCampaignTests(unittest.TestCase):
     def test_a_failing_run_does_not_abandon_the_rest_of_the_campaign(self):
         # A campaign exists to gather many samples; one device hiccup is
         # data, not a reason to stop collecting.
-        class HalfBrokenAdb(FakeAdb):
-            def __init__(self):
-                super().__init__()
-                self.launches = 0
-
-            def shell(self, serial, command, timeout=10):
-                if command == "wm size":
-                    self.launches += 1
-                    if self.launches == 1:
-                        raise RuntimeError("device not responding")
-                return super().shell(serial, command, timeout)
-
+        half_broken = DeviceAdb(metrics=True, fail_first={"wm size": 1})
         with tempfile.TemporaryDirectory() as directory:
             storage = _storage(directory)
             created = campaigns.create_campaign(
                 storage, CampaignSpec("repeat", "S1", 0.2, scenario="cold_start", iterations=3)
             )
             result = campaigns.execute_campaign(
-                storage, HalfBrokenAdb(), created["campaign_id"],
+                storage, half_broken, created["campaign_id"],
                 adapter_factory=lambda adb, serial: AndroidAdapter(),
             )
 

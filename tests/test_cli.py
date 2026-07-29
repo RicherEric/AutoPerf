@@ -7,23 +7,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 from autoperf import cli
-from autoperf.models import Device, MetricSample
+from autoperf.models import MetricSample
 from autoperf.storage import BatchWriter, Storage
+from tests.support import EMPTY_SCREEN, DeviceAdb, NoWaits
 
 
-class FakeAdb:
-    def devices(self):
-        return [Device("SERIAL1", "device", "Pixel", "pixel")]
-
-    def shell(self, serial, command, timeout=10):
-        return {
-            "dumpsys cpuinfo": "1.0% TOTAL: 1.0% user + 0.0% kernel",
-            "cat /proc/meminfo": "MemTotal: 100 kB\nMemAvailable: 50 kB\n",
-            "dumpsys battery": " level: 50\n temperature: 300\n",
-            "monkey -p com.example.app -c android.intent.category.LAUNCHER 1": "",
-            "monkey -p com.google.android.youtube -c android.intent.category.LAUNCHER 1": "",
-            "wm size": "Physical size: 1080x2340\n",
-        }[command]
+def FakeAdb():
+    return DeviceAdb(metrics=True)
 
 
 class CliTests(unittest.TestCase):
@@ -444,67 +434,29 @@ class PreflightCliTests(unittest.TestCase):
             self.assertEqual(json.loads(out)["count"], 1)
 
 
-class _PreflightAdbBase:
-    HIERARCHY = "<hierarchy></hierarchy>"
-
-    def devices(self):
-        return [Device("SERIAL1", "device", "Pixel", "pixel")]
-
-    def shell(self, serial, command, timeout=10):
-        if command.startswith("uiautomator"):
-            return "dumped to: /sdcard/window_dump.xml"
-        if command.startswith("cat "):
-            return self.HIERARCHY
-        if command == "wm size":
-            return "Physical size: 1080x2340\n"
-        if command == "getprop ro.build.characteristics":
-            return "phone\n"
-        if command == "dumpsys window":
-            return "  mCurrentFocus=Window{a b com.google.android.youtube/.Main}"
-        if command == "dumpsys media_session":
-            return "package=com.google.android.youtube\n state=PlaybackState {state=3}"
-        if command == "dumpsys cpuinfo":
-            return "1.0% TOTAL: 1.0% user + 0.0% kernel"
-        if command == "cat /proc/meminfo":
-            return "MemTotal: 100 kB\nMemAvailable: 50 kB\n"
-        if command == "dumpsys battery":
-            return " level: 50\n temperature: 300\n"
-        return ""
+# The feed rows home_feed_tap_video looks for. Local because "a screen that
+# satisfies exactly this scenario" is what these two cases contrast.
+FEED_ROWS = (
+    '<hierarchy>'
+    '<node class="android.view.ViewGroup" clickable="true" bounds="[0,200][1080,800]" content-desc="A"/>'
+    '<node class="android.view.ViewGroup" clickable="true" bounds="[0,800][1080,1400]" content-desc="B"/>'
+    '</hierarchy>'
+)
 
 
-class StaleSelectorAdb(_PreflightAdbBase):
+def StaleSelectorAdb(*_args, **_kwargs):
     """Nothing on screen matches, so every target drops to its coordinate."""
+    return DeviceAdb(hierarchy=EMPTY_SCREEN, metrics=True)
 
 
-class HealthySelectorAdb(_PreflightAdbBase):
+def HealthySelectorAdb(*_args, **_kwargs):
     """A screen carrying the feed rows home_feed_tap_video looks for."""
-
-    HIERARCHY = (
-        '<hierarchy>'
-        '<node class="android.view.ViewGroup" clickable="true" bounds="[0,200][1080,800]" content-desc="A"/>'
-        '<node class="android.view.ViewGroup" clickable="true" bounds="[0,800][1080,1400]" content-desc="B"/>'
-        '</hierarchy>'
-    )
+    return DeviceAdb(hierarchy=FEED_ROWS, metrics=True)
 
 
-class FakeCampaignAdb:
+def FakeCampaignAdb(*_args, **_kwargs):
     """Answers everything a scenario-driven campaign run asks the device."""
-
-    def devices(self):
-        return [Device("SERIAL1", "device", "Pixel", "pixel")]
-
-    def shell(self, serial, command, timeout=10):
-        if command == "getprop ro.build.characteristics":
-            return "phone\n"
-        if command == "wm size":
-            return "Physical size: 1080x2340\n"
-        if command == "dumpsys cpuinfo":
-            return "1.0% TOTAL: 1.0% user + 0.0% kernel"
-        if command == "cat /proc/meminfo":
-            return "MemTotal: 100 kB\nMemAvailable: 50 kB\n"
-        if command == "dumpsys battery":
-            return " level: 50\n temperature: 300\n"
-        return ""
+    return DeviceAdb(metrics=True)
 
 
 if __name__ == "__main__":
