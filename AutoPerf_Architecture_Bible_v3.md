@@ -67,6 +67,17 @@ tick (timeouts, scenario-step scheduling), a 1s checkpoint heartbeat
 from the control tick specifically so checkpoint cost does not scale with run
 length — writing one per tick starved the batch writer on multi-hour runs.
 
+Cancellation is driven by the `cancel_requested` flag in storage, never by
+Celery's control plane, since a queued task may already have started by the
+time a revoke reaches a `--pool=solo` worker. Every exit path -- normal,
+cancelled or interrupted -- force-stops the app the scenario drove, because
+media apps keep playing when merely backgrounded.
+
+On cancel that cleanup runs *before* the executor shutdown as well as after
+it: `cancel_futures` cannot interrupt an action already running, so waiting
+first meant the device stayed noisy for as long as that action took
+(measured at 10.2s on a Galaxy A55, now 1.0s).
+
 Retry and fault *injection*, both named in earlier revisions, are **not built**.
 
 ### Campaigns — `campaigns.py`
