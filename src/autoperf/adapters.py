@@ -12,6 +12,12 @@ _PACKAGE_RE = re.compile(r"^[A-Za-z][\w]*(\.[A-Za-z][\w]*)+$")
 _ACTIVITY_RE = re.compile(r"^\.?[A-Za-z][\w.]*$")
 _KEYCODE_RE = re.compile(r"^KEYCODE_[A-Z0-9_]+$")
 _WM_SIZE_RE = re.compile(r"Physical size:\s*(\d+)x(\d+)")
+# A display size override supersedes the physical panel size for input, so it
+# is preferred when `wm size` reports one.
+_OVERRIDE_SIZE_RE = re.compile(r"Override size:\s*(\d+)x(\d+)")
+# `dumpsys window displays` spells the current rotation several ways depending
+# on the Android version; all of them carry the Surface.ROTATION_* ordinal.
+_ROTATION_RE = re.compile(r"(?:mCurrentRotation|cur=|rotation)[=\s]*(\d)\b")
 _URI_RE = re.compile(r"^https://[A-Za-z0-9./:?=_&%-]+$")
 
 HOME = "KEYCODE_HOME"
@@ -211,11 +217,46 @@ class AndroidAdapter(ElementActionsMixin, Adapter):
         adb.shell(serial, f"input keyevent {_require_keycode(keycode)}")
 
     def screen_size(self, adb, serial):
+        """The coordinate space taps and swipes actually land in.
+
+        Three things make this more than reading one number:
+
+        `wm size` reports `Physical size` (the panel) and, when a display size
+        override is set, an `Override size` that supersedes it. Input lands in
+        the override, so it wins when present.
+
+        Neither line changes with rotation -- both stay portrait-shaped on a
+        rotated device. A landscape tablet would therefore have every
+        fractional coordinate computed against portrait dimensions: a tap
+        meant for the top-right corner lands mid-left instead. Rotation is
+        read separately and the dimensions swapped for the landscape cases.
+
+        Rotation constants are Surface.ROTATION_0/90/180/270; 90 and 270 are
+        the landscape ones.
+        """
         output = adb.shell(serial, "wm size")
-        match = _WM_SIZE_RE.search(output)
+        match = _OVERRIDE_SIZE_RE.search(output) or _WM_SIZE_RE.search(output)
         if not match:
             raise ValueError("Unable to parse screen size")
-        return int(match.group(1)), int(match.group(2))
+        width, height = int(match.group(1)), int(match.group(2))
+        if self._rotation(adb, serial) in (1, 3):
+            width, height = height, width
+        return width, height
+
+    @staticmethod
+    def _rotation(adb, serial) -> int:
+        """Current display rotation, or 0 if it cannot be read.
+
+        Assuming portrait on an unreadable rotation matches how every device
+        behaved before rotation was considered at all, so a failure here can
+        only leave things as they were rather than make them worse.
+        """
+        try:
+            output = adb.shell(serial, "dumpsys window displays")
+        except Exception:
+            return 0
+        match = _ROTATION_RE.search(output or "")
+        return int(match.group(1)) if match else 0
 
 
 class AndroidTvAdapter(AndroidAdapter):
