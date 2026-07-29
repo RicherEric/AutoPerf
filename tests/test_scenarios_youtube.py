@@ -3,7 +3,11 @@ import unittest
 from autoperf.scenarios import youtube
 
 SCREEN = (1080, 2340)
-KNOWN_ACTIONS = {"launch_app", "stop_app", "tap", "swipe", "key_event"}
+KNOWN_ACTIONS = {
+    "launch_app", "stop_app", "tap", "swipe", "key_event",
+    "tap_element", "verify_foreground", "verify_playing",
+}
+VERIFY_ACTIONS = {"verify_foreground", "verify_playing"}
 
 
 class YoutubeScenarioRegistryTests(unittest.TestCase):
@@ -48,6 +52,53 @@ class YoutubeScenarioRegistryTests(unittest.TestCase):
                     for key, bound in (("x1", width), ("x2", width), ("y1", height), ("y2", height)):
                         self.assertTrue(0 <= step.kwargs[key] <= bound)
 
+    def test_no_preset_taps_a_bare_coordinate_any_more(self):
+        """Coordinate taps must only ever be reached as a *fallback*.
+
+        A raw `tap` step cannot fail: `adb shell input tap` succeeds on empty
+        space, so a missed tap was recorded as a completed action and the run
+        finished green having measured an untouched screen. Every tap is now
+        a `tap_element`, which carries its coordinate as a last resort inside
+        the Target and reports when it had to use it.
+        """
+        offenders = [
+            name for name in youtube.list_scenarios()
+            if any(step.action == "tap" for step in youtube.build(name, SCREEN))
+        ]
+        self.assertEqual(offenders, [])
+
+    def test_every_tap_element_target_keeps_a_coordinate_fallback(self):
+        # The selectors are unverified guesses until captured from a real
+        # device; without the fallback a wrong guess would break a scenario
+        # that previously worked.
+        for name in youtube.list_scenarios():
+            for step in youtube.build(name, SCREEN):
+                if step.action == "tap_element":
+                    target = step.kwargs["target"]
+                    with self.subTest(scenario=name, target=target.name):
+                        self.assertTrue(target.selectors, "target has no selectors at all")
+                        self.assertIsNotNone(target.fallback)
+                        self.assertTrue(all(0.0 <= f <= 1.0 for f in target.fallback))
+
+    def test_scenarios_that_claim_playback_assert_it(self):
+        """Anything whose description promises a playing video must check.
+
+        This is the assertion that separates "the flow worked" from "four
+        taps landed on empty space and the home feed is still showing" --
+        a foreground check passes in both cases.
+        """
+        for name in ("search_and_play", "play_golden", "background_foreground_resume"):
+            with self.subTest(scenario=name):
+                actions = {step.action for step in youtube.build(name, SCREEN)}
+                self.assertIn("verify_playing", actions)
+
+    def test_every_preset_verifies_its_app_actually_came_to_the_front(self):
+        for name in youtube.list_scenarios():
+            with self.subTest(scenario=name):
+                actions = {step.action for step in youtube.build(name, SCREEN)}
+                self.assertTrue(actions & VERIFY_ACTIONS,
+                                "preset performs no verification at all")
+
     def test_build_raises_on_unknown_scenario(self):
         with self.assertRaises(ValueError):
             youtube.build("not-a-real-scenario", SCREEN)
@@ -88,12 +139,15 @@ class YoutubeScenarioRegistryTests(unittest.TestCase):
                 name = f"play_{video.key}"
                 self.assertIn(name, youtube.REGISTRY)
                 steps = youtube.build(name, SCREEN)
-                self.assertEqual(len(steps), 1)
                 step = steps[0]
                 self.assertEqual(step.action, "launch_app")
                 self.assertEqual(step.kwargs["package"], youtube.PACKAGE)
                 self.assertEqual(step.kwargs["data"], f"https://www.youtube.com/watch?v={video.video_id}")
                 self.assertEqual(len(video.video_id), 11)
+                # The deep link is the whole mechanism -- it must never be
+                # joined by taps, which is what these presets exist to avoid.
+                self.assertEqual([s.action for s in steps[1:]],
+                                 ["verify_foreground", "verify_playing"])
 
 
 if __name__ == "__main__":

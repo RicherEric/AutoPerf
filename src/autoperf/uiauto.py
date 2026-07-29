@@ -1,0 +1,371 @@
+"""Locate on-screen elements by identity instead of by coordinate.
+
+`adb shell input tap X Y` succeeds whenever X,Y is on the screen, whether or
+not anything is there. That made every coordinate-driven scenario step fail
+*silently*: the runner saw no exception, recorded "adapter_action completed",
+and the run finished green while the app sat untouched on whatever screen it
+happened to be showing. For performance work that is worse than no test at
+all -- the metrics are real numbers measuring the wrong thing, and a UI change
+that breaks the taps shows up as an apparent efficiency improvement.
+
+This module wraps `uiautomator dump`, Android's own accessibility-tree
+export, so a step can say "the search button" rather than "92% across, 6%
+down" and *fail loudly* when that button isn't there.
+
+Everything here is pure parsing and matching over an XML string, so it is
+testable without a device; the adb round-trip is confined to `dump_hierarchy`.
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass, field
+from xml.etree import ElementTree
+
+from .adb import AdbClientProtocol
+
+# `uiautomator dump` writes to a file and prints the path; dumping straight to
+# stdout is possible but interleaves with adb's own chatter on some builds, so
+# the file round-trip is the reliable form.
+_DUMP_PATH = "/sdcard/window_dump.xml"
+
+_BOUNDS_RE = re.compile(r"\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]")
+
+
+class UiDumpError(RuntimeError):
+    """The device produced no usable UI hierarchy."""
+
+
+@dataclass(frozen=True, slots=True)
+class Node:
+    resource_id: str = ""
+    text: str = ""
+    content_desc: str = ""
+    class_name: str = ""
+    package: str = ""
+    bounds: tuple[int, int, int, int] = (0, 0, 0, 0)
+    clickable: bool = False
+    focused: bool = False
+    enabled: bool = True
+
+    @property
+    def center(self) -> tuple[int, int]:
+        left, top, right, bottom = self.bounds
+        return (left + right) // 2, (top + bottom) // 2
+
+    @property
+    def area(self) -> int:
+        left, top, right, bottom = self.bounds
+        return max(0, right - left) * max(0, bottom - top)
+
+
+@dataclass(frozen=True, slots=True)
+class Selector:
+    """How to find one element. Every supplied field must match.
+
+    Stability, best first -- this is the order selector chains should be
+    written in:
+
+    1. `content_desc` -- the accessibility label. Changing it breaks screen
+       readers, which app developers are under real pressure not to do, so it
+       moves far less often than internal ids. Can be translated, though.
+    2. `resource_id` -- stable *within* an app version and meaningless
+       across them: it is an internal implementation detail the app's authors
+       have no reason to keep. Accepts either the bare id ("search_button")
+       or the fully qualified form
+       ("com.google.android.youtube:id/search_button"), since which one a
+       dump reports varies by Android version.
+    3. `class_name` + `index` -- structural: "the third clickable row in the
+       list". Survives renames entirely, and for feed-shaped screens it also
+       matches the actual intent ("open some video", not "open that exact
+       one").
+    4. `text` -- breaks on the first language change. A hint, not an anchor.
+
+    `index` picks the index-th match in document order rather than the
+    smallest one, which is what makes structural selection possible.
+    """
+
+    resource_id: str | None = None
+    text: str | None = None
+    content_desc: str | None = None
+    class_name: str | None = None
+    clickable: bool | None = None
+    index: int | None = None
+    min_area: int | None = None
+    description: str = ""
+
+    def matches(self, node: Node) -> bool:
+        if self.resource_id is not None and not _id_matches(self.resource_id, node.resource_id):
+            return False
+        if self.text is not None and self.text.lower() not in node.text.lower():
+            return False
+        if self.content_desc is not None and self.content_desc.lower() not in node.content_desc.lower():
+            return False
+        if self.class_name is not None and self.class_name not in node.class_name:
+            return False
+        if self.clickable is not None and node.clickable is not self.clickable:
+            return False
+        if self.min_area is not None and node.area < self.min_area:
+            return False
+        return True
+
+
+@dataclass(frozen=True, slots=True)
+class Target:
+    """A selector chain plus the coordinate that used to be hardcoded.
+
+    Real resource-ids change between app versions and cannot be verified
+    without the app in front of you, so a wrong guess must not break a
+    scenario that previously worked. Each selector is tried in order and the
+    fractional coordinate is the last resort -- identical to the behaviour
+    before this module existed. Which strategy actually matched is reported
+    back to the caller, so "we fell back to coordinates again" is visible in
+    the run's events instead of being indistinguishable from success.
+    """
+
+    selectors: tuple[Selector, ...] = ()
+    fallback: tuple[float, float] | None = None
+    name: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class Resolution:
+    point: tuple[int, int]
+    strategy: str          # "resource_id" | "content_desc" | "text" | "class" | "coordinates"
+    selector_index: int | None = None
+    node: Node | None = field(default=None, compare=False)
+
+
+def _id_matches(wanted: str, actual: str) -> bool:
+    if not actual:
+        return False
+    if wanted == actual:
+        return True
+    # Accept a bare id against a fully-qualified one and vice versa.
+    return actual.rsplit("/", 1)[-1] == wanted.rsplit("/", 1)[-1]
+
+
+def _parse_bounds(raw: str) -> tuple[int, int, int, int]:
+    match = _BOUNDS_RE.fullmatch(raw.strip()) if raw else None
+    if not match:
+        return (0, 0, 0, 0)
+    left, top, right, bottom = (int(value) for value in match.groups())
+    return (left, top, right, bottom)
+
+
+def parse_hierarchy(xml: str) -> list[Node]:
+    """Flatten a `uiautomator dump` XML tree into nodes.
+
+    Returns an empty list rather than raising on unparseable input: a
+    truncated dump is a device hiccup, and the caller's fallback chain is a
+    better response to it than aborting the whole run.
+    """
+    if not xml or not xml.strip():
+        return []
+    try:
+        root = ElementTree.fromstring(xml)
+    except ElementTree.ParseError:
+        return []
+
+    nodes: list[Node] = []
+    for element in root.iter("node"):
+        attrib = element.attrib
+        nodes.append(Node(
+            resource_id=attrib.get("resource-id", ""),
+            text=attrib.get("text", ""),
+            content_desc=attrib.get("content-desc", ""),
+            class_name=attrib.get("class", ""),
+            package=attrib.get("package", ""),
+            bounds=_parse_bounds(attrib.get("bounds", "")),
+            clickable=attrib.get("clickable") == "true",
+            focused=attrib.get("focused") == "true",
+            enabled=attrib.get("enabled", "true") == "true",
+        ))
+    return nodes
+
+
+def find(nodes: list[Node], selector: Selector) -> Node | None:
+    """The best match for `selector`, or None.
+
+    With no `index`, ties break toward the *smallest* matching node. Android
+    hierarchies nest heavily, so a container usually matches the same criteria
+    as the button inside it; the smallest match is the most specific one, and
+    tapping a big container's centre often lands on padding rather than on
+    anything interactive.
+
+    With an `index`, matches are taken in document order instead -- that is
+    what "the third row in the list" means, and re-sorting by size would
+    scramble it.
+    """
+    matches = [node for node in nodes if node.enabled and selector.matches(node)]
+    if not matches:
+        return None
+    if selector.index is not None:
+        if selector.index >= len(matches):
+            return None
+        return matches[selector.index]
+    return min(matches, key=lambda node: (node.area or 1 << 30))
+
+
+def _strategy_of(selector: Selector) -> str:
+    # Reported in run events, so the ordering here mirrors the stability
+    # ranking in Selector's docstring -- seeing "text" or "coordinates" in a
+    # run's events is the signal that a selector chain has decayed.
+    if selector.content_desc is not None:
+        return "content_desc"
+    if selector.resource_id is not None:
+        return "resource_id"
+    # Positional selection is structural whether or not a class narrows it --
+    # "the third clickable row" is the same idea either way.
+    if selector.index is not None:
+        return "structural"
+    if selector.class_name is not None:
+        return "class"
+    if selector.text is not None:
+        return "text"
+    return "unknown"
+
+
+def resolve(target: Target, nodes: list[Node], screen: tuple[int, int]) -> Resolution | None:
+    """Walk `target`'s selector chain, then its coordinate fallback."""
+    for index, selector in enumerate(target.selectors):
+        node = find(nodes, selector)
+        if node is not None:
+            return Resolution(node.center, _strategy_of(selector), index, node)
+    if target.fallback is not None:
+        width, height = screen
+        fx, fy = target.fallback
+        return Resolution((round(width * fx), round(height * fy)), "coordinates")
+    return None
+
+
+def dump_hierarchy(adb: AdbClientProtocol, serial: str, timeout: float = 15.0) -> str:
+    """Capture the device's current UI hierarchy as XML."""
+    output = adb.shell(serial, f"uiautomator dump {_DUMP_PATH}", timeout=timeout)
+    if "ERROR" in output.upper() and "dumped" not in output.lower():
+        raise UiDumpError(output.strip() or "uiautomator dump failed")
+    xml = adb.shell(serial, f"cat {_DUMP_PATH}", timeout=timeout)
+    if "<hierarchy" not in xml:
+        raise UiDumpError("device returned no UI hierarchy")
+    return xml
+
+
+_FOCUS_RE = re.compile(r"(?:mCurrentFocus|mFocusedApp)=.*?(?:\s|\{)([A-Za-z0-9_.]+)/([A-Za-z0-9_.$]+)")
+
+
+def current_focus(adb: AdbClientProtocol, serial: str) -> tuple[str, str] | None:
+    """The package/activity currently in front, or None if it can't be read.
+
+    Parsed from `dumpsys window`, which reports both `mCurrentFocus` (the
+    focused window) and `mFocusedApp` (the focused activity). Either is
+    enough to answer "is the app I launched actually on screen", the question
+    a scenario needs answered before it starts tapping.
+    """
+    try:
+        output = adb.shell(serial, "dumpsys window")
+    except Exception:
+        return None
+    match = _FOCUS_RE.search(output)
+    if not match:
+        return None
+    return match.group(1), match.group(2)
+
+
+_PLAYBACK_STATE_RE = re.compile(r"state=PlaybackState\s*\{.*?state=(\d+)", re.DOTALL)
+_PLAYBACK_NUM_RE = re.compile(r"\bstate=(\d+)")
+
+# android.media.session.PlaybackState
+STATE_PLAYING = 3
+
+
+def is_playing(adb: AdbClientProtocol, serial: str, package: str | None = None) -> bool | None:
+    """Whether the device currently has active media playback.
+
+    A far stronger check than "the app is in the foreground": it is the only
+    thing that actually distinguishes `search_and_play` having worked from
+    `search_and_play` having tapped four times into empty space and left
+    YouTube sitting on its home feed. Foreground checks pass in both cases.
+
+    Returns None when the state cannot be read at all, so callers can tell
+    "not playing" apart from "couldn't tell" -- treating an unreadable
+    dumpsys as a failed assertion would fail runs for the wrong reason.
+    """
+    try:
+        output = adb.shell(serial, "dumpsys media_session")
+    except Exception:
+        return None
+    if not output.strip():
+        return None
+    if package:
+        # Narrow to the section describing this package's session, so another
+        # app's background music can't be mistaken for our video playing.
+        index = output.find(package)
+        if index == -1:
+            return False
+        output = output[index:index + 4000]
+    match = _PLAYBACK_STATE_RE.search(output) or _PLAYBACK_NUM_RE.search(output)
+    if not match:
+        return None
+    return int(match.group(1)) == STATE_PLAYING
+
+
+_VERSION_NAME_RE = re.compile(r"versionName=(\S+)")
+_VERSION_CODE_RE = re.compile(r"versionCode=(\d+)")
+
+
+def package_version(adb: AdbClientProtocol, serial: str, package: str) -> dict | None:
+    """The installed build of `package`, or None if it can't be read.
+
+    Recorded per run because a comparison across two different app builds
+    measures the app's change, not the device's. Without this, a silent
+    background update between a baseline and its candidate is
+    indistinguishable from a genuine regression -- and it is the more likely
+    explanation of the two.
+
+    It also bounds how fast selectors decay: pin the app version, as
+    performance regression testing requires anyway, and the UI cannot move
+    until the version is deliberately bumped.
+    """
+    try:
+        output = adb.shell(serial, f"dumpsys package {package}")
+    except Exception:
+        return None
+    name = _VERSION_NAME_RE.search(output or "")
+    code = _VERSION_CODE_RE.search(output or "")
+    if not name and not code:
+        return None
+    return {
+        "package": package,
+        "version_name": name.group(1) if name else None,
+        "version_code": int(code.group(1)) if code else None,
+    }
+
+
+def describe_clickables(nodes: list[Node], limit: int = 60) -> list[dict]:
+    """Interactive elements, for capturing real selectors from a device.
+
+    The resource-ids a scenario should use can only be learned by looking at
+    the app itself -- they differ per app version and are not published --
+    so this backs the `autoperf ui-dump` command.
+    """
+    seen: set[tuple[str, str, str]] = set()
+    described = []
+    for node in nodes:
+        if not (node.clickable or node.resource_id):
+            continue
+        key = (node.resource_id, node.text, node.content_desc)
+        if key in seen or key == ("", "", ""):
+            continue
+        seen.add(key)
+        described.append({
+            "resource_id": node.resource_id,
+            "text": node.text,
+            "content_desc": node.content_desc,
+            "class": node.class_name,
+            "clickable": node.clickable,
+            "center": list(node.center),
+            "bounds": list(node.bounds),
+        })
+        if len(described) >= limit:
+            break
+    return described
