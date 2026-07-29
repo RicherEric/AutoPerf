@@ -139,9 +139,20 @@ SUBSCRIPTION_VIDEO = _feed_item(0, (0.5, 0.45), "subscription_video")
 SECOND_VIDEO = _feed_item(1, (0.5, 0.45), "second_video")
 THIRD_VIDEO = _feed_item(2, (0.5, 0.6), "third_video")
 DOWNLOADS_ROW = Target(
+    # Downloads is a Premium entitlement. On a free account the entry simply
+    # does not exist -- confirmed on a Galaxy A55, whose "個人中心" screen
+    # offers 觀看記錄 / 稍後觀看 / 你的影片 / 喜歡的影片 and an "升級至 Premium"
+    # upsell, with no Downloads row anywhere.
+    #
+    # The scenario's point is exercising the library-to-detail navigation, so
+    # the always-present entries are listed after it: a Premium account still
+    # opens Downloads, a free one still performs the same navigation, and
+    # neither has to fall through to a blind coordinate. Which one matched is
+    # recorded, so the difference stays visible.
     selectors=(*_desc("Downloads", "已下載", "下載內容"),
                Selector(text="Downloads", clickable=True),
-               Selector(text="下載", clickable=True),
+               *_desc("觀看記錄", "Watch history"),
+               *_desc("稍後觀看", "Watch later"),
                _id("downloads_entry")),
     fallback=(0.5, 0.3),
     name="downloads_row",

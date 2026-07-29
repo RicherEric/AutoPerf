@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
@@ -92,18 +93,39 @@ class ElementNotFound(VerificationError):
 # abstract interface stays the minimal set a plug-in must implement --
 # these are all built from launch/tap/swipe plus a UI dump.
 class ElementActionsMixin:
+    # A scenario step fires at its scripted time, which is a guess about how
+    # long the app needs. Observed on a Galaxy A55: `subscriptions_feed_browse`
+    # taps the Subscriptions tab at t=3.0s, and at that moment YouTube has
+    # rendered its containers but not yet its bottom navigation -- so a
+    # single-shot lookup found nothing and reported the selector as decayed
+    # when the real problem was arriving early. Retrying briefly turns that
+    # common case back into a match; the budget stays well inside
+    # TestRunner.adapter_action_timeout.
+    RESOLVE_ATTEMPTS = 3
+    RESOLVE_RETRY_DELAY = 1.0
+
     def _resolve(self, adb: AdbClientProtocol, serial: str, target, screen=None):
         from . import uiauto
 
         screen = screen or self.screen_size(adb, serial)
-        try:
-            nodes = uiauto.parse_hierarchy(uiauto.dump_hierarchy(adb, serial))
-        except Exception:
-            # A failed dump must not be fatal on its own: the coordinate
-            # fallback is exactly as good as the behaviour that preceded this
-            # module, so degrade to it rather than failing the step.
-            nodes = []
-        return uiauto.resolve(target, nodes, screen), screen
+        resolution = None
+        for attempt in range(self.RESOLVE_ATTEMPTS):
+            try:
+                nodes = uiauto.parse_hierarchy(uiauto.dump_hierarchy(adb, serial))
+            except Exception:
+                # A failed dump must not be fatal on its own: the coordinate
+                # fallback is exactly as good as the behaviour that preceded
+                # this module, so degrade to it rather than failing the step.
+                nodes = []
+            resolution = uiauto.resolve(target, nodes, screen)
+            # Only a *selector* match ends the retry loop. Stopping at the
+            # coordinate fallback would defeat the point, since the fallback
+            # is available on the first attempt and every attempt after it.
+            if resolution is not None and resolution.strategy != "coordinates":
+                break
+            if attempt < self.RESOLVE_ATTEMPTS - 1:
+                time.sleep(self.RESOLVE_RETRY_DELAY)
+        return resolution, screen
 
     def tap_element(self, adb: AdbClientProtocol, serial: str, target, screen=None) -> dict:
         """Tap an element located by selector chain, coordinates last.

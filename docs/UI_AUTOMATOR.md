@@ -112,6 +112,91 @@ app declines to expose. **The four `play_*` presets are the only scenarios in
 the library that are fully sound on TV**, and they are also the ones best
 suited to baseline comparison, since their content is fixed.
 
+## Measured: the search-and-tap entry is not reproducible
+
+`_enter_video_steps` — the opening used by 11 of the 24 presets — launches
+YouTube and issues four blind coordinate taps: search icon, search bar, first
+suggestion, result thumbnail. It never types anything, so "first suggestion"
+is whatever search history or trending happens to offer.
+
+Run three times on the Galaxy A55 over USB, nothing changed in between:
+
+| Run | `is_playing` | What actually played |
+|---|---|---|
+| 1 | `True` | "Golden" Official **Lyric** Video |
+| 2 | `True` | "Golden" Official **Lyric** Video |
+| 3 | `True` | 2026年7月必聽新歌 \| KKBOX華語單曲排行週榜 (1h+ compilation) |
+
+Same scenario, three runs, **two different videos**. And the activity stayed
+`Shell$HomeActivity` throughout — the search screen never opened at all. The
+taps did not do what the scenario claims; they landed on the home feed and
+opened whatever happened to sit at that position.
+
+The deep-link presets, same device, same three-run treatment:
+
+| Run | `is_playing` | What actually played |
+|---|---|---|
+| 1–3 | `True` | "Golden" Official **Music** Video (the requested `TlFrIH6GQhk`) |
+
+**Both methods report success every time.** That is precisely the problem: the
+old code saw a completed run with a full set of metrics and recorded a healthy
+`search_and_play`. But run 3 decoded an hour-long compilation while runs 1 and
+2 decoded a short lyric video — an order of magnitude apart in decode and
+render load.
+
+So a baseline comparison built on `search_and_play` can differ between runs
+entirely because the *content* differed, not because the device changed. The
+README previously asserted that fixed content matters for baselines; this is
+the measurement behind the assertion.
+
+It does not make the search-and-tap presets worthless — they exercise a real
+user path, and that is worth measuring. It makes them the wrong tool for
+baseline comparison, which is what the `play_*` presets are for.
+
+## Preflight on real hardware found three different kinds of failure
+
+Running `autoperf preflight` against the Galaxy A55 over USB surfaced findings
+that had been indistinguishable from one another — all of them would previously
+have shown up as "the selector is wrong", and only one of them was.
+
+**1. Selector decay — fixable in the table.** `library_tab` listed `"你"`,
+which matched nothing useful. The real label is `個人中心`.
+
+**2. Arriving too early — fixable in code.** `subscriptions_feed_browse` taps
+the Subscriptions tab at t=3.0s. At that moment YouTube has rendered its
+containers but not its bottom navigation, so a single-shot lookup found
+nothing and reported a decayed selector. `ElementActionsMixin` now retries a
+few times before giving up.
+
+**3. State leaking between scenarios — fixable in preflight.** After
+`home_feed_tap_video` opened a video, the next scenario's `launch_app` merely
+returned the already-running app to the foreground, still on the watch screen,
+so its bottom-navigation target was legitimately absent. Real runs never hit
+this because each is a separate `TestRunner.run()` that force-stops the app at
+the end; preflight now does the same between scenarios.
+
+**4. Account state and entitlements — not fixable at all.** Two scenarios
+cannot work on this account no matter what the selector table says:
+
+- `library_and_downloads_browse` looks for Downloads, which is a **Premium
+  entitlement**. On this free account the entry does not exist — the screen
+  offers 觀看記錄 / 稍後觀看 / 你的影片 / 喜歡的影片 and an "升級至 Premium"
+  upsell instead.
+- `subscriptions_feed_browse` expects a subscription feed, but the account
+  subscribes to nothing, so YouTube shows a channel-suggestion screen
+  (`訂閱「Domingo Ayala」。`…) rather than videos.
+
+This is the category worth knowing about: **a scenario can be perfectly
+written and still be meaningless on a given account.** No amount of selector
+work fixes it; it needs the right account, or the scenario has to be dropped
+for that device. Preflight surfaces it in a couple of minutes rather than after
+an hour of measurement.
+
+`downloads_row` now lists the always-present library entries after the
+Downloads candidates, so a Premium account still opens Downloads and a free one
+still performs the same library-to-detail navigation — and the recorded
+strategy says which happened.
+
 ## Three bugs this session found
 
 All three were invisible without real hardware, and all three are the same

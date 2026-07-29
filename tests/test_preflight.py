@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 from autoperf import preflight
 from autoperf.adapters import AndroidAdapter
@@ -80,6 +81,15 @@ class CoveringScenariosTests(unittest.TestCase):
 
 
 class CheckScenarioTests(unittest.TestCase):
+    def setUp(self):
+        # A stub device never changes between attempts, so the retry delay
+        # only buys wall-clock. The production default is exercised on
+        # hardware, not here.
+        from autoperf.adapters import ElementActionsMixin
+        patcher = patch.object(ElementActionsMixin, "RESOLVE_RETRY_DELAY", 0)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_reports_targets_found_by_selector(self):
         device = FakeDevice()
         report = preflight.check_scenario(
@@ -198,6 +208,15 @@ class SummariseTests(unittest.TestCase):
 
 
 class RunPreflightTests(unittest.TestCase):
+    def setUp(self):
+        # A stub device never changes between attempts, so the retry delay
+        # only buys wall-clock. The production default is exercised on
+        # hardware, not here.
+        from autoperf.adapters import ElementActionsMixin
+        patcher = patch.object(ElementActionsMixin, "RESOLVE_RETRY_DELAY", 0)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_returns_a_summary_and_writes_nothing(self):
         # A preflight is a question about the device and the selector table,
         # not a measurement -- it must leave no run, no metrics, no history.
