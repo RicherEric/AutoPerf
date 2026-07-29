@@ -1,18 +1,24 @@
 from __future__ import annotations
 
 import re
+import statistics
 import threading
 import uuid
 
 from django.conf import settings
 
-from autoperf.analyzer import compare, compute_stats
+from autoperf.analyzer import compare, compute_trend, stats_from_aggregates
 from autoperf.models import RunStatus, utc_now
 from autoperf.scenarios import youtube as youtube_scenarios
 from autoperf.storage import Storage
 from config.celery import app as celery_app
 
 from .tasks import run_test_task
+
+# The regression threshold analyzer.compare() is called with throughout the
+# dashboard. Defined here at module top because several functions below take
+# it as a default argument, which is evaluated at definition time.
+DEFAULT_REGRESSION_THRESHOLD_PCT = 20.0
 
 
 def get_storage() -> Storage:
@@ -234,6 +240,301 @@ def trigger_suite(storage: Storage, serial: str, tier: str, duration: float) -> 
     ]
 
 
+CAMPAIGN_KINDS = ("soak", "repeat")
+
+# A ceiling on how many child runs one campaign may enqueue at once. Not a
+# resource limit so much as a typo guard: "repeat the regression tier 10000
+# times" is far more likely to be a slipped digit than an intent, and it
+# would otherwise sit in Redis for weeks.
+MAX_CAMPAIGN_RUNS = 500
+
+
+def plan_campaign_runs(kind: str, scenario: str | None, tier: str | None,
+                       iterations: int) -> list[str | None]:
+    """The ordered list of scenarios to run, one entry per child run.
+
+    Tier campaigns are ordered iteration-major (a full sweep of the tier,
+    then the next full sweep) rather than scenario-major (all N repeats of
+    scenario A, then all N of scenario B). It matters when a campaign is cut
+    short: stopping halfway through an iteration-major campaign leaves an
+    even number of samples for every scenario, whereas scenario-major would
+    leave the first few scenarios fully sampled and the rest with none --
+    the flaky-rate comparison across scenarios would be worthless.
+
+    `None` entries mean a plain sampling run with no scenario driving the
+    device, which is a legitimate soak subject.
+    """
+    if kind == "soak":
+        return [scenario]
+    if tier:
+        names = youtube_scenarios.list_scenarios(tier=tier)
+        return [name for _ in range(iterations) for name in names]
+    return [scenario] * iterations
+
+
+def trigger_campaign(storage: Storage, kind: str, serial: str, duration: float, *,
+                     scenario: str | None = None, tier: str | None = None,
+                     iterations: int = 1) -> dict:
+    """Create a campaign and enqueue every run it comprises.
+
+    All child runs are enqueued up front through the ordinary
+    `trigger_run()`/`run_test_task` path rather than being driven by a
+    long-lived orchestrator task. The alternative -- one Celery task that
+    loops for the campaign's whole duration -- looked simpler but behaves
+    badly on this stack: the Windows-compatible `--pool=solo` worker executes
+    exactly one task at a time, so a multi-hour campaign would monopolise it
+    and stall every other device's runs, and because Celery re-delivers an
+    unacknowledged task, a worker restart mid-campaign would silently begin
+    again from iteration one.
+
+    Pre-enqueueing instead reuses machinery that already works: runs against
+    the same device are serialised by Storage.try_start_run() (with
+    run_test_task retrying on DeviceBusyError), queued work survives a worker
+    restart because Redis still holds it, and a campaign competes fairly with
+    other devices' runs instead of blocking them.
+
+    Consequently no component "owns" campaign progress, so its status is
+    derived from its child runs on read -- see get_campaign_detail.
+    """
+    if kind not in CAMPAIGN_KINDS:
+        raise ValueError(f"kind must be one of {CAMPAIGN_KINDS}")
+    if not serial:
+        raise ValueError("serial is required")
+    if duration <= 0:
+        raise ValueError("duration must be positive")
+    if tier and tier not in youtube_scenarios.TIERS:
+        raise ValueError(f"tier must be one of {youtube_scenarios.TIERS}")
+    if kind == "repeat":
+        if not scenario and not tier:
+            raise ValueError("a repeat campaign needs either a scenario or a tier")
+        if iterations < 1:
+            raise ValueError("iterations must be at least 1")
+    else:
+        # A soak is one continuous run by definition; accepting an iteration
+        # count here would quietly mean something different from what the
+        # caller asked for.
+        iterations = 1
+
+    planned = plan_campaign_runs(kind, scenario, tier, iterations)
+    if len(planned) > MAX_CAMPAIGN_RUNS:
+        raise ValueError(
+            f"campaign would enqueue {len(planned)} runs, above the limit of {MAX_CAMPAIGN_RUNS}"
+        )
+
+    campaign_id = uuid.uuid4().hex
+    storage.create_campaign(campaign_id, kind, serial, duration,
+                            scenario=scenario, tier=tier, iterations=iterations)
+    run_ids = []
+    for name in planned:
+        run_id = uuid.uuid4().hex
+        storage.create_run(run_id, serial, name, campaign_id=campaign_id)
+        run_test_task.apply_async(args=[storage.path, serial, duration, run_id, name], task_id=run_id)
+        run_ids.append(run_id)
+    storage.update_campaign(campaign_id, RunStatus.RUNNING)
+    return {"campaign_id": campaign_id, "run_ids": run_ids, "count": len(run_ids)}
+
+
+def cancel_campaign(storage: Storage, campaign_id: str) -> dict:
+    """Cancel a campaign and everything it has queued or running."""
+    campaign = storage.get_campaign(campaign_id)
+    if campaign is None:
+        raise ValueError("campaign not found")
+    storage.request_campaign_cancel(campaign_id)
+    flagged = storage.cancel_campaign_runs(campaign_id)
+    storage.update_campaign(campaign_id, RunStatus.INTERRUPTED)
+    return {"campaign_id": campaign_id, "cancelled_runs": flagged, "status": "cancelling"}
+
+
+TERMINAL_RUN_STATUSES = ("completed", "failed", "interrupted")
+
+# Buckets used when reducing a soak run for trend fitting. Enough resolution
+# to see the shape of a multi-hour run without refitting over 100k raw rows.
+SOAK_TREND_BUCKETS = 200
+
+
+def _derived_campaign_status(campaign: dict, runs: list[dict]) -> str:
+    """A campaign's status, computed from its child runs.
+
+    Nothing orchestrates a campaign while it executes (see
+    trigger_campaign's docstring), so there is no process in a position to
+    write "completed" at the right moment. Deriving it on read is what keeps
+    the status honest across a worker restart, a cancelled campaign, and runs
+    that a busy device is still retrying.
+    """
+    if campaign.get("cancel_requested"):
+        return "interrupted"
+    if not runs:
+        return campaign["status"]
+    if all(run["status"] in TERMINAL_RUN_STATUSES for run in runs):
+        return "completed"
+    return "running"
+
+
+def _run_metric_means(storage: Storage, run_id: str) -> dict[str, float]:
+    return {name: stat.mean for name, stat in
+            stats_from_aggregates(storage.aggregate_samples(run_id)).items()}
+
+
+def _repeat_analysis(storage: Storage, runs: list[dict],
+                     threshold_pct: float) -> dict:
+    """Per-scenario stability across repeated identical runs.
+
+    Two failure modes are counted separately rather than merged into one
+    pass rate, because they call for different responses: a run that never
+    reached 'completed' is a broken test or a device problem, while a
+    completed run whose metrics regressed past the threshold is a
+    performance finding. Merging them would hide which one is happening.
+
+    A scenario is reported `flaky` when the same scenario, run repeatedly
+    against the same device with the same duration, produced both passes and
+    failures -- with every input held constant, a mixed outcome is the
+    definition of flakiness, and it is exactly what a single run can never
+    reveal no matter how carefully it is inspected.
+    """
+    by_scenario: dict[str, list[dict]] = {}
+    for run in runs:
+        by_scenario.setdefault(run["youtube_scenario"] or "", []).append(run)
+
+    baseline_cache: dict[tuple[str, str], dict | None] = {}
+    scenarios = []
+    for scenario, scenario_runs in sorted(by_scenario.items()):
+        errored = [r for r in scenario_runs if r["status"] in ("failed", "interrupted")]
+        completed = [r for r in scenario_runs if r["status"] == "completed"]
+        pending = [r for r in scenario_runs if r["status"] not in TERMINAL_RUN_STATUSES]
+
+        regressed, metric_means = [], {}
+        for run in completed:
+            means = _run_metric_means(storage, run["id"])
+            for name, value in means.items():
+                metric_means.setdefault(name, []).append(value)
+
+            cache_key = (run["device_serial"], scenario)
+            if cache_key not in baseline_cache:
+                baseline_row = storage.get_baseline(run["device_serial"], scenario)
+                baseline_cache[cache_key] = (
+                    stats_from_aggregates(storage.aggregate_samples(baseline_row["run_id"]))
+                    if baseline_row else None
+                )
+            baseline_stats = baseline_cache[cache_key]
+            if baseline_stats is not None:
+                results = compare(
+                    baseline_stats,
+                    stats_from_aggregates(storage.aggregate_samples(run["id"])),
+                    threshold_pct=threshold_pct,
+                )
+                if any(r.regressed for r in results):
+                    regressed.append(run["id"])
+
+        # Spread of each metric's per-run mean across iterations. A metric
+        # whose mean swings widely between identical runs makes any
+        # single-run baseline comparison unreliable, so this is reported
+        # alongside the pass counts rather than buried.
+        stability = []
+        for name, values in sorted(metric_means.items()):
+            mean_of_means = statistics.fmean(values)
+            spread = statistics.pstdev(values) if len(values) > 1 else 0.0
+            stability.append({
+                "name": name,
+                "runs": len(values),
+                "mean": mean_of_means,
+                "stdev": spread,
+                # Coefficient of variation: spread expressed relative to the
+                # metric's own level, so cpu % and memory KiB are comparable.
+                "cv_pct": (spread / mean_of_means * 100) if mean_of_means else None,
+                "minimum": min(values),
+                "maximum": max(values),
+            })
+
+        finished = len(completed) + len(errored)
+        passed = len(completed) - len(regressed)
+        scenarios.append({
+            "scenario": scenario,
+            "total": len(scenario_runs),
+            "pending": len(pending),
+            "completed": len(completed),
+            "errored": len(errored),
+            "regressed": len(regressed),
+            "regressed_run_ids": regressed,
+            "pass_rate": (passed / finished * 100) if finished else None,
+            "flaky": finished > 1 and 0 < passed < finished,
+            "metric_stability": stability,
+        })
+    return {"scenarios": scenarios}
+
+
+def _soak_analysis(storage: Storage, runs: list[dict]) -> dict:
+    """Drift/leak verdict for a soak campaign's long run.
+
+    Reads the run through downsample_samples rather than raw rows -- a soak
+    run is precisely the case where loading every sample is unaffordable,
+    and compute_trend wants evenly spaced points anyway.
+    """
+    candidates = [r for r in runs if r["status"] in ("completed", "running")] or runs
+    if not candidates:
+        return {"run_id": None, "trends": []}
+    run = candidates[0]
+    trends = compute_trend(storage.downsample_samples(run["id"], buckets=SOAK_TREND_BUCKETS))
+    return {
+        "run_id": run["id"],
+        "status": run["status"],
+        "trends": [
+            {
+                "name": trend.name,
+                "slope_per_hour": trend.slope_per_hour,
+                "start_mean": trend.start_mean,
+                "end_mean": trend.end_mean,
+                "drift_pct": trend.drift_pct,
+                "span_hours": trend.span_hours,
+                "points": trend.points,
+            }
+            for trend in sorted(trends.values(), key=lambda t: t.name)
+        ],
+    }
+
+
+def get_campaign_detail(storage: Storage, campaign_id: str,
+                        threshold_pct: float = DEFAULT_REGRESSION_THRESHOLD_PCT) -> dict:
+    campaign = storage.get_campaign(campaign_id)
+    if campaign is None:
+        raise ValueError("campaign not found")
+    runs = storage.list_campaign_runs(campaign_id)
+    finished = sum(1 for run in runs if run["status"] in TERMINAL_RUN_STATUSES)
+    detail = {
+        **campaign,
+        "status": _derived_campaign_status(campaign, runs),
+        "stored_status": campaign["status"],
+        "run_count": len(runs),
+        "finished_count": finished,
+        "progress_pct": (finished / len(runs) * 100) if runs else 0.0,
+        "threshold_pct": threshold_pct,
+        "runs": runs,
+    }
+    if campaign["kind"] == "soak":
+        detail["soak"] = _soak_analysis(storage, runs)
+    else:
+        detail["repeat"] = _repeat_analysis(storage, runs, threshold_pct)
+    return detail
+
+
+def list_campaigns(storage: Storage, limit: int = 50, device_serial: str | None = None) -> list[dict]:
+    campaigns = storage.list_campaigns(limit=limit, device_serial=device_serial)
+    for campaign in campaigns:
+        total = campaign["run_count"] or 0
+        finished = (campaign["completed_count"] or 0) + (campaign["failed_count"] or 0)
+        campaign["stored_status"] = campaign["status"]
+        # Same derivation as get_campaign_detail, but from the counts the
+        # list query already computed rather than re-reading every run row.
+        if campaign.get("cancel_requested"):
+            campaign["status"] = "interrupted"
+        elif total and finished == total:
+            campaign["status"] = "completed"
+        elif total:
+            campaign["status"] = "running"
+        campaign["finished_count"] = finished
+        campaign["progress_pct"] = (finished / total * 100) if total else 0.0
+    return campaigns
+
+
 def _revoke_in_background(run_id: str) -> None:
     # Fire-and-forget: empirically, celery_app.control.revoke() can block for
     # a long time (observed: a Django request hanging well past 10s) when
@@ -281,9 +582,6 @@ def cancel_run(storage: Storage, run_id: str) -> dict:
     raise ValueError(f"run is already {run['status']} -- nothing to cancel")
 
 
-DEFAULT_REGRESSION_THRESHOLD_PCT = 20.0
-
-
 def get_dashboard_stats(
     storage: Storage, recent_limit: int = 50, threshold_pct: float = DEFAULT_REGRESSION_THRESHOLD_PCT,
     device_serial: str | None = None,
@@ -318,7 +616,7 @@ def get_dashboard_stats(
     trend_by_metric: dict[str, list[dict]] = {}
 
     for run in reversed(completed):  # chronological order for trend charts
-        run_stats = compute_stats(storage.list_samples(run["id"], limit=100_000))
+        run_stats = stats_from_aggregates(storage.aggregate_samples(run["id"]))
         for name, stat in run_stats.items():
             trend_by_metric.setdefault(name, []).append({"timestamp": run["started_at"], "value": stat.mean})
 
@@ -333,7 +631,7 @@ def get_dashboard_stats(
         if cache_key not in baseline_cache:
             baseline_row = storage.get_baseline(device, scenario)
             baseline_cache[cache_key] = (
-                compute_stats(storage.list_samples(baseline_row["run_id"], limit=100_000))
+                stats_from_aggregates(storage.aggregate_samples(baseline_row["run_id"]))
                 if baseline_row else None
             )
             baseline_run_id_cache[cache_key] = baseline_row["run_id"] if baseline_row else None

@@ -28,6 +28,18 @@ class TestRunner:
     scenario: list[ScenarioStep] | None = None
     adapter_action_timeout: float = 10.0
     cancel_check_interval: float = 1.0
+    # The control tick below is deliberately short (10ms) to keep collector
+    # timeout and scenario-step scheduling responsive. The checkpoint write,
+    # however, must NOT run at that rate: update_run() opens its own SQLite
+    # connection, sets PRAGMAs, UPDATEs and COMMITs, so ticking it would mean
+    # ~100 write transactions/second all competing with BatchWriter for the
+    # single WAL write lock. A 60s run survives that (~6k transactions); a
+    # multi-hour soak run does not -- the writer falls behind, its bounded
+    # queue fills, and put() raises "Metrics queue is full", killing the run
+    # precisely because it ran long. Throttling to 1s keeps checkpoints fresh
+    # enough to resume from while making heartbeat cost independent of run
+    # length.
+    heartbeat_interval: float = 1.0
 
     def run(self, serial: str, duration: float, run_id: str | None = None) -> str:
         if self.scenario and self.adapter is None:
@@ -68,6 +80,7 @@ class TestRunner:
         signal.signal(signal.SIGINT, request_stop)
         started = time.monotonic()
         last_cancel_check = started
+        last_heartbeat = started
         due = {collector.name: started for collector in self.collectors}
         active: dict[str, tuple[Future, float, Collector]] = {}
         timed_out: set[str] = set()
@@ -138,10 +151,20 @@ class TestRunner:
                     action = getattr(self.adapter, step.action)
                     scenario_active[next_step] = (executor.submit(action, self.adb, serial, **step.kwargs), now, step)
                     next_step += 1
-                self.storage.update_run(run_id, RunStatus.RUNNING, checkpoint=str(time.monotonic() - started))
-                # A short control tick keeps timeout and heartbeat state responsive;
-                # actual sampling frequency is still governed by collector intervals.
+                if now - last_heartbeat >= self.heartbeat_interval:
+                    last_heartbeat = now
+                    self.storage.update_run(run_id, RunStatus.RUNNING, checkpoint=str(now - started))
+                # A short control tick keeps timeout and scenario-step scheduling
+                # responsive; actual sampling frequency is still governed by
+                # collector intervals, and the checkpoint write by heartbeat_interval.
                 time.sleep(min(0.01, max(0.001, duration - (time.monotonic() - started))))
+            # Captured before the adapter cleanup below, which can take seconds
+            # (stop_app waits on the device) and would otherwise be counted as
+            # run time. Written as the final checkpoint so `--resume` sees the
+            # exact interruption point rather than whatever the last throttled
+            # heartbeat happened to record -- including for a run cut short
+            # before its first heartbeat ever fired.
+            final_elapsed = time.monotonic() - started
             # Finish in-flight ADB calls before closing the writer so their final
             # samples cannot be lost at the duration boundary.
             executor.shutdown(wait=True, cancel_futures=True)
@@ -189,7 +212,7 @@ class TestRunner:
                     writer.put(TestEvent(run_id, "adapter_error", str(exc), details=action))
             writer.put(TestEvent(run_id, "lifecycle", f"run {status}"))
             writer.close()
-            self.storage.update_run(run_id, status)
+            self.storage.update_run(run_id, status, checkpoint=str(final_elapsed))
         except Exception as exc:
             try:
                 writer.close()

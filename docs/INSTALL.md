@@ -18,7 +18,7 @@ regardless of which layers you install.
 | Python 3.11+ | [python.org](https://www.python.org/downloads/) or `winget install Python.Python.3.12` | `brew install python@3.12` | `sudo apt install python3.12 python3.12-venv` |
 | Node.js 18+ (dashboard only) | `winget install OpenJS.NodeJS.LTS` | `brew install node` | `sudo apt install nodejs npm` |
 | Android platform-tools (`adb`) | `winget install Google.PlatformTools` | `brew install android-platform-tools` | `sudo apt install android-tools-adb` |
-| Redis (dashboard only) | Docker Desktop | `brew install redis` or Docker Desktop | `sudo apt install redis-server` |
+| Redis (dashboard only) | WSL 2 + Ubuntu (recommended) or Docker Desktop | `brew install redis` or Docker Desktop | `sudo apt install redis-server` |
 | ffmpeg (optional, run replay) | `winget install Gyan.FFmpeg` | `brew install ffmpeg` | `sudo apt install ffmpeg` |
 
 After installing `adb`, plug in a phone with **USB debugging** enabled
@@ -42,19 +42,31 @@ Three options, pick whichever fits how you're setting the machine up.
 python3 scripts/setup.py
 # or, to also auto-install missing adb/node/redis (winget/Homebrew/apt):
 python3 scripts/setup.py --install-deps
+# or, for a faster install without tests/checks/frontend production build:
+python3 scripts/setup.py --skip-verify
 ```
 This is the recommended entry point -- one script for Windows, macOS,
 native Linux, and WSL. It detects which platform it's running on
 (including WSL specifically, via `WSL_DISTRO_NAME`/`/proc/version`) and
-picks the right package manager and commands itself. It only needs
-whatever Python you already have to invoke it with; it finds (or tells
-you to install) a Python >= 3.11 for the actual venv separately.
+picks the right package manager and commands itself. It creates the virtual
+environment, installs all Python dependency groups from `requirements.txt`,
+runs locked `npm ci`, prepares runtime directories, checks Django, runs the
+backend test suite, and produces a frontend production build. It only needs
+whatever Python you already have to invoke it with; it finds (or tells you
+to install) a Python >= 3.11 for the actual venv separately.
 
 **Windows (PowerShell), platform-specific script:**
 ```powershell
 .\scripts\setup.ps1
-# or, to also auto-install missing adb/node/redis via winget:
+# or, to also install missing tools and Redis in WSL:
 .\scripts\setup.ps1 -InstallDeps
+# explicitly select WSL (the Windows default) or Docker:
+.\scripts\setup.ps1 -InstallDeps -RedisBackend wsl
+.\scripts\setup.ps1 -InstallDeps -RedisBackend docker
+# choose a specific Ubuntu/Debian distribution when multiple WSL distros exist:
+.\scripts\setup.ps1 -InstallDeps -RedisBackend wsl -WslDistro Ubuntu
+# skip post-install verification:
+.\scripts\setup.ps1 -SkipVerify
 ```
 
 **macOS (bash/zsh), platform-specific script:**
@@ -63,6 +75,13 @@ you to install) a Python >= 3.11 for the actual venv separately.
 # or, to also auto-install missing adb/node/redis via Homebrew:
 ./scripts/setup.sh --install-deps
 ```
+
+On Windows, `-InstallDeps` installs Redis into WSL/Ubuntu by default. If WSL
+is not enabled yet, Windows may request a restart; after restarting and
+finishing Ubuntu's first launch, run the same command again. AutoPerf and
+`adb` remain native Windows processes, so a Type-C-connected phone does not
+need USB passthrough into WSL. Use `-RedisBackend docker` only if you prefer
+Docker Desktop.
 
 All three scripts are safe to re-run -- they skip steps that are already
 done. By default they only *check* for `adb`/`node`/`redis` and print
@@ -79,8 +98,11 @@ python -m venv venv
 adb devices
 .\venv\Scripts\python.exe -m autoperf devices
 
-# Dashboard only:
-docker run -d --name autoperf-redis -p 6379:6379 redis:7-alpine
+# Dashboard only (recommended lightweight Windows setup):
+wsl --install -d Ubuntu  # first time only; restart if Windows requests it
+wsl -d Ubuntu -u root -- sh -lc "apt-get update && apt-get install -y redis-server && (systemctl enable --now redis-server || service redis-server start)"
+# Or let the installer perform these steps:
+.\scripts\setup.ps1 -InstallDeps -RedisBackend wsl
 .\venv\Scripts\python.exe webapp\manage.py runserver 8000
 # (new terminal)
 .\venv\Scripts\python.exe scripts\start-worker.py

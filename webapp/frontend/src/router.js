@@ -6,6 +6,7 @@ import QueueView from './views/QueueView.vue'
 import DeviceScreenView from './views/DeviceScreenView.vue'
 import JoinView from './views/JoinView.vue'
 import MissionControlView from './views/MissionControlView.vue'
+import CampaignsView from './views/CampaignsView.vue'
 
 export default createRouter({
   history: createWebHistory(),
@@ -13,6 +14,7 @@ export default createRouter({
     { path: '/', name: 'stats', component: StatsView },
     { path: '/runs', name: 'runs', component: RunListView },
     { path: '/runs/:id', name: 'run-detail', component: RunDetailView, props: true },
+    { path: '/campaigns', name: 'campaigns', component: CampaignsView },
     { path: '/queue', name: 'queue', component: QueueView },
     { path: '/screen', name: 'device-screen', component: DeviceScreenView },
     { path: '/mission-control', name: 'mission-control', component: MissionControlView },

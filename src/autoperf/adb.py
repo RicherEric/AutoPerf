@@ -88,8 +88,9 @@ class AdbClient:
         hunting through Settings for their own IP:port. A device shows up
         here once "Wireless debugging" is toggled on, whether or not it's
         been paired yet (a `_tcp-tls-pairing._tcp` entry means "ready to
-        pair", `_adb-tls-connect._tcp` means "already paired, ready to
-        connect").
+        pair"; `_adb-tls-connect._tcp` advertises the TLS connection endpoint,
+        but does not prove that this particular computer's ADB key is already
+        trusted by the phone).
 
         Requires the network to actually carry mDNS/multicast between
         devices -- many school or enterprise WiFi networks enable client
@@ -106,11 +107,20 @@ class AdbClient:
             parts = line.split()
             if len(parts) < 2:
                 continue
-            name, address = parts[0], parts[-1]
+            name, service_type, address = parts[0], parts[1], parts[-1]
             if not re.fullmatch(r"[A-Za-z0-9.\-]+:[0-9]{1,5}", address):
                 continue
-            kind = "pairing" if "pairing" in name.lower() else "connect" if "connect" in name.lower() else "unknown"
-            services.append({"name": name, "address": address, "kind": kind})
+            type_label = service_type.lower()
+            kind = "pairing" if "pairing" in type_label else "connect" if "connect" in type_label else "unknown"
+            service_id = name[4:] if name.startswith("adb-") else name
+            device_id = service_id.rsplit("-", 1)[0] if "-" in service_id else service_id
+            services.append({
+                "name": name,
+                "device_id": device_id,
+                "service_type": service_type,
+                "address": address,
+                "kind": kind,
+            })
         return {"raw": output.strip(), "services": services}
 
     def shell(self, serial: str, command: str, timeout: float = 10) -> str:

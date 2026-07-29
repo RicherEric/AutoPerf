@@ -8,17 +8,24 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
 from autoperf.adb import AdbClient, AdbError
-from autoperf.analyzer import compare, compute_stats
+from autoperf.adapters import (
+    BACK, HOME, DPAD_CENTER, DPAD_DOWN, DPAD_LEFT, DPAD_RIGHT, DPAD_UP,
+)
+from autoperf.analyzer import compare, stats_from_aggregates
 from autoperf.scenarios import youtube as youtube_scenarios
 
 from .services import (
+    cancel_campaign,
     cancel_run,
     delete_recording,
+    get_campaign_detail,
     get_dashboard_stats,
     get_queue_status,
     get_recording_info,
     get_storage,
+    list_campaigns,
     refresh_devices,
+    trigger_campaign,
     trigger_run,
     trigger_suite,
 )
@@ -33,6 +40,35 @@ def devices(request):
 @require_http_methods(["POST"])
 def devices_refresh(request):
     return JsonResponse(refresh_devices(get_storage(), AdbClient()), safe=False)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def device_control(request, serial):
+    try:
+        body = json.loads(request.body or b"{}")
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "invalid JSON body"}, status=400)
+
+    action = body.get("action")
+    keycodes = {
+        "home": HOME, "back": BACK, "up": DPAD_UP, "down": DPAD_DOWN,
+        "left": DPAD_LEFT, "right": DPAD_RIGHT, "enter": DPAD_CENTER,
+    }
+    adb = AdbClient()
+    try:
+        if action in keycodes:
+            adb.shell(serial, f"input keyevent {keycodes[action]}")
+        elif action == "tap":
+            x, y = int(body.get("x")), int(body.get("y"))
+            if x < 0 or y < 0:
+                raise ValueError("tap coordinates must be non-negative")
+            adb.shell(serial, f"input tap {x} {y}")
+        else:
+            return JsonResponse({"error": "unsupported control action"}, status=400)
+    except (TypeError, ValueError, AdbError) as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
+    return JsonResponse({"ok": True, "action": action})
 
 
 @csrf_exempt
@@ -55,6 +91,50 @@ def devices_connect(request):
         return JsonResponse({"error": str(exc)}, status=400)
 
     return JsonResponse({"message": message, "devices": refresh_devices(get_storage(), AdbClient())})
+
+
+@require_http_methods(["GET"])
+def devices_mdns(request):
+    """Discovers Android wireless-debugging services advertised over mDNS."""
+    try:
+        return JsonResponse(AdbClient().mdns_services())
+    except AdbError as exc:
+        return JsonResponse({"error": str(exc)}, status=503)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def devices_connect_discovered(request):
+    """Discovers and connects every already-paired ADB-over-WiFi service.
+
+    Pairing services are deliberately ignored because Android requires the
+    user-visible six-digit code before they can be trusted.
+    """
+    adb = AdbClient()
+    try:
+        discovery = adb.mdns_services()
+    except AdbError as exc:
+        return JsonResponse({"error": str(exc)}, status=503)
+
+    results = []
+    seen = set()
+    for service in discovery["services"]:
+        address = service["address"]
+        if service["kind"] != "connect" or address in seen:
+            continue
+        seen.add(address)
+        try:
+            message = adb.connect(address)
+            results.append({"address": address, "ok": True, "message": message})
+        except (ValueError, AdbError) as exc:
+            results.append({"address": address, "ok": False, "error": str(exc)})
+
+    devices = refresh_devices(get_storage(), adb)
+    return JsonResponse({
+        "services": discovery["services"],
+        "results": results,
+        "devices": devices,
+    })
 
 
 @csrf_exempt
@@ -174,6 +254,23 @@ def run_samples(request, run_id):
     return JsonResponse({"samples": samples, "next_since_id": next_since_id})
 
 
+@require_http_methods(["GET"])
+def run_series(request, run_id):
+    """Chart-ready, bucket-averaged series for one run.
+
+    `/samples` streams raw rows and is what the live-polling path uses, since
+    during a run the client only ever asks for the handful of samples newer
+    than `since_id`. Replaying a *finished* multi-hour run is the opposite
+    shape: ~100k rows at once, which is both a large response and more points
+    than an SVG line chart can draw. This returns a fixed point budget
+    regardless of how long the run was, so an 8-hour soak costs the same to
+    render as a 60-second smoke run.
+    """
+    buckets = max(1, min(int(request.GET.get("buckets", 300)), 2000))
+    series = get_storage().downsample_samples(run_id, buckets=buckets)
+    return JsonResponse({"series": series, "buckets": buckets})
+
+
 @csrf_exempt
 @require_http_methods(["GET", "POST"])
 def baseline(request, serial):
@@ -232,6 +329,65 @@ def suites(request):
     return JsonResponse({"tier": tier, "run_ids": run_ids, "count": len(run_ids)}, status=202)
 
 
+@csrf_exempt
+@require_http_methods(["GET", "POST"])
+def campaigns(request):
+    storage = get_storage()
+    if request.method == "GET":
+        return JsonResponse(
+            list_campaigns(storage, limit=int(request.GET.get("limit", 50)),
+                           device_serial=request.GET.get("device") or None),
+            safe=False,
+        )
+    try:
+        body = json.loads(request.body or b"{}")
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "invalid JSON body"}, status=400)
+    try:
+        result = trigger_campaign(
+            storage,
+            kind=body.get("kind", ""),
+            serial=body.get("serial", ""),
+            duration=float(body.get("duration", 0)),
+            scenario=body.get("scenario") or None,
+            tier=body.get("tier") or None,
+            iterations=int(body.get("iterations", 1)),
+        )
+    except (ValueError, TypeError) as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
+    return JsonResponse(result, status=202)
+
+
+@csrf_exempt
+@require_http_methods(["GET", "DELETE"])
+def campaign_detail(request, campaign_id):
+    """GET returns the campaign with its analysis; DELETE removes it and
+    everything it produced -- matching how /api/runs/<id> is shaped."""
+    storage = get_storage()
+    if request.method == "DELETE":
+        if storage.get_campaign(campaign_id) is None:
+            return JsonResponse({"error": "campaign not found"}, status=404)
+        # Recordings live on disk outside the database, so they are cleaned
+        # up here from the run ids delete_campaign reports, mirroring run
+        # deletion.
+        for run_id in storage.delete_campaign(campaign_id):
+            delete_recording(run_id)
+        return JsonResponse({"campaign_id": campaign_id, "deleted": True})
+    try:
+        return JsonResponse(get_campaign_detail(storage, campaign_id))
+    except ValueError as exc:
+        return JsonResponse({"error": str(exc)}, status=404)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def campaign_cancel(request, campaign_id):
+    try:
+        return JsonResponse(cancel_campaign(get_storage(), campaign_id))
+    except ValueError as exc:
+        return JsonResponse({"error": str(exc)}, status=404)
+
+
 @require_http_methods(["GET"])
 def queue_status(request):
     return JsonResponse(get_queue_status(get_storage()))
@@ -258,8 +414,8 @@ def run_comparison(request, run_id):
         )
 
     threshold_pct = float(request.GET.get("threshold", 20.0))
-    baseline_stats = compute_stats(storage.list_samples(baseline_row["run_id"], limit=100_000))
-    candidate_stats = compute_stats(storage.list_samples(run_id, limit=100_000))
+    baseline_stats = stats_from_aggregates(storage.aggregate_samples(baseline_row["run_id"]))
+    candidate_stats = stats_from_aggregates(storage.aggregate_samples(run_id))
     results = compare(baseline_stats, candidate_stats, threshold_pct=threshold_pct)
     return JsonResponse({
         "baseline_run_id": baseline_row["run_id"],

@@ -110,6 +110,34 @@ class AdbClientTests(unittest.TestCase):
             with self.assertRaises(AdbError):
                 AdbClient().pair("192.168.1.50:37251", "000000")
 
+    def test_mdns_services_parses_service_type_and_address(self):
+        output = (
+            "List of discovered mdns services\n"
+            "adb-SERIAL-one _adb-tls-connect._tcp 192.168.0.10:40123\n"
+            "adb-SERIAL-two _adb-tls-pairing._tcp 192.168.0.11:37891\n"
+        )
+        with patch("autoperf.adb.subprocess.run", return_value=_completed(stdout=output)):
+            result = AdbClient().mdns_services()
+        self.assertEqual(
+            result["services"],
+            [
+                {
+                    "name": "adb-SERIAL-one",
+                    "device_id": "SERIAL",
+                    "service_type": "_adb-tls-connect._tcp",
+                    "address": "192.168.0.10:40123",
+                    "kind": "connect",
+                },
+                {
+                    "name": "adb-SERIAL-two",
+                    "device_id": "SERIAL",
+                    "service_type": "_adb-tls-pairing._tcp",
+                    "address": "192.168.0.11:37891",
+                    "kind": "pairing",
+                },
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

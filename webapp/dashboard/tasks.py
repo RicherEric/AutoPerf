@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from celery import shared_task
 
-from autoperf.adapters import AndroidAdapter
+from autoperf.adapters import AndroidAdapter, AndroidTvAdapter
 from autoperf.adb import AdbClient
 from autoperf.collectors import default_collectors
 from autoperf.runner import DeviceBusyError, TestRunner
@@ -35,14 +35,24 @@ def run_test_task(self, db_path: str, serial: str, duration: float, run_id: str,
     """
     storage = Storage(db_path)
     storage.initialize()
+    if storage.get_run(run_id) is None:
+        storage.create_run(run_id, serial, youtube_scenario)
     adb = AdbClient()
     adapter = None
     scenario = None
     if youtube_scenario:
-        adapter = AndroidAdapter()
+        characteristics = adb.shell(serial, "getprop ro.build.characteristics").lower()
+        adapter = AndroidTvAdapter() if "tv" in characteristics.split(",") else AndroidAdapter()
         screen = adapter.screen_size(adb, serial)
         scenario = youtube_scenarios.build(youtube_scenario, screen)
     try:
         TestRunner(storage, adb, default_collectors(), adapter=adapter, scenario=scenario).run(serial, duration, run_id)
+        completed = storage.get_run(run_id)
+        if (
+            completed
+            and completed["status"] == "completed"
+            and storage.get_baseline(serial, youtube_scenario) is None
+        ):
+            storage.set_baseline(serial, run_id)
     except DeviceBusyError as exc:
         raise self.retry(exc=exc, countdown=DEVICE_BUSY_RETRY_COUNTDOWN)

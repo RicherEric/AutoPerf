@@ -185,7 +185,85 @@ header comment):
   running" table sourced directly from Storage (`list_running_runs()`), which
   has no such blind spot, for exactly this reason.
 
+## Long-run regression testing (campaigns)
+
+A **campaign** is one long-running test programme that spawns many ordinary
+runs. Two kinds, started from the dashboard's **長時間測試 / Long-Run Tests**
+page (`/campaigns`, backed by `POST /api/campaigns`):
+
+| Kind | What it does | What it catches |
+|---|---|---|
+| `soak` | One continuous run of a single scenario for hours | Memory leaks, thermal throttling, anything that degrades *over time* |
+| `repeat` | The same scenario (or a whole tier) run N times | Flakiness and metric spread — whether a result reproduces at all |
+
+Child runs are plain `test_runs` rows tagged with a `campaign_id`, so
+baselines, the comparison endpoint, live screen, recordings and deletion all
+keep working on them unchanged.
+
+**Why there is no campaign orchestrator task.** All child runs are enqueued up
+front through the ordinary `trigger_run`/`run_test_task` path. A single
+long-lived Celery task looping for the campaign's duration looked simpler but
+behaves badly here: the Windows-compatible `--pool=solo` worker executes one
+task at a time, so a multi-hour campaign would monopolise it and stall every
+other device, and Celery re-delivers unacknowledged tasks, so a worker restart
+would silently begin again from iteration one. Pre-enqueueing reuses machinery
+that already works — same-device serialisation via `Storage.try_start_run()`,
+restart durability via Redis, fair interleaving with other devices. The
+consequence is that nothing "owns" campaign progress, so a campaign's status is
+*derived from its child runs on read* (`services._derived_campaign_status`).
+Cancellation is likewise one `UPDATE` flagging every unfinished child run
+(`Storage.cancel_campaign_runs`), which `TestRunner` already honours before
+touching the device — no per-task `revoke()` against the solo pool's blind spot.
+
+`plan_campaign_runs` orders tier campaigns **iteration-major** (a full sweep of
+the tier, then the next) rather than scenario-major, so a campaign cut short
+still leaves an even number of samples for every scenario instead of fully
+sampling the first few and none of the rest.
+
+### What long runs required changing first
+
+Three existing behaviours broke on runs of this length, and none were merely
+slow — each produced *wrong answers*:
+
+- **`TestRunner` wrote a checkpoint on every ~10ms control tick.** Each
+  `update_run()` opens its own SQLite connection, sets PRAGMAs, UPDATEs and
+  COMMITs, so this was ~100 write transactions/second competing with
+  `BatchWriter` for the single WAL write lock. Fine for a 60-second run;
+  for a multi-hour soak the writer falls behind, its bounded queue fills and
+  `put()` raises *"Metrics queue is full"* — killing the run precisely because
+  it ran long. Now throttled by `heartbeat_interval` (default 1s), with an
+  exact final checkpoint written at the end so `--resume` accuracy is
+  unaffected.
+- **`compute_stats(list_samples(limit=100_000))` silently truncated.** At the
+  default collector cadence (~3.4 samples/second) 100k rows is only ~8.2
+  hours, and `list_samples` orders by `id ASC` — so the rows it dropped were
+  the *tail*, exactly where a leak or thermal throttle shows. A soak run long
+  enough to exhibit a regression reported stats computed from just its healthy
+  opening stretch. Replaced by `Storage.aggregate_samples()`, which reduces in
+  SQL (two-pass variance, to avoid the catastrophic cancellation a one-pass
+  `E[x²]-E[x]²` suffers on values like `memory.used`). The stats page also did
+  this 50× per page load.
+- **Mean is near-blind to leaks.** A process leaking from 2.0 GB to 2.6 GB
+  over eight hours has a mean ~15% above a healthy run's — *under* the default
+  20% regression threshold — while the device is 30% worse off by the end.
+  `analyzer.compute_trend()` adds a least-squares `slope_per_hour` plus
+  first-quartile-vs-last `drift_pct`; drift is reported alongside slope because
+  slope alone reads a single step-change as a gentle continuous climb.
+
+`Storage.downsample_samples()` and `GET /api/runs/<id>/series` bucket a run to
+a fixed point budget (by sample rank per metric, so cpu at 1s and battery at
+10s each get the full budget), carrying `min`/`max` per bucket so transients
+survive. `/samples` remains the right call while a run is live, since that path
+only ever fetches what is newer than `since_id`.
+
 ## Live device screen (view-only)
+
+手機與 Android TV 採用不同的 Live Screen 策略：手機優先使用 H.264
+WebCodecs 串流，失敗時使用縮圖 screenshot fallback；Chromecast／Google
+TV／Android TV 則直接使用 960 px 寬的 screenshot 串流，避免等待
+`screenrecord` 首幀而頻繁 timeout。完整的裝置辨識、解析度、更新頻率、
+自動重連、fallback 與錄影差異請見
+[`docs/LIVE_SCREEN.md`](docs/LIVE_SCREEN.md)。
 
 ```powershell
 .\venv\Scripts\python.exe -m pip install -e .[livescreen]
@@ -197,8 +275,11 @@ own standalone asyncio process (not Django Channels -- it never touches
 Storage/SQLite, just `adb exec-out screenrecord --output-format=h264 -` piped
 over a WebSocket) and decodes in-browser via WebCodecs
 (`VideoDecoder`, Annex-B format, Chrome/Edge 94+) with an automatic fallback to
-periodic PNG screenshots (`adb exec-out screencap -p`) if WebCodecs isn't
-available or the H.264 path fails. `VideoDecoder.configure()` is called with
+periodic screenshots (`adb exec-out screencap -p`) if WebCodecs isn't
+available or the H.264 path fails. Screenshot frames are resized and converted
+to JPEG before WebSocket transmission when ffmpeg is available. TV devices
+select this screenshot path immediately instead of first waiting for H.264.
+`VideoDecoder.configure()` is called with
 only `{codec, hardwareAcceleration, optimizeForLatency}` -- no `description`,
 no `avc` field -- matching `@yume-chan/scrcpy-decoder-webcodecs` (used by
 ws-scrcpy/tango), a real production scrcpy-in-browser implementation: omitting
