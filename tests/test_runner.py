@@ -273,5 +273,145 @@ class HeartbeatThrottleTests(unittest.TestCase):
             self.assertGreater(float(checkpoint), 0.0)
 
 
+class VerificationRecordingTests(unittest.TestCase):
+    """The point of the whole verification layer, end to end.
+
+    Before it, a scenario step that achieved nothing was recorded as
+    "adapter_action completed" and the run finished green -- indistinguishable
+    from a run that worked. These assert that the three outcomes are now
+    distinguishable in the stored record.
+    """
+
+    def _events(self, storage, run_id):
+        import sqlite3
+        from contextlib import closing
+
+        # `with sqlite3.connect(...)` opens a *transaction*, not a closing
+        # scope -- the connection would stay open and Windows would refuse to
+        # delete the temp directory afterwards.
+        with closing(sqlite3.connect(str(storage.path))) as conn:
+            conn.row_factory = sqlite3.Row
+            return [dict(r) for r in conn.execute(
+                "SELECT kind, message, details FROM test_events WHERE run_id=?", (run_id,))]
+
+    def _run_with_step(self, directory, adapter, step):
+        storage = Storage(Path(directory) / "db.sqlite")
+        storage.initialize()
+        runner = TestRunner(
+            storage, FakeAdb(), [CpuCollector(interval=0.05)],
+            adapter=adapter, scenario=[step], heartbeat_interval=0.25,
+        )
+        return storage, runner.run("serial", 0.6)
+
+    def test_a_verification_failure_is_recorded_and_marks_the_run_unverified(self):
+        from autoperf.adapters import VerificationError
+
+        class FailingAdapter(AndroidAdapter):
+            def verify_foreground(self, adb, serial, package):
+                raise VerificationError(f"expected {package} in foreground, found com.android.launcher")
+
+        with tempfile.TemporaryDirectory() as directory:
+            storage, run_id = self._run_with_step(
+                directory, FailingAdapter(),
+                ScenarioStep(0.0, "verify_foreground", {"package": "com.example.app"}),
+            )
+            kinds = [e["kind"] for e in self._events(storage, run_id)]
+            self.assertIn("verification_failed", kinds)
+            # Crucially it is NOT recorded as a completed action...
+            self.assertNotIn("adapter_action", kinds)
+            quality = storage.run_quality(run_id)
+            self.assertFalse(quality["verified"])
+            self.assertEqual(quality["verification_failures"], 1)
+
+    def test_a_coordinate_fallback_is_recorded_without_failing_the_run(self):
+        class FallbackAdapter(AndroidAdapter):
+            def tap_element(self, adb, serial, target, screen=None):
+                return {"target": "search_icon", "strategy": "coordinates", "x": 1, "y": 2}
+
+        with tempfile.TemporaryDirectory() as directory:
+            storage, run_id = self._run_with_step(
+                directory, FallbackAdapter(),
+                ScenarioStep(0.0, "tap_element", {"target": None}),
+            )
+            kinds = [e["kind"] for e in self._events(storage, run_id)]
+            # A fallback still worked, so the action completed -- but the
+            # decay is on the record either way.
+            self.assertIn("selector_fallback", kinds)
+            self.assertIn("adapter_action", kinds)
+            quality = storage.run_quality(run_id)
+            self.assertTrue(quality["verified"])
+            self.assertEqual(quality["selector_fallbacks"], 1)
+
+    def test_a_selector_hit_records_neither_a_failure_nor_a_fallback(self):
+        class GoodAdapter(AndroidAdapter):
+            def tap_element(self, adb, serial, target, screen=None):
+                return {"target": "search_icon", "strategy": "content_desc", "x": 1, "y": 2}
+
+        with tempfile.TemporaryDirectory() as directory:
+            storage, run_id = self._run_with_step(
+                directory, GoodAdapter(),
+                ScenarioStep(0.0, "tap_element", {"target": None}),
+            )
+            quality = storage.run_quality(run_id)
+            self.assertTrue(quality["verified"])
+            self.assertEqual(quality["selector_fallbacks"], 0)
+
+    def test_non_serialisable_step_kwargs_do_not_break_the_writer(self):
+        # Step kwargs now carry Target objects, which json.dumps cannot
+        # handle; the batch writer would die mid-run if they reached it raw.
+        from autoperf.uiauto import Selector, Target
+
+        target = Target((Selector(content_desc="Search"),), (0.5, 0.5), "search_icon")
+
+        class GoodAdapter(AndroidAdapter):
+            def tap_element(self, adb, serial, target, screen=None):
+                return {"target": target.name, "strategy": "content_desc", "x": 1, "y": 2}
+
+        with tempfile.TemporaryDirectory() as directory:
+            storage, run_id = self._run_with_step(
+                directory, GoodAdapter(), ScenarioStep(0.0, "tap_element", {"target": target}),
+            )
+            self.assertEqual(storage.get_run(run_id)["status"], "completed")
+            details = [e["details"] for e in self._events(storage, run_id) if e["kind"] == "adapter_action"]
+            self.assertTrue(any("search_icon" in d for d in details))
+
+
+class AppVersionRecordingTests(unittest.TestCase):
+    def test_records_the_launched_package_version(self):
+        class VersionAdb(FakeAdb):
+            def shell(self, serial, command, timeout=10):
+                if command.startswith("dumpsys package"):
+                    return "  versionCode=1543012928\n  versionName=19.09.37\n"
+                return super().shell(serial, command)
+
+        with tempfile.TemporaryDirectory() as directory:
+            storage = Storage(Path(directory) / "db.sqlite")
+            storage.initialize()
+            TestRunner(
+                storage, VersionAdb(), [CpuCollector(interval=0.05)],
+                adapter=AndroidAdapter(),
+                scenario=[ScenarioStep(0.0, "launch_app", {"package": "com.example.app"})],
+                heartbeat_interval=0.25,
+            ).run("serial", 0.4)
+
+            run = storage.list_runs()[0]
+            self.assertEqual(run["app_package"], "com.example.app")
+            self.assertEqual(run["app_version_name"], "19.09.37")
+            self.assertEqual(run["app_version_code"], 1543012928)
+
+    def test_an_unreadable_version_does_not_fail_the_run(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = Storage(Path(directory) / "db.sqlite")
+            storage.initialize()
+            run_id = TestRunner(
+                storage, FakeAdb(), [CpuCollector(interval=0.05)],
+                adapter=AndroidAdapter(),
+                scenario=[ScenarioStep(0.0, "launch_app", {"package": "com.example.app"})],
+                heartbeat_interval=0.25,
+            ).run("serial", 0.4)
+            self.assertEqual(storage.get_run(run_id)["status"], "completed")
+            self.assertIsNone(storage.get_run(run_id)["app_version_name"])
+
+
 if __name__ == "__main__":
     unittest.main()

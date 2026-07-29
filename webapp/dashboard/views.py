@@ -11,7 +11,7 @@ from autoperf.adb import AdbClient, AdbError
 from autoperf.adapters import (
     BACK, HOME, DPAD_CENTER, DPAD_DOWN, DPAD_LEFT, DPAD_RIGHT, DPAD_UP,
 )
-from autoperf.analyzer import compare, stats_from_aggregates
+from autoperf.analyzer import app_version_delta, compare, stats_from_aggregates
 from autoperf.scenarios import youtube as youtube_scenarios
 
 from .services import (
@@ -421,5 +421,11 @@ def run_comparison(request, run_id):
         "baseline_run_id": baseline_row["run_id"],
         "candidate_run_id": run_id,
         "regressed": any(r.regressed for r in results),
+        # Both of these change what the comparison *means*, so they travel
+        # with it rather than being separate lookups a caller might skip: a
+        # delta across two app builds measures the app, and a delta from an
+        # unverified run measures a screen the scenario never reached.
+        "app_version": app_version_delta(storage.get_run(baseline_row["run_id"]), run),
+        "candidate_quality": storage.run_quality(run_id),
         "metrics": [asdict(r) for r in results],
     })

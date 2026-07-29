@@ -358,6 +358,135 @@ class CampaignCliTests(unittest.TestCase):
                     self.assertEqual(code, 1)
 
 
+class PreflightCliTests(unittest.TestCase):
+    """Check the selectors on one device, then stop -- before a full test."""
+
+    def _run(self, args, adb_class):
+        out, err = io.StringIO(), io.StringIO()
+        with patch("autoperf.cli.AdbClient", adb_class), patch("time.sleep", lambda _s: None):
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = cli.main(args)
+        return code, out.getvalue(), err.getvalue()
+
+    def test_reports_targets_needing_attention_and_exits_nonzero(self):
+        code, out, err = self._run(
+            ["preflight", "--serial", "SERIAL1", "--scenario", "home_feed_tap_video"],
+            StaleSelectorAdb,
+        )
+        summary = json.loads(out)
+        self.assertEqual(code, 1)
+        self.assertFalse(summary["ok"])
+        self.assertTrue(summary["needs_attention"])
+        # The report has to name the file the fix belongs in.
+        self.assertIn("selectors.py", err)
+
+    def test_passes_when_every_selector_matches(self):
+        code, out, _ = self._run(
+            ["preflight", "--serial", "SERIAL1", "--scenario", "home_feed_tap_video"],
+            HealthySelectorAdb,
+        )
+        summary = json.loads(out)
+        self.assertEqual(code, 0)
+        self.assertTrue(summary["ok"])
+        self.assertEqual(summary["targets_needing_attention"], 0)
+
+    def test_allow_fallback_downgrades_a_fallback_to_a_note(self):
+        code, out, _ = self._run(
+            ["preflight", "--serial", "SERIAL1", "--scenario", "home_feed_tap_video",
+             "--allow-fallback"],
+            StaleSelectorAdb,
+        )
+        summary = json.loads(out)
+        self.assertEqual(code, 0)
+        # Still reported -- the flag stops it failing the command, it does not
+        # hide the decay.
+        self.assertTrue(summary["needs_attention"])
+
+    def test_a_failing_preflight_blocks_a_campaign_from_starting(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "cli.db"
+            code, _, err = self._run(
+                ["--db", str(db), "campaign", "start", "--serial", "SERIAL1",
+                 "--kind", "repeat", "--scenario", "home_feed_tap_video",
+                 "--iterations", "2", "--duration", "0.2", "--preflight"],
+                StaleSelectorAdb,
+            )
+            self.assertEqual(code, 1)
+            self.assertIn("campaign not started", err)
+            # Nothing was created: a campaign that aborts partway leaves a
+            # half-finished record, which is what preflighting avoids.
+            self.assertEqual(Storage(db).list_campaigns(), [])
+
+    def test_the_gate_only_checks_the_scenarios_the_campaign_will_run(self):
+        # Blocking a campaign over a selector it never touches would make the
+        # gate an obstacle rather than a safeguard.
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "cli.db"
+            _, _, err = self._run(
+                ["--db", str(db), "campaign", "start", "--serial", "SERIAL1",
+                 "--kind", "repeat", "--scenario", "home_feed_tap_video",
+                 "--iterations", "1", "--duration", "0.2", "--preflight"],
+                HealthySelectorAdb,
+            )
+            self.assertIn("preflight: 1 scenario(s)", err)
+            self.assertNotIn("quality_switch_manual", err)
+
+    def test_a_passing_preflight_lets_the_campaign_run(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "cli.db"
+            code, out, _ = self._run(
+                ["--db", str(db), "campaign", "start", "--serial", "SERIAL1",
+                 "--kind", "repeat", "--scenario", "home_feed_tap_video",
+                 "--iterations", "1", "--duration", "0.2", "--preflight"],
+                HealthySelectorAdb,
+            )
+            self.assertEqual(code, 0)
+            self.assertEqual(json.loads(out)["count"], 1)
+
+
+class _PreflightAdbBase:
+    HIERARCHY = "<hierarchy></hierarchy>"
+
+    def devices(self):
+        return [Device("SERIAL1", "device", "Pixel", "pixel")]
+
+    def shell(self, serial, command, timeout=10):
+        if command.startswith("uiautomator"):
+            return "dumped to: /sdcard/window_dump.xml"
+        if command.startswith("cat "):
+            return self.HIERARCHY
+        if command == "wm size":
+            return "Physical size: 1080x2340\n"
+        if command == "getprop ro.build.characteristics":
+            return "phone\n"
+        if command == "dumpsys window":
+            return "  mCurrentFocus=Window{a b com.google.android.youtube/.Main}"
+        if command == "dumpsys media_session":
+            return "package=com.google.android.youtube\n state=PlaybackState {state=3}"
+        if command == "dumpsys cpuinfo":
+            return "1.0% TOTAL: 1.0% user + 0.0% kernel"
+        if command == "cat /proc/meminfo":
+            return "MemTotal: 100 kB\nMemAvailable: 50 kB\n"
+        if command == "dumpsys battery":
+            return " level: 50\n temperature: 300\n"
+        return ""
+
+
+class StaleSelectorAdb(_PreflightAdbBase):
+    """Nothing on screen matches, so every target drops to its coordinate."""
+
+
+class HealthySelectorAdb(_PreflightAdbBase):
+    """A screen carrying the feed rows home_feed_tap_video looks for."""
+
+    HIERARCHY = (
+        '<hierarchy>'
+        '<node class="android.view.ViewGroup" clickable="true" bounds="[0,200][1080,800]" content-desc="A"/>'
+        '<node class="android.view.ViewGroup" clickable="true" bounds="[0,800][1080,1400]" content-desc="B"/>'
+        '</hierarchy>'
+    )
+
+
 class FakeCampaignAdb:
     """Answers everything a scenario-driven campaign run asks the device."""
 

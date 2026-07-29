@@ -146,6 +146,54 @@ class ComputeTrendTests(unittest.TestCase):
         self.assertGreater(trends["memory.used"].slope_per_hour, 0)
 
 
+class AppVersionDeltaTests(unittest.TestCase):
+    """Whether two runs measured the same build of the app under test.
+
+    Stated as its own field because it changes what a comparison *means*: if
+    the app updated in between, the delta describes the app's change, not the
+    device's -- and that is the likelier explanation of a sudden shift.
+    """
+
+    def _run(self, name, code):
+        return {"app_package": "com.google.android.youtube",
+                "app_version_name": name, "app_version_code": code}
+
+    def test_same_build_is_not_a_change(self):
+        from autoperf.analyzer import app_version_delta
+
+        delta = app_version_delta(self._run("19.09.37", 1543), self._run("19.09.37", 1543))
+        self.assertIs(delta["changed"], False)
+
+    def test_a_different_build_is_reported_as_changed(self):
+        from autoperf.analyzer import app_version_delta
+
+        delta = app_version_delta(self._run("19.09.37", 1543), self._run("19.16.39", 1560))
+        self.assertIs(delta["changed"], True)
+        self.assertEqual(delta["baseline"]["version_name"], "19.09.37")
+        self.assertEqual(delta["candidate"]["version_name"], "19.16.39")
+
+    def test_a_version_code_bump_alone_still_counts(self):
+        from autoperf.analyzer import app_version_delta
+
+        self.assertIs(app_version_delta(self._run("19.09.37", 1543),
+                                        self._run("19.09.37", 1544))["changed"], True)
+
+    def test_unknown_is_not_reported_as_unchanged(self):
+        # Runs predating version capture, or a package whose version could
+        # not be read. Showing those as "same version" would assert something
+        # that was never checked.
+        from autoperf.analyzer import app_version_delta
+
+        for baseline, candidate in (
+            (None, self._run("19.09.37", 1543)),
+            (self._run("19.09.37", 1543), None),
+            ({}, {}),
+            (self._run(None, None), self._run("19.09.37", 1543)),
+        ):
+            with self.subTest(baseline=baseline, candidate=candidate):
+                self.assertIsNone(app_version_delta(baseline, candidate)["changed"])
+
+
 class StatsFromAggregatesTests(unittest.TestCase):
     def test_builds_stats_from_sql_rows(self):
         from autoperf.analyzer import stats_from_aggregates

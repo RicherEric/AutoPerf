@@ -102,6 +102,49 @@ reconnect is **not built**.
 `AndroidTvAdapter` (maps phone scenarios onto TV packages and DPAD input).
 `select_adapter()` chooses between them from `ro.build.characteristics`.
 
+Beyond the raw input primitives, adapters expose `tap_element` (locate by
+selector chain, coordinates last), `verify_foreground` and `verify_playing`.
+The TV adapter overrides `tap_element` to walk focus with DPAD keys, since
+inheriting the phone path would locate an element correctly and then press
+select on whatever was already focused.
+
+### Verification — `uiauto.py`, `scenarios/selectors.py`
+
+The single most consequential correction to this document's earlier form,
+which stated that scenarios "only drive the UI" and that no verification was
+included *by design*. That design was wrong, and quietly so: `adb shell input
+tap` succeeds on any on-screen coordinate, so a tap that hit nothing was
+recorded as a completed action and the run finished green having measured an
+untouched screen. Every downstream number was real and described the wrong
+thing.
+
+`uiauto.py` wraps `uiautomator dump` to find elements by content-desc,
+resource-id or structural position, falling back to the old coordinate and
+*recording that it did*. `verify_foreground` and `verify_playing` (the latter
+via `dumpsys media_session`) turn "the step achieved nothing" into a raised
+`VerificationError`, which the runner stores as a `verification_failed` event.
+
+A run carrying such an event is reported as **unverified** -- its own verdict
+bucket, neither pass nor fail, excluded from the pass-rate denominator, on the
+same reasoning as the existing `no_baseline` bucket.
+
+`scenarios/selectors.py` is the one table that decays with app releases, and
+`autoperf ui-dump` is how real selectors get captured from a device.
+
+### Preflight — `preflight.py`
+
+Answers "do the selectors still work" on one device, before any measurement.
+Walks a minimal covering set of scenarios (the taps are real; most targets
+only exist once navigation has reached their screen), records per target
+whether a selector matched or the coordinate fallback was used, and captures
+what was on screen when one missed. Aggregated per target, because the fix is
+one entry in the selector table regardless of how many scenarios hit it.
+
+Touches no Storage: a preflight is a question about the device and the
+selector table, not a measurement of either. `autoperf campaign start
+--preflight` gates a campaign on it, scoped to that campaign's own scenarios
+and evaluated before the campaign row exists.
+
 No OEM-specific adapter exists. The intended hook point is subclassing
 `AndroidAdapter` once a *real, observed* behavioural difference appears —
 deliberately not pre-created as empty subclasses.
@@ -171,9 +214,9 @@ Actual tables (`storage.SCHEMA`):
 | Table | Holds |
 |---|---|
 | `devices` | serial, model, nickname, battery, connection, free-form `extra_info` JSON |
-| `test_runs` | one row per run; `youtube_scenario`, `campaign_id`, `cancel_requested`, checkpoint |
+| `test_runs` | one row per run; `youtube_scenario`, `campaign_id`, `cancel_requested`, checkpoint, and the app build measured (`app_package`, `app_version_name`, `app_version_code`) |
 | `metric_samples` | every sample; the large table |
-| `test_events` | lifecycle, collector/adapter errors and timeouts |
+| `test_events` | lifecycle, collector/adapter errors and timeouts, plus `verification_failed` and `selector_fallback` |
 | `baselines` | one row per `(device, scenario)` |
 | `campaigns` | soak/repeat programmes; child runs point back via `campaign_id` |
 
@@ -211,6 +254,13 @@ i18n, and long-run campaigns.
 
 ## Known Gaps
 
+- `scenarios/selectors.py` holds **unverified** resource-ids: they are
+  internal to each app build and cannot be confirmed without the app in
+  front of you. Capture the real ones with `autoperf ui-dump`.
+- `uiautomator dump` waits for an idle UI, and a playing video never is, so
+  taps issued during playback frequently degrade to their coordinate
+  fallback. Visible in `selector_fallback` events; expected, not a defect.
+- Verification has never been exercised against real hardware.
 - No report export in any format.
 - No automatic device reconnect.
 - No scheduled/recurring execution (no Celery beat); campaigns must be started

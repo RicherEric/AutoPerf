@@ -15,7 +15,8 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS devices (serial TEXT PRIMARY KEY, model TEXT, product TEXT, last_seen TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS test_runs (id TEXT PRIMARY KEY, device_serial TEXT NOT NULL, status TEXT NOT NULL,
   started_at TEXT, finished_at TEXT, checkpoint TEXT, error TEXT, youtube_scenario TEXT,
-  cancel_requested INTEGER NOT NULL DEFAULT 0, campaign_id TEXT);
+  cancel_requested INTEGER NOT NULL DEFAULT 0, campaign_id TEXT,
+  app_package TEXT, app_version_name TEXT, app_version_code INTEGER);
 CREATE TABLE IF NOT EXISTS metric_samples (id INTEGER PRIMARY KEY, run_id TEXT NOT NULL, timestamp TEXT NOT NULL,
   collector TEXT NOT NULL, name TEXT NOT NULL, value REAL NOT NULL, unit TEXT NOT NULL, labels TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_metrics_run_time ON metric_samples(run_id, timestamp);
@@ -68,6 +69,17 @@ class Storage:
                 if "campaign_id" not in columns:
                     conn.execute("ALTER TABLE test_runs ADD COLUMN campaign_id TEXT")
                 conn.execute(CAMPAIGN_RUN_INDEX)
+                # Which build of the app a run actually measured. Given its
+                # own columns rather than folded into a JSON blob because
+                # every comparison has to check it: if the app updated
+                # between a baseline and its candidate, the delta describes
+                # the app's change, not the device's -- and that is the more
+                # likely explanation of the two, so it must be impossible to
+                # overlook rather than merely available.
+                for name, coltype in (("app_package", "TEXT"), ("app_version_name", "TEXT"),
+                                      ("app_version_code", "INTEGER")):
+                    if name not in columns:
+                        conn.execute(f"ALTER TABLE test_runs ADD COLUMN {name} {coltype}")
                 device_columns = {row[1] for row in conn.execute("PRAGMA table_info(devices)")}
                 for name in ("nickname", "android_version", "battery_level", "connection", "extra_info"):
                     if name not in device_columns:
@@ -191,6 +203,60 @@ class Storage:
                     (RunStatus.RUNNING, now, run_id, run_id, RunStatus.RUNNING, run_id),
                 )
                 return cur.rowcount == 1
+
+    def set_run_app_version(self, run_id: str, version: dict | None) -> None:
+        """Record which build of the app under test this run measured."""
+        if not version:
+            return
+        with closing(self.connect()) as conn:
+            with conn:
+                conn.execute(
+                    "UPDATE test_runs SET app_package=?, app_version_name=?, app_version_code=? WHERE id=?",
+                    (version.get("package"), version.get("version_name"),
+                     version.get("version_code"), run_id),
+                )
+
+    def count_run_events(self, run_id: str, kinds: tuple[str, ...]) -> dict[str, int]:
+        """How many events of each kind a run recorded.
+
+        Used to answer "is this run's data trustworthy" without loading its
+        event log: a run carrying `verification_failed` events measured a
+        screen it never successfully reached.
+        """
+        if not kinds:
+            return {}
+        placeholders = ",".join("?" for _ in kinds)
+        with closing(self.connect()) as conn:
+            rows = conn.execute(
+                f"SELECT kind, COUNT(*) FROM test_events WHERE run_id=? AND kind IN ({placeholders}) "
+                "GROUP BY kind",
+                (run_id, *kinds),
+            ).fetchall()
+        counts = {kind: 0 for kind in kinds}
+        counts.update({kind: count for kind, count in rows})
+        return counts
+
+    def run_quality(self, run_id: str) -> dict:
+        """Whether this run's numbers can be trusted.
+
+        A run whose scenario could not be carried out still produces a full
+        set of perfectly real metrics -- of a screen it never reached. Before
+        verification existed there was no way to tell such a run from a good
+        one, which is what made a decayed selector so dangerous: the data kept
+        flowing and kept looking healthy.
+
+        `verified` false means "these numbers measure something other than
+        what the scenario describes". `selector_fallbacks` is not a failure --
+        the step worked via its coordinate, exactly as it always did -- but it
+        is the early warning that a selector has gone stale.
+        """
+        counts = self.count_run_events(run_id, ("verification_failed", "selector_fallback"))
+        failures = counts.get("verification_failed", 0)
+        return {
+            "verification_failures": failures,
+            "selector_fallbacks": counts.get("selector_fallback", 0),
+            "verified": failures == 0,
+        }
 
     def request_cancel(self, run_id: str) -> None:
         with closing(self.connect()) as conn:

@@ -260,8 +260,18 @@ def repeat_analysis(storage: Storage, runs: list[dict], threshold_pct: float) ->
     scenarios = []
     for scenario, scenario_runs in sorted(by_scenario.items()):
         errored = [r for r in scenario_runs if r["status"] in ("failed", "interrupted")]
-        completed = [r for r in scenario_runs if r["status"] == "completed"]
         pending = [r for r in scenario_runs if r["status"] not in TERMINAL_RUN_STATUSES]
+        finished_ok = [r for r in scenario_runs if r["status"] == "completed"]
+
+        # An iteration whose scenario could not be carried out measured a
+        # screen it never reached. Including it would corrupt both outputs
+        # this analysis exists for: its metrics would widen the spread for a
+        # reason unrelated to device variance, and it would register as a
+        # differing outcome, reporting a scenario as flaky when the truth is
+        # that the test itself is broken.
+        unverified = [r for r in finished_ok if not storage.run_quality(r["id"])["verified"]]
+        unverified_ids = {r["id"] for r in unverified}
+        completed = [r for r in finished_ok if r["id"] not in unverified_ids]
 
         regressed, metric_means = [], {}
         for run in completed:
@@ -312,6 +322,8 @@ def repeat_analysis(storage: Storage, runs: list[dict], threshold_pct: float) ->
             "total": len(scenario_runs),
             "pending": len(pending),
             "completed": len(completed),
+            "unverified": len(unverified),
+            "unverified_run_ids": [r["id"] for r in unverified],
             "errored": len(errored),
             "regressed": len(regressed),
             "regressed_run_ids": regressed,

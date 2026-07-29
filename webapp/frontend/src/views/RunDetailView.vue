@@ -340,6 +340,27 @@ onUnmounted(() => {
   <Card :title="t('runDetail.comparisonTitle')">
     <p v-if="!comparison">{{ t('runDetail.noBaselineYet') }}</p>
     <div v-else>
+      <!-- Placed above the verdict, not beside the table: if the app changed
+           between the two runs, the delta describes the app rather than the
+           device, which has to be read before the numbers are, not after. -->
+      <p v-if="comparison.app_version?.changed" class="banner banner-warn">
+        {{ t('runDetail.appVersionChanged', {
+          baseline: comparison.app_version.baseline?.version_name ?? '?',
+          candidate: comparison.app_version.candidate?.version_name ?? '?',
+        }) }}
+      </p>
+      <p v-else-if="comparison.app_version?.changed === null" class="hint">
+        {{ t('runDetail.appVersionUnknown') }}
+      </p>
+      <p v-else-if="comparison.app_version?.candidate" class="hint">
+        {{ t('runDetail.appVersionSame', { version: comparison.app_version.candidate.version_name }) }}
+      </p>
+      <p v-if="comparison.candidate_quality && !comparison.candidate_quality.verified"
+         class="banner banner-warn">
+        {{ t('runDetail.unverifiedWarning', {
+          count: comparison.candidate_quality.verification_failures,
+        }) }}
+      </p>
       <p>
         {{ t('runDetail.baselineRunLabel') }} {{ comparison.baseline_run_id.slice(0, 8) }} —
         <StatusBadge
@@ -419,5 +440,19 @@ details summary {
   color: var(--color-text-muted);
   font-size: 0.85em;
   max-width: 42em;
+}
+/* Deliberately louder than .hint: these two conditions invalidate the
+   comparison below them rather than merely annotating it. */
+.banner {
+  border-left: 3px solid currentColor;
+  padding: var(--space-2) var(--space-3);
+  margin-bottom: var(--space-3);
+  font-size: 0.9em;
+  max-width: 46em;
+  border-radius: 4px;
+}
+.banner-warn {
+  color: var(--color-warning-text, var(--color-text));
+  background: var(--color-warning-bg, var(--color-surface-alt));
 }
 </style>

@@ -34,6 +34,9 @@ The optional `--app <package>` flag drives the device via an `Adapter` (see `ada
 - `collectors.py`: plug-in sampling interface
 - `adapters.py`: plug-in device-control interface (launch/stop app, tap, swipe, key event) plus `select_adapter()`, which picks phone vs TV from `ro.build.characteristics`
 - `campaigns.py`: long-running soak/repeat programmes -- planning, execution, analysis
+- `uiauto.py`: locate elements by identity (`uiautomator dump` parsing + selector chains), read foreground/playback state and app version
+- `preflight.py`: verify every selector against one device before a real test, and report what needs updating
+- `scenarios/selectors.py`: the one table of UI targets -- the only file that decays with app releases
 - `runner.py`: lifecycle, scheduling, fault isolation, checkpoints
 - `storage.py`: WAL schema and single writer queue
 - `analyzer.py`: per-metric mean/stdev/min/max and baseline-vs-candidate comparison
@@ -45,16 +48,15 @@ Run tests without third-party dependencies: `python -m unittest discover -s test
 
 ## YouTube scenario library
 
-`adapters.py`'s `screen_size()` (parses `adb shell wm size`) lets `scenarios/coords.py`
-express taps/swipes as fractions of the screen (0..1) instead of hardcoded pixels,
-resolved to absolute coordinates once per run -- so the same scenario works across
-different screen resolutions. `scenarios/youtube.py` has 23 named presets (cold
-start, search+play, home feed scroll, Shorts browsing, quality switch, like,
-comment scroll, fullscreen, seek/scrub, long-press skip, background/foreground
-resume, app-switch cycling, PiP, multi-video session, subscriptions/library
-browsing) built purely from `launch_app`/`stop_app`/`tap`/`swipe`/`key_event` --
-no playback-correctness verification is included by design; these only drive
-the UI, the same way `--app` does.
+`scenarios/youtube.py` has 24 named presets (cold start, search+play, home feed
+scroll, Shorts browsing, quality switch, like, comment scroll, fullscreen,
+seek/scrub, long-press skip, background/foreground resume, app-switch cycling,
+PiP, multi-video session, subscriptions/library browsing).
+
+Swipes are still expressed as fractions of the screen via `scenarios/coords.py`
+(a swipe down the middle means the same thing at any resolution or layout), but
+**taps are located by identity, not by coordinate** -- see "Verification" below
+for why that distinction turned out to matter more than anything else here.
 
 Four of those (`play_golden`, `play_baby_groot_dancing`, `play_suis_moi`,
 `play_rickroll`) deep-link straight to a specific, known YouTube video via
@@ -185,6 +187,141 @@ header comment):
   zero) for the whole duration of a run. The page also shows a "Currently
   running" table sourced directly from Storage (`list_running_runs()`), which
   has no such blind spot, for exactly this reason.
+
+## Verification: why a green run used to mean nothing
+
+`adb shell input tap X Y` succeeds for any on-screen coordinate, occupied or
+not. So every coordinate-driven tap failed **silently**: the runner saw no
+exception, recorded `adapter_action completed`, and the run finished green
+having measured an untouched home feed. For performance work that is worse
+than having no test, because the metrics are real numbers describing the wrong
+thing -- and a UI change that breaks the taps reads as an efficiency *gain*,
+since the app is doing less.
+
+Three mechanisms replace that.
+
+**Elements are located by identity** (`uiauto.py`). Each tap target in
+`scenarios/selectors.py` carries an ordered chain, most durable first:
+
+| Strategy | Stability |
+|---|---|
+| `content-desc` | Accessibility labels; changing them breaks screen readers, so they move rarely. Translated, so each locale in use is listed (en + zh-TW). |
+| `resource-id` | Stable *within* an app version, meaningless across them -- an internal detail its authors have no reason to keep. |
+| structural (`class` + `index`) | "The third clickable row." Survives renames, and matches what feed scenarios actually mean: *a* video, not a particular one. |
+| coordinates | Last resort -- exactly the old behaviour. |
+
+A target that falls through to its coordinate still works, but records a
+`selector_fallback` event. That is the early warning a selector has decayed,
+and it was invisible before.
+
+**Assertions make failure loud.** `verify_foreground` checks the app really
+came to the front (`am start` returns success once the intent is *dispatched*,
+not once the app is usable). `verify_playing` reads `dumpsys media_session` --
+the only check that distinguishes "search_and_play worked" from "four taps hit
+empty space and the home feed is still showing", since a foreground check
+passes in both cases. Either raises `VerificationError`, which the runner
+records as `verification_failed`.
+
+**Unverified runs are their own verdict**, alongside the existing
+`no_baseline` bucket -- neither pass nor fail, and excluded from the pass-rate
+denominator. Counting one as a pass would hide a broken test; counting it as a
+fail would report a performance problem nobody observed.
+
+On Android TV, `tap_element` walks focus with DPAD keys toward the target
+instead of inheriting the phone path, which would locate the element correctly
+and then press select on whatever happened to be focused. TV deliberately has
+**no** coordinate fallback: a pixel is not something a remote can address.
+
+### Preflight: check the selectors before measuring anything
+
+```powershell
+autoperf preflight --serial <SERIAL>
+```
+
+Picks one device, walks the scenarios once, and reports **per target** whether
+it was found by a selector or fell through to its coordinate — then stops.
+Nothing is measured and nothing is written: no run, no metrics, no history.
+
+It is not a dry run in the usual sense; the taps really happen, because most
+targets only exist once the preceding step has navigated to their screen.
+Skipping them would report every later target as missing for reasons that have
+nothing to do with its selector.
+
+By default it runs the **fewest scenarios that still cover every distinct
+target** (currently 11 of 24 — most presets share the same search-and-play
+opening, so running all of them would re-check `search_icon` a dozen times and
+add nothing). Scope it with `--scenario` / `--tier` / `--all`.
+
+Findings are aggregated per target, because the fix is per target — one entry
+in `scenarios/selectors.py` — not per scenario. Each one carries what the
+table currently says *and what was actually on screen at that moment*, so the
+correct selector can be read straight off the report:
+
+```json
+{
+  "target": "like_button",
+  "status": ["coordinates"],
+  "scenarios": ["like_video"],
+  "detail": "no selector matched; fell through to the coordinate",
+  "current_selectors": [{"content_desc": "like this video"}, {"content_desc": "我喜歡這部影片"}],
+  "observed_on_screen": [{"resource_id": "...:id/like_button_v2", "content_desc": "喜歡這部影片"}]
+}
+```
+
+Exit code is non-zero if anything degraded, so it gates a suite. A coordinate
+fallback counts as a finding by default — the tap worked, but it was located
+the fragile way, which is exactly what the check exists to catch.
+`--allow-fallback` still reports them without failing.
+
+```powershell
+autoperf campaign start --serial <SERIAL> --kind repeat --tier smoke --iterations 20 --duration 30 --preflight
+```
+
+`--preflight` gates a campaign on the check, scoped to only the scenarios that
+campaign will actually run, and aborts **before the campaign row is created**
+so a failure leaves nothing half-finished to clean up.
+
+### Capturing real selectors
+
+The resource-ids in `scenarios/selectors.py` are **unverified guesses** --
+they are internal to each app build and published nowhere. Capture the real
+ones from a device with the relevant screen open:
+
+```powershell
+autoperf ui-dump --serial <SERIAL>
+```
+
+and correct that one table. Nothing breaks in the meantime; wrong guesses just
+fall through to coordinates and say so.
+
+### Two caveats worth knowing before trusting this
+
+- `uiautomator dump` waits for the UI to be idle, and **a playing video is
+  never idle** -- it often returns `ERROR: could not get idle state`. Taps that
+  happen during playback (`like_video`, `comment_scroll`,
+  `quality_switch_manual`) will therefore fall back to coordinates fairly
+  often. That degrades gracefully and visibly, but it is expected behaviour,
+  not a bug.
+- Selectors are per *app version*, not per device: the same YouTube build on
+  ten different phones needs one table. Tablets and foldables ship a different
+  layout, and Android TV is a different package entirely.
+
+## App version: what a comparison actually compared
+
+Every run records the `versionName`/`versionCode` of the app it drove, in
+dedicated `test_runs` columns. Without it, a background app update between a
+baseline and its candidate is indistinguishable from a device regression --
+and it is the *more* likely explanation of a sudden shift, not the less. Both
+`autoperf compare` and `GET /api/runs/<id>/comparison` report
+`app_version.changed`, and the dashboard shows it as a banner above the delta
+table rather than a footnote beside it. `changed: null` means unknown, which is
+deliberately not shown as "unchanged".
+
+This is also what bounds selector rot. Pin the app version -- which performance
+regression testing needs anyway, or the delta measures the app rather than the
+device -- and the UI cannot move until you deliberately bump it. The selector
+maintenance cycle then coincides exactly with the app upgrades that already
+require rebuilding baselines.
 
 ## Long-run regression testing (campaigns)
 
