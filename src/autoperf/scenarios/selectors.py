@@ -163,14 +163,23 @@ DOWNLOADS_ROW = Target(
 # --- player controls --------------------------------------------------------
 
 PLAYER_SURFACE = Target(
-    selectors=(_id("player_view"), _id("watch_player")),
+    # `watch_player` is the id a real build uses, carrying content-desc
+    # "影片播放器". It is not clickable, so it is matched by id rather than by
+    # the clickable-only content-desc helper.
+    selectors=(_id("watch_player"), _id("player_view"),
+               Selector(content_desc="影片播放器"), Selector(content_desc="Video player")),
     fallback=(0.5, 0.5),
     name="player_surface",
 )
 
 LIKE_BUTTON = Target(
+    # Captured label: "和另外 11,235 人都喜歡這部影片" -- the count is part of it,
+    # so only a substring can match. Note "喜歡" alone would NOT: at two
+    # characters it trips uiauto.SHORT_LABEL_LENGTH and is compared exactly,
+    # which is the guard that stopped a one-character label matching inside a
+    # video title. The longer phrase is both safer and more specific.
     selectors=(
-        *_desc("like this video", "我喜歡這部影片", "喜歡"),
+        *_desc("喜歡這部影片", "like this video"),
         _id("like_button"),
     ),
     fallback=(0.15, 0.62),
@@ -178,13 +187,16 @@ LIKE_BUTTON = Target(
 )
 
 SHORTS_LIKE_BUTTON = Target(
-    selectors=(*_desc("like this video", "我喜歡這部影片", "喜歡"), _id("reel_like_button")),
+    selectors=(*_desc("喜歡這部影片", "like this video"), _id("reel_like_button")),
     fallback=(0.9, 0.55),
     name="shorts_like_button",
 )
 
 COMMENTS_ROW = Target(
-    selectors=(*_desc("Comments", "留言"),
+    # "留言" is exactly two characters, so it is compared exactly -- which is
+    # what the captured label happens to be. It only appears after scrolling
+    # the watch page, so the scenario scrolls first.
+    selectors=(*_desc("留言", "Comments"),
                Selector(text="Comments"), Selector(text="留言"),
                _id("comments_entry_point")),
     fallback=(0.5, 0.68),
@@ -192,8 +204,10 @@ COMMENTS_ROW = Target(
 )
 
 OVERFLOW_MENU = Target(
+    # Captured label: "更多動作", not the "更多選項" that was guessed. "更多"
+    # alone is two characters and so is compared exactly (see LIKE_BUTTON).
     selectors=(
-        *_desc("More options", "更多選項", "更多"),
+        *_desc("更多動作", "More actions", "More options"),
         _id("player_overflow_button"),
     ),
     fallback=(0.95, 0.4),
@@ -214,6 +228,12 @@ QUALITY_OPTION = Target(
     name="quality_option",
 )
 
+# The player's overlay controls -- fullscreen, quality, the scrubber -- are
+# NOT present in the view hierarchy on a real build, even while playing and
+# even after tapping the player surface. The player renders them itself, the
+# same way the TV app renders its entire UI outside the accessibility tree.
+# These targets therefore rely on their coordinate fallback and always will;
+# preflight reports them as such rather than pretending otherwise.
 FULLSCREEN_ENTER = Target(
     selectors=(*_desc("Enter fullscreen", "全螢幕"), _id("fullscreen_button")),
     fallback=(0.93, 0.58),
