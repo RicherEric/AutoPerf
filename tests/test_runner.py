@@ -376,6 +376,92 @@ class VerificationRecordingTests(unittest.TestCase):
             self.assertTrue(any("search_icon" in d for d in details))
 
 
+class CancelStopsTheDeviceFirstTests(unittest.TestCase):
+    """Cancelling must quiet the device before waiting on in-flight work.
+
+    `cancel_futures` only drops futures that have not started; a running one
+    cannot be interrupted, and an element-locating step can spend seconds
+    dumping the UI and retrying. Measured on a Galaxy A55 before the fix: a
+    cancel landing mid-`tap_element` left the video playing for 10.2 seconds
+    while shutdown() waited. Afterwards the device went quiet in 1.0s.
+    """
+
+    class SlowAdapter(AndroidAdapter):
+        def __init__(self, hold: float):
+            super().__init__()
+            self.hold = hold
+            self.events = []
+
+        def tap_element(self, adb, serial, target, screen=None):
+            self.events.append("tap_element:start")
+            time.sleep(self.hold)
+            self.events.append("tap_element:end")
+            return {"target": "t", "strategy": "content_desc", "x": 1, "y": 2}
+
+        def stop_app(self, adb, serial, package):
+            self.events.append("stop_app")
+
+        def key_event(self, adb, serial, keycode):
+            self.events.append(f"key_event:{keycode}")
+
+    def _cancel_during_step(self, hold):
+        storage = Storage(Path(self._dir) / "db.sqlite")
+        storage.initialize()
+        storage.create_run("r1", "serial")
+        adapter = self.SlowAdapter(hold)
+        scenario = [
+            ScenarioStep(0.0, "launch_app", {"package": "com.example.app"}),
+            ScenarioStep(0.2, "tap_element", {"target": None}),
+        ]
+        runner = TestRunner(storage, FakeAdb(), [CpuCollector(interval=0.05)],
+                            adapter=adapter, scenario=scenario, heartbeat_interval=0.25)
+
+        def cancel_soon():
+            time.sleep(0.5)
+            storage.request_cancel("r1")
+
+        threading.Thread(target=cancel_soon, daemon=True).start()
+        runner.run("serial", 30.0, "r1")
+        return storage, adapter
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._dir = self._tmp.name
+        self.addCleanup(self._tmp.cleanup)
+
+    def test_the_app_is_stopped_before_the_slow_step_finishes(self):
+        storage, adapter = self._cancel_during_step(hold=3.0)
+
+        self.assertEqual(storage.get_run("r1")["status"], "interrupted")
+        stop = adapter.events.index("stop_app")
+        end = adapter.events.index("tap_element:end")
+        # The whole point: quieting the device does not queue behind the
+        # action that is still running.
+        self.assertLess(stop, end, f"stop_app came after the in-flight step: {adapter.events}")
+
+    def test_the_device_is_left_on_the_home_screen(self):
+        # A tap already in flight when the app was stopped lands afterwards,
+        # on whatever is now on screen -- observed leaving the Galaxy Store
+        # open on a real phone.
+        _, adapter = self._cancel_during_step(hold=1.0)
+        self.assertEqual(adapter.events[-1], f"key_event:{HOME}")
+
+    def test_a_normal_finish_still_stops_the_app_exactly_once(self):
+        storage = Storage(Path(self._dir) / "db.sqlite")
+        storage.initialize()
+        adapter = self.SlowAdapter(0.0)
+        runner = TestRunner(
+            storage, FakeAdb(), [CpuCollector(interval=0.05)], adapter=adapter,
+            scenario=[ScenarioStep(0.0, "launch_app", {"package": "com.example.app"})],
+            heartbeat_interval=0.25,
+        )
+        run_id = runner.run("serial", 0.4)
+
+        self.assertEqual(storage.get_run(run_id)["status"], "completed")
+        self.assertEqual(adapter.events.count("stop_app"), 1)
+        self.assertNotIn(f"key_event:{HOME}", adapter.events)
+
+
 class AppVersionRecordingTests(unittest.TestCase):
     def test_records_the_launched_package_version(self):
         class VersionAdb(FakeAdb):
