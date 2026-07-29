@@ -15,7 +15,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS devices (serial TEXT PRIMARY KEY, model TEXT, product TEXT, last_seen TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS test_runs (id TEXT PRIMARY KEY, device_serial TEXT NOT NULL, status TEXT NOT NULL,
   started_at TEXT, finished_at TEXT, checkpoint TEXT, error TEXT, youtube_scenario TEXT,
-  cancel_requested INTEGER NOT NULL DEFAULT 0);
+  cancel_requested INTEGER NOT NULL DEFAULT 0, campaign_id TEXT);
 CREATE TABLE IF NOT EXISTS metric_samples (id INTEGER PRIMARY KEY, run_id TEXT NOT NULL, timestamp TEXT NOT NULL,
   collector TEXT NOT NULL, name TEXT NOT NULL, value REAL NOT NULL, unit TEXT NOT NULL, labels TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_metrics_run_time ON metric_samples(run_id, timestamp);
@@ -25,7 +25,19 @@ CREATE TABLE IF NOT EXISTS test_events (id INTEGER PRIMARY KEY, run_id TEXT NOT 
 CREATE TABLE IF NOT EXISTS baselines (device_serial TEXT NOT NULL, scenario TEXT NOT NULL DEFAULT '',
   run_id TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (device_serial, scenario));
 CREATE INDEX IF NOT EXISTS idx_runs_serial_status ON test_runs(device_serial, status);
+CREATE TABLE IF NOT EXISTS campaigns (id TEXT PRIMARY KEY, kind TEXT NOT NULL, device_serial TEXT NOT NULL,
+  scenario TEXT, tier TEXT, duration REAL NOT NULL, iterations INTEGER NOT NULL DEFAULT 1,
+  status TEXT NOT NULL, cancel_requested INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL,
+  started_at TEXT, finished_at TEXT, error TEXT);
 """
+# Deliberately NOT part of SCHEMA: this indexes test_runs.campaign_id, a
+# column older databases only gain in the migration block below, and
+# executescript(SCHEMA) runs before those migrations. Creating it there
+# would work on a fresh database and fail on every existing one.
+# `rowid` is not indexable in SQLite (it is the table's implicit key, not a
+# column CREATE INDEX accepts), so this indexes campaign_id alone -- enough
+# for the campaign_id=? lookups; the ORDER BY rowid then reads in key order.
+CAMPAIGN_RUN_INDEX = "CREATE INDEX IF NOT EXISTS idx_runs_campaign ON test_runs(campaign_id)"
 
 
 class Storage:
@@ -51,6 +63,11 @@ class Storage:
                     conn.execute("ALTER TABLE test_runs ADD COLUMN youtube_scenario TEXT")
                 if "cancel_requested" not in columns:
                     conn.execute("ALTER TABLE test_runs ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0")
+                # Links each run to the campaign that spawned it (NULL for
+                # standalone runs). Must precede CAMPAIGN_RUN_INDEX below.
+                if "campaign_id" not in columns:
+                    conn.execute("ALTER TABLE test_runs ADD COLUMN campaign_id TEXT")
+                conn.execute(CAMPAIGN_RUN_INDEX)
                 device_columns = {row[1] for row in conn.execute("PRAGMA table_info(devices)")}
                 for name in ("nickname", "android_version", "battery_level", "connection", "extra_info"):
                     if name not in device_columns:
@@ -135,12 +152,14 @@ class Storage:
             with conn:
                 conn.execute("UPDATE devices SET nickname=? WHERE serial=?", (nickname, serial))
 
-    def create_run(self, run_id: str, serial: str, youtube_scenario: str | None = None) -> None:
+    def create_run(self, run_id: str, serial: str, youtube_scenario: str | None = None,
+                   campaign_id: str | None = None) -> None:
         with closing(self.connect()) as conn:
             with conn:
                 conn.execute(
-                    "INSERT INTO test_runs(id, device_serial, status, youtube_scenario) VALUES (?, ?, ?, ?)",
-                    (run_id, serial, RunStatus.PENDING, youtube_scenario),
+                    "INSERT INTO test_runs(id, device_serial, status, youtube_scenario, campaign_id) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (run_id, serial, RunStatus.PENDING, youtube_scenario, campaign_id),
                 )
 
     def update_run(self, run_id: str, status: RunStatus, *, checkpoint: str | None = None, error: str | None = None) -> None:
@@ -230,6 +249,190 @@ class Storage:
             rows = conn.execute(
                 "SELECT * FROM metric_samples WHERE run_id=? AND id>? ORDER BY id ASC LIMIT ?",
                 (run_id, since_id, limit),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    # ---- campaigns -------------------------------------------------------
+    # A campaign is one long-running test programme that spawns many ordinary
+    # runs, rather than a new kind of run. Keeping the child runs as plain
+    # rows in test_runs means every existing feature -- baselines, the
+    # comparison endpoint, live screen, recordings, deletion -- keeps working
+    # on them untouched, and a campaign is just an extra grouping layer on
+    # top with its own lifecycle.
+
+    def create_campaign(self, campaign_id: str, kind: str, serial: str, duration: float, *,
+                        scenario: str | None = None, tier: str | None = None,
+                        iterations: int = 1) -> None:
+        with closing(self.connect()) as conn:
+            with conn:
+                conn.execute(
+                    "INSERT INTO campaigns(id, kind, device_serial, scenario, tier, duration, iterations, "
+                    "status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (campaign_id, kind, serial, scenario, tier, duration, iterations,
+                     RunStatus.PENDING, utc_now()),
+                )
+
+    def update_campaign(self, campaign_id: str, status: RunStatus, *, error: str | None = None) -> None:
+        now = utc_now()
+        with closing(self.connect()) as conn:
+            with conn:
+                conn.execute(
+                    "UPDATE campaigns SET status=?, "
+                    "started_at=CASE WHEN ?='running' THEN COALESCE(started_at, ?) ELSE started_at END, "
+                    "finished_at=CASE WHEN ? IN ('completed','failed','interrupted') THEN ? ELSE finished_at END, "
+                    "error=COALESCE(?, error) WHERE id=?",
+                    (status, status, now, status, now, error, campaign_id),
+                )
+
+    def request_campaign_cancel(self, campaign_id: str) -> None:
+        with closing(self.connect()) as conn:
+            with conn:
+                conn.execute("UPDATE campaigns SET cancel_requested=1 WHERE id=?", (campaign_id,))
+
+    def cancel_campaign_runs(self, campaign_id: str) -> int:
+        """Flags every not-yet-finished run of a campaign as cancelled.
+
+        This is the whole cancellation mechanism for a campaign, and it is
+        deliberately one UPDATE rather than a loop of Celery revokes. A
+        repeat campaign can have hundreds of queued child tasks, and
+        revoking them individually would hit the same `--pool=solo` control
+        plane blind spot documented in services._revoke_in_background -- the
+        worker cannot answer a revoke while it is synchronously executing a
+        task. TestRunner.run() already checks cancel_requested before doing
+        any work and converts such a run to 'interrupted' without touching
+        the device, so flagging the rows is both sufficient and immediate.
+        Returns how many runs were flagged.
+        """
+        with closing(self.connect()) as conn:
+            with conn:
+                cur = conn.execute(
+                    "UPDATE test_runs SET cancel_requested=1 "
+                    "WHERE campaign_id=? AND status IN ('pending','running')",
+                    (campaign_id,),
+                )
+                return cur.rowcount
+
+    def get_campaign(self, campaign_id: str) -> dict | None:
+        with closing(self.connect()) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute("SELECT * FROM campaigns WHERE id=?", (campaign_id,)).fetchone()
+            return dict(row) if row else None
+
+    def list_campaigns(self, limit: int = 50, device_serial: str | None = None) -> list[dict]:
+        """Campaigns newest-first, each with a live count of its child runs.
+
+        The counts come from one grouped join rather than a per-campaign
+        follow-up query, so listing N campaigns stays a single round trip --
+        this endpoint is polled while campaigns are running.
+        """
+        with closing(self.connect()) as conn:
+            conn.row_factory = sqlite3.Row
+            clause = "WHERE c.device_serial=?" if device_serial else ""
+            params = ([device_serial] if device_serial else []) + [limit]
+            rows = conn.execute(
+                f"""SELECT c.*,
+                           COUNT(r.id) AS run_count,
+                           SUM(CASE WHEN r.status='completed' THEN 1 ELSE 0 END) AS completed_count,
+                           SUM(CASE WHEN r.status IN ('failed','interrupted') THEN 1 ELSE 0 END) AS failed_count
+                    FROM campaigns c LEFT JOIN test_runs r ON r.campaign_id = c.id
+                    {clause}
+                    GROUP BY c.id ORDER BY c.rowid DESC LIMIT ?""",
+                params,
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def list_campaign_runs(self, campaign_id: str) -> list[dict]:
+        with closing(self.connect()) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM test_runs WHERE campaign_id=? ORDER BY rowid ASC", (campaign_id,)
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def delete_campaign(self, campaign_id: str) -> list[str]:
+        """Deletes a campaign and every run it spawned. Returns the deleted run
+        ids so the caller can clean up their recordings, which live on disk
+        outside this database (mirroring how delete_run is used)."""
+        run_ids = [row["id"] for row in self.list_campaign_runs(campaign_id)]
+        for run_id in run_ids:
+            self.delete_run(run_id)
+        with closing(self.connect()) as conn:
+            with conn:
+                conn.execute("DELETE FROM campaigns WHERE id=?", (campaign_id,))
+        return run_ids
+
+    def aggregate_samples(self, run_id: str) -> list[dict]:
+        """Per-metric count/mean/stdev/min/max computed entirely inside SQLite.
+
+        Replaces the `compute_stats(list_samples(limit=100_000))` pattern,
+        which had two problems that only show up on long runs. It loads every
+        row into Python just to reduce them to five numbers, and -- worse --
+        the limit silently truncates: at the default collector cadence
+        (~3.4 samples/second) 100k rows is only ~8.2 hours, and because
+        `list_samples` orders by `id ASC` the rows it drops are the *tail* of
+        the run, exactly where a memory leak or thermal throttle would show.
+        A soak run long enough to exhibit a regression would have reported
+        stats computed from only its healthy opening stretch.
+
+        Variance is computed two-pass (a join against each metric's own mean)
+        rather than via the one-pass E[x^2]-E[x]^2 identity. One pass would be
+        marginally cheaper, but it subtracts two large nearly-equal numbers --
+        for `memory.used`, mean^2 is ~1e13 while the variance may be ~1e6, so
+        catastrophic cancellation eats most of the significant digits. SQLite
+        still streams both passes, so peak memory stays O(distinct metrics)
+        either way. `pstdev` (population, matching analyzer.compute_stats)
+        is used so both paths agree.
+        """
+        with closing(self.connect()) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """SELECT m.name AS name, COUNT(*) AS count, AVG(m.value) AS mean,
+                          MIN(m.value) AS minimum, MAX(m.value) AS maximum,
+                          AVG((m.value - a.mean) * (m.value - a.mean)) AS variance
+                   FROM metric_samples m
+                   JOIN (SELECT name, AVG(value) AS mean FROM metric_samples
+                         WHERE run_id=? GROUP BY name) a ON a.name = m.name
+                   WHERE m.run_id=?
+                   GROUP BY m.name""",
+                (run_id, run_id),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def downsample_samples(self, run_id: str, buckets: int = 300) -> list[dict]:
+        """Reduce each metric's series to at most `buckets` points for charting.
+
+        A multi-hour run holds ~100k samples; handing those to an SVG line
+        chart is what actually breaks the Run Detail page, so the reduction
+        has to happen before the rows leave SQLite.
+
+        Buckets are cut by *sample rank* (ROW_NUMBER over the metric's own
+        rows) rather than by wall-clock time. Each collector samples on a
+        fixed interval, so rank is already proportional to time within a
+        metric, and ranking sidesteps parsing the ISO-8601 timestamps -- which
+        carry both a `+00:00` offset and microseconds, neither of which
+        SQLite's date functions handle as uniformly as `datetime.fromisoformat`
+        does on the Python side. Partitioning per metric also means cpu (1s)
+        and battery (10s) each get the full bucket budget instead of battery
+        being crowded out by cpu's 10x sample count.
+
+        `minimum`/`maximum` are carried alongside `mean` so a spike inside a
+        bucket stays visible instead of being averaged away -- the whole point
+        of watching a soak run is catching transients.
+        """
+        buckets = max(1, int(buckets))
+        with closing(self.connect()) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """SELECT name, bucket, COUNT(*) AS count, AVG(value) AS mean,
+                          MIN(value) AS minimum, MAX(value) AS maximum,
+                          MIN(timestamp) AS timestamp, MIN(unit) AS unit
+                   FROM (SELECT name, value, timestamp, unit,
+                                (ROW_NUMBER() OVER (PARTITION BY name ORDER BY id) - 1) * ?
+                                / COUNT(*) OVER (PARTITION BY name) AS bucket
+                         FROM metric_samples WHERE run_id=?)
+                   GROUP BY name, bucket
+                   ORDER BY name, bucket""",
+                (buckets, run_id),
             ).fetchall()
             return [dict(row) for row in rows]
 

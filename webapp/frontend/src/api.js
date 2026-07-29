@@ -83,6 +83,39 @@ export function getQueueStatus() {
   return request('/queue')
 }
 
+export function listCampaigns(deviceSerial = '') {
+  const deviceParam = deviceSerial ? `?device=${encodeURIComponent(deviceSerial)}` : ''
+  return request(`/campaigns${deviceParam}`)
+}
+
+export function triggerCampaign(payload) {
+  return request('/campaigns', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+}
+
+export function getCampaign(campaignId) {
+  return request(`/campaigns/${campaignId}`)
+}
+
+export function cancelCampaign(campaignId) {
+  return request(`/campaigns/${campaignId}/cancel`, { method: 'POST' })
+}
+
+export function deleteCampaign(campaignId) {
+  return request(`/campaigns/${campaignId}`, { method: 'DELETE' })
+}
+
+// Bucket-averaged series for charting a finished run. listSamples() streams
+// raw rows and stays the right call while a run is live (the client only ever
+// asks for what's newer than since_id); this one bounds the point count so a
+// multi-hour run costs the same to render as a short one.
+export function getRunSeries(runId, buckets = 300) {
+  return request(`/runs/${runId}/series?buckets=${buckets}`)
+}
+
 export function getStats(limit = 50, deviceSerial = '') {
   const deviceParam = deviceSerial ? `&device=${encodeURIComponent(deviceSerial)}` : ''
   return request(`/stats?limit=${limit}${deviceParam}`)

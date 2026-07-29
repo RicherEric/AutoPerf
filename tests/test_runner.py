@@ -220,5 +220,58 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(storage.get_run(run_id)["status"], "completed")
 
 
+class CountingStorage(Storage):
+    """Storage that records how often a run's checkpoint is written."""
+
+    def __init__(self, path):
+        super().__init__(path)
+        self.running_updates = 0
+
+    def update_run(self, run_id, status, *, checkpoint=None, error=None):
+        if status == "running":
+            self.running_updates += 1
+        return super().update_run(run_id, status, checkpoint=checkpoint, error=error)
+
+
+class HeartbeatThrottleTests(unittest.TestCase):
+    def test_checkpoint_writes_are_throttled_not_once_per_control_tick(self):
+        """Checkpoint cost must not scale with run length.
+
+        The control loop ticks every ~10ms so collector timeouts stay
+        responsive. Writing the checkpoint on every tick meant ~100 SQLite
+        write transactions per second, each opening its own connection --
+        survivable for a 60-second run, fatal for a multi-hour soak, where it
+        starves BatchWriter of the single WAL write lock until its bounded
+        queue overflows. With a 0.25s heartbeat a ~1s run must produce only a
+        handful of checkpoint writes, not ~100.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            storage = CountingStorage(Path(directory) / "db.sqlite")
+            storage.initialize()
+            runner = TestRunner(
+                storage, FakeAdb(), [CpuCollector(interval=0.05)], heartbeat_interval=0.25
+            )
+            run_id = runner.run("serial", 1.0)
+
+            self.assertLessEqual(storage.running_updates, 10)
+            self.assertEqual(storage.get_run(run_id)["status"], "completed")
+
+    def test_final_checkpoint_records_elapsed_time_even_below_one_heartbeat(self):
+        # Throttling must not cost a run its checkpoint: a run shorter than a
+        # single heartbeat interval still has to record where it got to, or
+        # `--resume` has nothing to resume from.
+        with tempfile.TemporaryDirectory() as directory:
+            storage = Storage(Path(directory) / "db.sqlite")
+            storage.initialize()
+            runner = TestRunner(
+                storage, FakeAdb(), [CpuCollector(interval=0.05)], heartbeat_interval=60.0
+            )
+            run_id = runner.run("serial", 0.2)
+
+            checkpoint = storage.get_run(run_id)["checkpoint"]
+            self.assertIsNotNone(checkpoint)
+            self.assertGreater(float(checkpoint), 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()

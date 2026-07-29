@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import math
 import statistics
 from dataclasses import dataclass
+from datetime import datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -12,6 +14,26 @@ class MetricStats:
     stdev: float
     minimum: float
     maximum: float
+
+
+@dataclass(frozen=True, slots=True)
+class MetricTrend:
+    """How a metric moved *across* a run, as opposed to what it averaged.
+
+    `MetricStats.mean` is close to blind to the failure mode a soak test
+    exists to catch. A process leaking memory steadily from 2.0 GB to 2.6 GB
+    over eight hours has a mean of 2.3 GB -- perhaps 4% above a healthy run's
+    2.2 GB, comfortably under any sane regression threshold, while the device
+    is in fact 30% worse off by the end. Slope and start-vs-end drift make
+    that visible; mean never will.
+    """
+    name: str
+    slope_per_hour: float
+    start_mean: float
+    end_mean: float
+    drift_pct: float | None
+    span_hours: float
+    points: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +60,102 @@ def compute_stats(samples: list[dict]) -> dict[str, MetricStats]:
             maximum=max(values),
         )
     return stats
+
+
+def stats_from_aggregates(rows: list[dict]) -> dict[str, MetricStats]:
+    """Build MetricStats from `Storage.aggregate_samples()` rows.
+
+    Same output shape as `compute_stats`, but the reduction already happened
+    in SQL, so this never holds a run's samples in memory and never truncates.
+    Prefer it anywhere a run could be long; `compute_stats` remains for
+    callers that already have the sample rows in hand for another reason.
+    """
+    stats: dict[str, MetricStats] = {}
+    for row in rows:
+        count = int(row["count"])
+        # SQLite hands back NULL for AVG over an empty set, and a
+        # single-sample metric has zero variance by definition -- matching
+        # compute_stats, which reports stdev 0.0 below two values.
+        variance = row["variance"] if row["variance"] is not None else 0.0
+        stats[row["name"]] = MetricStats(
+            name=row["name"],
+            count=count,
+            mean=row["mean"],
+            # max(0.0, ...) guards the tiny negative a float round-off can
+            # produce when every sample is identical.
+            stdev=math.sqrt(max(0.0, variance)) if count > 1 else 0.0,
+            minimum=row["minimum"],
+            maximum=row["maximum"],
+        )
+    return stats
+
+
+def compute_trend(buckets: list[dict], edge_fraction: float = 0.25) -> dict[str, MetricTrend]:
+    """Per-metric least-squares slope and start-vs-end drift.
+
+    Takes `Storage.downsample_samples()` output rather than raw samples: the
+    buckets are already evenly spaced and averaged, which both keeps this
+    O(buckets) on a multi-hour run and damps the per-sample noise that would
+    otherwise dominate a regression line fitted to jittery 1-second CPU
+    readings.
+
+    `slope_per_hour` is in the metric's own unit per hour (KiB/hour for
+    memory, %/hour for CPU, C/hour for temperature) -- deliberately not
+    normalised, since what counts as an alarming rate differs per metric and
+    that judgment belongs to the caller, the same way `compare()` leaves the
+    direction of `delta_pct` to whoever reads it.
+
+    `drift_pct` compares the mean of the first `edge_fraction` of the run
+    against the last. Slope alone can be misleading when a metric steps once
+    and then plateaus (a fitted line reports a gentle constant climb that
+    never actually happened); the edge comparison catches the real magnitude
+    of the move either way.
+    """
+    grouped: dict[str, list[dict]] = {}
+    for row in buckets:
+        grouped.setdefault(row["name"], []).append(row)
+
+    trends: dict[str, MetricTrend] = {}
+    for name, rows in grouped.items():
+        rows = sorted(rows, key=lambda r: r["bucket"])
+        values = [float(r["mean"]) for r in rows]
+        times = [_parse_hours(r["timestamp"]) for r in rows]
+        origin = times[0]
+        hours = [t - origin for t in times]
+        span = hours[-1] - hours[0]
+
+        edge = max(1, int(len(rows) * edge_fraction))
+        start_mean = statistics.fmean(values[:edge])
+        end_mean = statistics.fmean(values[-edge:])
+        drift_pct = ((end_mean - start_mean) / start_mean * 100) if start_mean else None
+
+        # A run too short to have two distinct bucket timestamps has no
+        # measurable rate of change; reporting 0.0 is honest, dividing by a
+        # zero span is not.
+        if len(rows) < 2 or span <= 0:
+            slope = 0.0
+        else:
+            mean_x = statistics.fmean(hours)
+            mean_y = statistics.fmean(values)
+            denominator = sum((x - mean_x) ** 2 for x in hours)
+            numerator = sum((x - mean_x) * (y - mean_y) for x, y in zip(hours, values))
+            slope = numerator / denominator if denominator else 0.0
+
+        trends[name] = MetricTrend(
+            name=name,
+            slope_per_hour=slope,
+            start_mean=start_mean,
+            end_mean=end_mean,
+            drift_pct=drift_pct,
+            span_hours=span,
+            points=len(rows),
+        )
+    return trends
+
+
+def _parse_hours(timestamp: str) -> float:
+    """ISO-8601 timestamp -> absolute hours, for use as a regression x-axis."""
+    return datetime.fromisoformat(timestamp).timestamp() / 3600.0
 
 
 def compare(

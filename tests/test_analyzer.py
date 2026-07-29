@@ -57,5 +57,115 @@ class CompareTests(unittest.TestCase):
         self.assertFalse(results[0].regressed)
 
 
+def _buckets(name, values, *, seconds_apart=60.0, start="2026-01-01T00:00:00+00:00"):
+    from datetime import datetime, timedelta
+
+    origin = datetime.fromisoformat(start)
+    return [
+        {
+            "name": name,
+            "bucket": index,
+            "mean": value,
+            "timestamp": (origin + timedelta(seconds=index * seconds_apart)).isoformat(),
+        }
+        for index, value in enumerate(values)
+    ]
+
+
+class ComputeTrendTests(unittest.TestCase):
+    def test_detects_a_leak_that_the_mean_hides(self):
+        """The case that motivates having a trend at all.
+
+        Memory climbs steadily from 2.0 GB to 2.6 GB across the run. Its mean
+        sits ~15% above the starting level -- under a conventional 20%
+        regression threshold, so a mean-based comparison calls this a pass --
+        while the device really is 30% worse off by the end.
+        """
+        from autoperf.analyzer import compare, compute_stats, compute_trend
+
+        values = [2_000_000 + 600_000 * i / 99 for i in range(100)]
+        # one hour of run time, sampled evenly
+        trends = compute_trend(_buckets("memory.used", values, seconds_apart=3600 / 99))
+
+        trend = trends["memory.used"]
+        self.assertAlmostEqual(trend.span_hours, 1.0, places=3)
+        self.assertGreater(trend.slope_per_hour, 500_000)
+        self.assertGreater(trend.drift_pct, 20)
+
+        # ...whereas the mean comparison this replaces does not flag it.
+        healthy = compute_stats([{"name": "memory.used", "value": 2_000_000.0}])
+        observed = compute_stats([{"name": "memory.used", "value": v} for v in values])
+        self.assertFalse(compare(healthy, observed, threshold_pct=20.0)[0].regressed)
+
+    def test_flat_metric_has_no_slope_or_drift(self):
+        from autoperf.analyzer import compute_trend
+
+        trends = compute_trend(_buckets("cpu.total", [40.0] * 50))
+        self.assertAlmostEqual(trends["cpu.total"].slope_per_hour, 0.0, places=6)
+        self.assertAlmostEqual(trends["cpu.total"].drift_pct, 0.0, places=6)
+
+    def test_declining_metric_reports_negative_slope(self):
+        from autoperf.analyzer import compute_trend
+
+        trends = compute_trend(_buckets("battery.level", [100 - i for i in range(60)]))
+        self.assertLess(trends["battery.level"].slope_per_hour, 0)
+        self.assertLess(trends["battery.level"].drift_pct, 0)
+
+    def test_single_bucket_has_zero_span_and_slope(self):
+        from autoperf.analyzer import compute_trend
+
+        trends = compute_trend(_buckets("cpu.total", [42.0]))
+        trend = trends["cpu.total"]
+        self.assertEqual(trend.span_hours, 0.0)
+        self.assertEqual(trend.slope_per_hour, 0.0)
+        self.assertEqual(trend.start_mean, 42.0)
+        self.assertEqual(trend.end_mean, 42.0)
+
+    def test_drift_is_none_when_the_run_starts_at_zero(self):
+        from autoperf.analyzer import compute_trend
+
+        trends = compute_trend(_buckets("cpu.total", [0.0] * 10 + [5.0] * 10))
+        self.assertIsNone(trends["cpu.total"].drift_pct)
+
+    def test_step_change_is_reported_by_drift_even_though_slope_understates_it(self):
+        # A metric that jumps once and plateaus: a fitted line reports a
+        # gentle continuous climb that never happened, so drift is what
+        # carries the real magnitude of the move.
+        from autoperf.analyzer import compute_trend
+
+        trends = compute_trend(_buckets("memory.used", [100.0] * 50 + [200.0] * 50))
+        self.assertAlmostEqual(trends["memory.used"].drift_pct, 100.0, places=6)
+
+    def test_handles_multiple_metrics_independently(self):
+        from autoperf.analyzer import compute_trend
+
+        rows = _buckets("cpu.total", [40.0] * 20) + _buckets("memory.used", [100.0 + i for i in range(20)])
+        trends = compute_trend(rows)
+        self.assertEqual(set(trends), {"cpu.total", "memory.used"})
+        self.assertAlmostEqual(trends["cpu.total"].slope_per_hour, 0.0, places=6)
+        self.assertGreater(trends["memory.used"].slope_per_hour, 0)
+
+
+class StatsFromAggregatesTests(unittest.TestCase):
+    def test_builds_stats_from_sql_rows(self):
+        from autoperf.analyzer import stats_from_aggregates
+
+        stats = stats_from_aggregates([
+            {"name": "cpu.total", "count": 4, "mean": 25.0, "variance": 125.0,
+             "minimum": 10.0, "maximum": 40.0},
+        ])
+        self.assertEqual(stats["cpu.total"].count, 4)
+        self.assertAlmostEqual(stats["cpu.total"].stdev, 125.0 ** 0.5, places=9)
+
+    def test_treats_null_variance_as_zero(self):
+        from autoperf.analyzer import stats_from_aggregates
+
+        stats = stats_from_aggregates([
+            {"name": "battery.level", "count": 1, "mean": 80.0, "variance": None,
+             "minimum": 80.0, "maximum": 80.0},
+        ])
+        self.assertEqual(stats["battery.level"].stdev, 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()
