@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
-from ..adapters import APP_SWITCH, BACK, HOME, ScenarioStep
+from ..adapters import APP_SWITCH, BACK, ENTER, HOME, ScenarioStep
 from . import coords, selectors
 
 PACKAGE = "com.google.android.youtube"
@@ -89,16 +89,43 @@ def _play_named_video(video: NamedVideo) -> Callable[[tuple[int, int]], list[Sce
     return build_fn
 
 
+# What the search flow actually searches for. Kept ASCII because
+# `input text` is a keystroke injector that does not reliably deliver
+# non-ASCII, and kept in one place because every scenario built on
+# `_enter_video_steps` inherits it.
+SEARCH_QUERY = "lofi hip hop radio"
+
+
 def _enter_video_steps(screen, start_at: float = 0.0) -> list[ScenarioStep]:
-    """Launch, search, and tap into a result -- lands on a playing video by ~start_at+8.0."""
+    """Launch, search for a fixed query, and open the first result.
+
+    The flow used to tap the search box and then tap wherever the "first
+    suggestion" would be -- without ever typing anything. Preflight on a
+    Galaxy A55 showed what that really did: the suggestion target matched
+    nothing on 7 of 7 attempts, the flow never reached a video, and all seven
+    scenarios built on it failed their playback check. Before verification
+    existed they had all been passing, measuring whatever screen the taps
+    happened to leave behind.
+
+    Typing a fixed query and pressing Enter makes the flow deterministic and
+    removes the dependency on search history entirely: `input text` is a
+    keystroke injector, so it works regardless of what the UI exposes.
+
+    Results still shift over time, so this remains the wrong tool for
+    baseline comparison -- that is what the deep-linked `play_*` presets are
+    for. What it now does is exercise the real search path and actually
+    arrive at a video.
+    """
     return [
         *_launch_verified(start_at + 0.0),
         ScenarioStep(start_at + 3.0, "tap_element", {"target": selectors.SEARCH_ICON}),
         ScenarioStep(start_at + 4.5, "tap_element", {"target": selectors.SEARCH_BAR}),
-        ScenarioStep(start_at + 6.0, "tap_element", {"target": selectors.FIRST_SUGGESTION}),
-        ScenarioStep(start_at + 8.0, "tap_element", {"target": selectors.RESULT_THUMBNAIL}),
-        # Proves the flow actually reached playback. A foreground check
-        # would pass even if all four taps above hit empty space.
+        ScenarioStep(start_at + 5.5, "type_text", {"text": SEARCH_QUERY}),
+        ScenarioStep(start_at + 6.5, "key_event", {"keycode": ENTER}),
+        ScenarioStep(start_at + 9.0, "tap_element", {"target": selectors.RESULT_THUMBNAIL}),
+        # Proves the flow actually reached playback. A foreground check would
+        # pass even if every tap above had hit empty space -- which is
+        # precisely what was happening.
         ScenarioStep(start_at + 11.0, "verify_playing", {"package": PACKAGE}),
     ]
 

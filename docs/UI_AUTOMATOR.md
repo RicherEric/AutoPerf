@@ -153,6 +153,50 @@ It does not make the search-and-tap presets worthless — they exercise a real
 user path, and that is worth measuring. It makes them the wrong tool for
 baseline comparison, which is what the `play_*` presets are for.
 
+### The full preflight showed the flow was broken outright
+
+Running the whole covering set — 11 scenarios, 22 targets — produced a result
+that only looked like nine separate selector problems:
+
+```
+FELL BACK   first_suggestion  0/7   comments_row  fullscreen_enter/exit
+                              like_button  pip_caret  quality_row/option
+                              shorts_like_button
+FAILED      7 scenarios: expected active media playback, found none
+```
+
+One root cause. `first_suggestion` matched nothing on **7 of 7** attempts,
+because the flow tapped the search box and then tapped where a suggestion
+would be *without ever typing anything* — so the suggestion list was empty.
+The flow never reached a video, which is why every player control
+(quality, fullscreen, like, comments, PiP) was equally absent: there was no
+player. What the observed screens actually showed at those moments was a
+minimised player bar and a search-results page.
+
+Before verification existed, all seven of those scenarios passed.
+
+**The fix is to type.** `input text` is a keystroke injector — it depends on
+nothing being introspectable, so it works wherever a field has focus, exactly
+like a deep link works wherever the app is installed. The flow now types a
+fixed `SEARCH_QUERY` and presses Enter.
+
+Measured on the same phone, three runs each:
+
+| | Before | After |
+|---|---|---|
+| Search screen | never opened | opens and receives the query |
+| Distinct videos across 3 runs | **2** | **1** |
+| Step failures | `verify_playing` × 3 | **0** |
+
+`verify_playing` also had to stop sampling and start waiting. A run that had
+genuinely reached the right video still read as not-playing two seconds after
+the tap, because a livestream was still buffering — the same class of mistake
+as a fixed-time tap, one layer up.
+
+The presets remain unsuitable for baseline comparison: search results shift
+over time, which is what the `play_*` deep links are for. They now do what
+their names say.
+
 ## Preflight on real hardware found three different kinds of failure
 
 Running `autoperf preflight` against the Galaxy A55 over USB surfaced findings
