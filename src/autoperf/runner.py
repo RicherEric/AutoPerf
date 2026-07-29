@@ -91,6 +91,36 @@ class TestRunner:
                 ))
         writer.put(TestEvent(run_id, "adapter_action", f"{step.action} completed", details=details))
 
+    def _stop_driven_app(self, serial: str, writer, run_id: str) -> None:
+        """Leave the device quiet, whether the run ended or was cancelled.
+
+        A run leaves whatever app it was driving on screen -- typically a
+        video still playing. Force-stopping it, rather than pressing Home, is
+        what actually matters: YouTube and most media apps keep playing in the
+        background once merely backgrounded, so Home alone stops nothing.
+
+        The package comes from the scenario's own first step, which is always
+        a `launch_app` carrying a `package` kwarg; Home is the fallback if
+        that ever stops being true. Safe to call more than once -- force-stop
+        is idempotent, which is what lets the cancel path call it early
+        without complicating the normal end-of-run path.
+
+        Best-effort throughout: a failure here must not stop the run's own
+        status from being recorded.
+        """
+        if self.adapter is None:
+            return
+        package = self.scenario[0].kwargs.get("package") if self.scenario else None
+        try:
+            if package:
+                self.adapter.stop_app(self.adb, serial, package)
+            else:
+                self.adapter.key_event(self.adb, serial, HOME)
+        except Exception as exc:
+            action = ({"action": "stop_app", "package": package} if package
+                      else {"action": "key_event", "keycode": HOME})
+            writer.put(TestEvent(run_id, "adapter_error", str(exc), details=action))
+
     def _record_app_version(self, serial: str, run_id: str) -> None:
         """Store which build of the app under test this run measured.
 
@@ -234,6 +264,21 @@ class TestRunner:
             # heartbeat happened to record -- including for a run cut short
             # before its first heartbeat ever fired.
             final_elapsed = time.monotonic() - started
+            if stop:
+                # Quiet the device *before* waiting on in-flight work, not
+                # after. `cancel_futures` only drops futures that have not
+                # started; a running one cannot be interrupted, and an
+                # element-locating step can spend several seconds dumping the
+                # UI and retrying. Measured on a Galaxy A55: a cancel landing
+                # mid-`tap_element` left the video playing for 10.2 seconds
+                # while shutdown() waited, which is what a user cancelling a
+                # run actually complains about.
+                #
+                # When someone cancels, stopping the device outranks the
+                # outcome of whatever action is still in flight. The regular
+                # cleanup below still runs -- force-stop is idempotent, and
+                # the second call also covers the normal end-of-run path.
+                self._stop_driven_app(serial, writer, run_id)
             # Finish in-flight ADB calls before closing the writer so their final
             # samples cannot be lost at the duration boundary.
             executor.shutdown(wait=True, cancel_futures=True)
@@ -250,29 +295,18 @@ class TestRunner:
                     continue
                 self._record_step_outcome(writer, run_id, step, future)
             status = RunStatus.INTERRUPTED if stop else RunStatus.COMPLETED
-            if self.adapter is not None:
-                # Whether a scenario run ends normally or gets cancelled, it
-                # leaves whatever app was mid-action on screen (e.g. a video
-                # still playing) -- clean up so the device is in a clean
-                # state for whoever runs the next test. Force-stopping the
-                # app (rather than just pressing Home) is what actually
-                # matters here: many apps (YouTube included) keep playing in
-                # the background/as a notification once merely backgrounded,
-                # so Home alone doesn't stop playback. The package comes from
-                # the scenario's own first step, which is always a
-                # `launch_app` with a `package` kwarg (see the "requires a
-                # scenario" checks in run()); fall back to Home if that's
-                # ever not the case. Best-effort: a failure here shouldn't
-                # prevent the run's own status from being recorded.
-                package = self.scenario[0].kwargs.get("package") if self.scenario else None
+            self._stop_driven_app(serial, writer, run_id)
+            if stop and self.adapter is not None:
+                # A tap that was already in flight when the app was stopped
+                # lands afterwards, on whatever is now on screen. Observed on
+                # a Galaxy A55: a cancelled run finished with the Galaxy Store
+                # open, because the last queued tap hit the launcher. Harmless
+                # but untidy, and the next run should not start from another
+                # app's screen.
                 try:
-                    if package:
-                        self.adapter.stop_app(self.adb, serial, package)
-                    else:
-                        self.adapter.key_event(self.adb, serial, HOME)
-                except Exception as exc:
-                    action = {"action": "stop_app", "package": package} if package else {"action": "key_event", "keycode": HOME}
-                    writer.put(TestEvent(run_id, "adapter_error", str(exc), details=action))
+                    self.adapter.key_event(self.adb, serial, HOME)
+                except Exception:
+                    pass
             writer.put(TestEvent(run_id, "lifecycle", f"run {status}"))
             writer.close()
             self.storage.update_run(run_id, status, checkpoint=str(final_elapsed))
