@@ -4,7 +4,7 @@ from autoperf.scenarios import youtube
 
 SCREEN = (1080, 2340)
 KNOWN_ACTIONS = {
-    "launch_app", "stop_app", "tap", "swipe", "key_event",
+    "launch_app", "stop_app", "tap", "swipe", "key_event", "type_text",
     "tap_element", "verify_foreground", "verify_playing",
 }
 VERIFY_ACTIONS = {"verify_foreground", "verify_playing"}
@@ -79,6 +79,29 @@ class YoutubeScenarioRegistryTests(unittest.TestCase):
                         self.assertTrue(target.selectors, "target has no selectors at all")
                         self.assertIsNotNone(target.fallback)
                         self.assertTrue(all(0.0 <= f <= 1.0 for f in target.fallback))
+
+    def test_the_search_flow_actually_types_something(self):
+        """The failure preflight exposed on real hardware.
+
+        The flow used to tap the search box and then tap where a suggestion
+        would be, without ever typing -- so the suggestion list was empty, the
+        target matched nothing on 7 of 7 attempts, and every scenario built on
+        it failed to reach a video while still reporting success.
+        """
+        steps = youtube.build("search_and_play", SCREEN)
+        typed = [s for s in steps if s.action == "type_text"]
+        self.assertEqual(len(typed), 1, "search flow types nothing")
+        self.assertEqual(typed[0].kwargs["text"], youtube.SEARCH_QUERY)
+
+        # Typing is worthless without submitting it.
+        order = [s.action for s in sorted(steps, key=lambda x: x.at)]
+        self.assertLess(order.index("type_text"), order.index("key_event"))
+        self.assertLess(order.index("key_event"), order.index("verify_playing"))
+
+    def test_the_search_query_is_ascii(self):
+        # `input text` is an ASCII keystroke injector; a non-ASCII query would
+        # silently type nothing.
+        self.assertTrue(youtube.SEARCH_QUERY.isascii())
 
     def test_scenarios_that_claim_playback_assert_it(self):
         """Anything whose description promises a playing video must check.
