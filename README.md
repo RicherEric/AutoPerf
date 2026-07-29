@@ -327,6 +327,60 @@ launching.
   ten different phones needs one table. Tablets and foldables ship a different
   layout, and Android TV is a different package entirely.
 
+## Cancelling a run, and leaving the device quiet
+
+A run leaves whatever app it was driving on screen — normally a video still
+playing. `TestRunner._stop_driven_app()` cleans that up on **every** exit path,
+normal or cancelled, and it **force-stops** rather than pressing Home: YouTube
+and most media apps keep playing once merely backgrounded, so Home alone stops
+nothing. The package comes from the scenario's own first step, which is always
+a `launch_app`.
+
+### Cancellation is a two-stage stop, and the order matters
+
+Cancelling used to leave the video playing for several seconds. Measured on a
+Galaxy A55: **10.2 seconds** of continued playback after the cancel was
+requested.
+
+The cancel itself was never at fault — it is picked up within
+`cancel_check_interval` (1s) and the run does force-stop the app. The delay sat
+in between:
+
+```python
+executor.shutdown(wait=True, cancel_futures=True)
+```
+
+`cancel_futures` only drops futures that **have not started**. A running one
+cannot be interrupted — Python cannot kill a thread — so the shutdown blocks
+until whatever adapter action is mid-flight returns. An element-locating step
+dumps the UI and retries, which on a real device is several seconds, and only
+then did the cleanup reach `stop_app`.
+
+When someone cancels, quieting the device outranks the outcome of the action
+still in flight. The cleanup therefore runs **before** the shutdown as well as
+after it. Force-stop is idempotent, so the normal end-of-run path is unchanged;
+it is simply no longer queued behind work nobody is waiting for. Measured again
+on the same phone: **1.0 second**.
+
+The stray action still lands once the app is gone, on whatever is now on
+screen — the first attempt at this left a cancelled run sitting on the Galaxy
+Store, because the last queued tap hit the launcher. A cancelled run now presses
+Home at the very end, so the next run does not start from another app's screen.
+
+### Where cancellation comes from
+
+| Trigger | Mechanism |
+|---|---|
+| `Ctrl+C` (CLI) | SIGINT handler sets the loop's stop flag |
+| Dashboard "cancel" | `Storage.request_cancel()` sets `cancel_requested`; the loop polls it every second |
+| Campaign cancel | one `UPDATE` flags every unfinished child run, which each `TestRunner` then honours |
+| Cancel before the run starts | `TestRunner.run()` checks `cancel_requested` before doing any work and never touches the device |
+
+`cancel_requested` in the database — not Celery's `revoke()` — is what
+correctness relies on in every case. A queued task may already have been
+dequeued and started by the time any revoke reaches a `--pool=solo` worker, so
+the flag is what actually stops a run.
+
 ## App version: what a comparison actually compared
 
 Every run records the `versionName`/`versionCode` of the app it drove, in
