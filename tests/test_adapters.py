@@ -100,7 +100,11 @@ class AndroidAdapterTests(unittest.TestCase):
     def test_screen_size_parses_physical_size(self):
         adb = RecordingAdb(response="Physical size: 1080x2340\nOverride size: 1080x2340\n")
         self.assertEqual(AndroidAdapter().screen_size(adb, "device"), (1080, 2340))
-        self.assertEqual(adb.calls, [("device", "wm size", 10)])
+        # Two reads now, not one: the size lines never change with rotation,
+        # so the current rotation has to be asked for separately. See
+        # ScreenSizeTests for what that is guarding against.
+        self.assertEqual(adb.calls, [("device", "wm size", 10),
+                                     ("device", "dumpsys window displays", 10)])
 
     def test_screen_size_raises_on_unparsable_output(self):
         adb = RecordingAdb(response="no size info here")
@@ -132,6 +136,75 @@ class AndroidAdapterTests(unittest.TestCase):
             ("tv", "input keyevent KEYCODE_DPAD_CENTER", 10),
             ("tv", "input keyevent KEYCODE_DPAD_DOWN", 10),
         ])
+
+
+class ScreenSizeTests(unittest.TestCase):
+    """`wm size` alone does not describe where a tap lands."""
+
+    class Stub:
+        def __init__(self, size, rotation="mCurrentRotation=0", fail_rotation=False):
+            self.size, self.rotation, self.fail_rotation = size, rotation, fail_rotation
+
+        def shell(self, serial, command, timeout=10):
+            if command == "wm size":
+                return self.size
+            if "displays" in command:
+                if self.fail_rotation:
+                    raise RuntimeError("device offline")
+                return self.rotation
+            return ""
+
+    def _size(self, **kwargs):
+        return AndroidAdapter().screen_size(self.Stub(**kwargs), "S1")
+
+    def test_portrait_is_reported_as_measured(self):
+        self.assertEqual(self._size(size="Physical size: 1080x2340\n"), (1080, 2340))
+
+    def test_landscape_swaps_the_dimensions(self):
+        """Neither `wm size` line changes with rotation.
+
+        A landscape tablet would otherwise have every fractional coordinate
+        computed against portrait dimensions -- a tap meant for the top-right
+        corner lands mid-left instead.
+        """
+        for rotation in ("mCurrentRotation=1", "mCurrentRotation=3"):
+            with self.subTest(rotation=rotation):
+                self.assertEqual(
+                    self._size(size="Physical size: 1600x2560\n", rotation=rotation),
+                    (2560, 1600),
+                )
+
+    def test_upside_down_is_still_portrait(self):
+        self.assertEqual(
+            self._size(size="Physical size: 1080x2340\n", rotation="mCurrentRotation=2"),
+            (1080, 2340),
+        )
+
+    def test_a_display_size_override_supersedes_the_panel(self):
+        # Input lands in the override, not in the physical panel size.
+        self.assertEqual(
+            self._size(size="Physical size: 1440x3200\nOverride size: 1080x2400\n"),
+            (1080, 2400),
+        )
+
+    def test_an_override_is_rotated_too(self):
+        self.assertEqual(
+            self._size(size="Physical size: 1440x3200\nOverride size: 1080x2400\n",
+                       rotation="mCurrentRotation=1"),
+            (2400, 1080),
+        )
+
+    def test_an_unreadable_rotation_assumes_portrait(self):
+        # Matches how every device behaved before rotation was considered at
+        # all, so a failure here cannot make things worse than they were.
+        self.assertEqual(self._size(size="Physical size: 1080x2340\n", rotation="nothing"),
+                         (1080, 2340))
+        self.assertEqual(self._size(size="Physical size: 1080x2340\n", fail_rotation=True),
+                         (1080, 2340))
+
+    def test_unparseable_size_still_raises(self):
+        with self.assertRaises(ValueError):
+            self._size(size="no size here")
 
 
 class SelectAdapterTests(unittest.TestCase):
