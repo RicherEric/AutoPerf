@@ -158,6 +158,41 @@ def _parse_hours(timestamp: str) -> float:
     return datetime.fromisoformat(timestamp).timestamp() / 3600.0
 
 
+def app_version_delta(baseline_run: dict | None, candidate_run: dict | None) -> dict:
+    """Whether two runs measured the same build of the app under test.
+
+    Stated explicitly, as its own field, because it changes what a comparison
+    *means* rather than merely annotating it. If the app updated between a
+    baseline and its candidate, the delta describes the app's change, not the
+    device's -- and a background app update is the more likely explanation of
+    a sudden shift, not the less likely one. Reporting a 30% regression
+    without saying the app version moved underneath it is reporting the wrong
+    cause.
+
+    `changed` is None when either side has no recorded version -- runs
+    predating version capture, or a package whose version could not be read.
+    Unknown is not the same as unchanged, and must not be shown as such.
+    """
+    def describe(run: dict | None) -> dict | None:
+        if not run or not (run.get("app_version_name") or run.get("app_version_code")):
+            return None
+        return {
+            "package": run.get("app_package"),
+            "version_name": run.get("app_version_name"),
+            "version_code": run.get("app_version_code"),
+        }
+
+    baseline_version, candidate_version = describe(baseline_run), describe(candidate_run)
+    if baseline_version is None or candidate_version is None:
+        changed = None
+    else:
+        changed = (
+            baseline_version["version_code"] != candidate_version["version_code"]
+            or baseline_version["version_name"] != candidate_version["version_name"]
+        )
+    return {"changed": changed, "baseline": baseline_version, "candidate": candidate_version}
+
+
 def compare(
     baseline: dict[str, MetricStats],
     candidate: dict[str, MetricStats],

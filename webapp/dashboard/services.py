@@ -402,7 +402,17 @@ def get_dashboard_stats(
         baseline_stats = baseline_cache[cache_key]
 
         regressed_metrics = []
-        if baseline_stats is None:
+        quality = storage.run_quality(run["id"])
+        if not quality["verified"]:
+            # Checked before the baseline comparison, and given its own
+            # bucket rather than being called a fail: the scenario never
+            # reached the screen it was supposed to measure, so these numbers
+            # do not describe the thing being judged at all. Calling it a
+            # pass would hide a broken test; calling it a fail would report a
+            # performance problem that was never observed. Same reasoning as
+            # the existing no_baseline bucket.
+            verdict = "unverified"
+        elif baseline_stats is None:
             verdict = "no_baseline"
         else:
             results = compare(baseline_stats, run_stats, threshold_pct=threshold_pct)
@@ -419,17 +429,29 @@ def get_dashboard_stats(
             "started_at": run["started_at"],
             "baseline_run_id": baseline_run_id_cache.get(cache_key),
             "regressed_metrics": regressed_metrics,
+            "quality": quality,
+            "app_version": {
+                "package": run.get("app_package"),
+                "version_name": run.get("app_version_name"),
+                "version_code": run.get("app_version_code"),
+            },
         })
 
     passed = sum(1 for v in verdicts if v["verdict"] == "pass")
     failed = sum(1 for v in verdicts if v["verdict"] == "fail")
     no_baseline = sum(1 for v in verdicts if v["verdict"] == "no_baseline")
+    unverified = sum(1 for v in verdicts if v["verdict"] == "unverified")
+    # Deliberately excluded from the denominator, like no_baseline: a pass
+    # rate computed over runs that never reached their target screen would
+    # be a confident number about nothing.
     evaluated = passed + failed
 
     by_scenario: dict[str, dict] = {}
     for v in verdicts:
         key = v["scenario"] or "(no scenario)"
-        bucket = by_scenario.setdefault(key, {"pass": 0, "fail": 0, "no_baseline": 0})
+        bucket = by_scenario.setdefault(
+            key, {"pass": 0, "fail": 0, "no_baseline": 0, "unverified": 0}
+        )
         bucket[v["verdict"]] += 1
     scenario_stats = [
         {
@@ -449,6 +471,7 @@ def get_dashboard_stats(
         "passed": passed,
         "failed": failed,
         "no_baseline": no_baseline,
+        "unverified": unverified,
         "pass_rate": (passed / evaluated) if evaluated else None,
         "threshold_pct": threshold_pct,
         "by_scenario": scenario_stats,

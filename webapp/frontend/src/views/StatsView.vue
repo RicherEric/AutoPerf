@@ -8,7 +8,9 @@ import MetricChart from '../components/MetricChart.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 
 const { t } = useI18n()
-const VERDICT_TONE = { pass: 'success', fail: 'danger', no_baseline: 'neutral' }
+// "unverified" is warning-toned rather than danger: the run did not fail,
+// it failed to *measure* -- a broken test, not an observed regression.
+const VERDICT_TONE = { pass: 'success', fail: 'danger', no_baseline: 'neutral', unverified: 'warning' }
 
 const stats = ref(null)
 const error = ref('')
@@ -110,6 +112,10 @@ onUnmounted(() => {
         <span class="value">{{ stats.no_baseline }}</span>
         <span class="label">{{ t('stats.noBaseline') }}</span>
       </div>
+      <div class="stat-tile" :class="{ 'stat-warn': stats.unverified > 0 }">
+        <span class="value">{{ stats.unverified }}</span>
+        <span class="label">{{ t('stats.unverified') }}</span>
+      </div>
     </div>
   </Card>
 
@@ -128,6 +134,7 @@ onUnmounted(() => {
 
   <Card :title="t('stats.recentVerdictsTitle')">
     <p v-if="stats && !recentRuns.length" class="hint">{{ t('stats.noCompletedRuns') }}</p>
+    <p v-if="stats && stats.unverified > 0" class="hint">{{ t('stats.unverifiedHint') }}</p>
     <table v-else>
       <thead>
         <tr>
@@ -144,6 +151,9 @@ onUnmounted(() => {
           <td><StatusBadge :label="t(`stats.verdict.${run.verdict}`)" :tone="VERDICT_TONE[run.verdict]" /></td>
           <td>
             <span v-if="run.verdict === 'fail'">{{ formatRegressedMetrics(run.regressed_metrics) }}</span>
+            <span v-else-if="run.verdict === 'unverified'" class="warn">
+              {{ t('stats.unverifiedReason', { count: run.quality?.verification_failures ?? 0 }) }}
+            </span>
             <span v-else-if="run.verdict === 'no_baseline'" class="hint">{{ t('stats.noBaselineForDevice') }}</span>
             <span v-else class="hint">{{ t('stats.withinThreshold') }}</span>
           </td>
@@ -187,5 +197,12 @@ onUnmounted(() => {
 .hint {
   color: var(--color-text-muted);
   font-size: 0.85em;
+}
+.warn {
+  color: var(--color-warning-text, var(--color-text));
+  font-size: 0.85em;
+}
+.stat-warn .value {
+  color: var(--color-warning-text, var(--color-text));
 }
 </style>

@@ -9,7 +9,7 @@ from dataclasses import asdict
 from . import campaigns as campaign_core
 from .adapters import AndroidAdapter, ScenarioStep
 from .adb import AdbClient
-from .analyzer import compare, stats_from_aggregates
+from .analyzer import app_version_delta, compare, stats_from_aggregates
 from .collectors import default_collectors
 from .runner import TestRunner
 from .scenarios import youtube as youtube_scenarios
@@ -75,6 +75,8 @@ def parser() -> argparse.ArgumentParser:
                                 help="repeat campaigns only; a soak is always one run")
     campaign_start.add_argument("--create-only", action="store_true",
                                 help="persist the campaign and its runs without executing them")
+    campaign_start.add_argument("--preflight", action="store_true",
+                                help="verify the UI selectors on this device first, and abort if any need updating")
 
     campaign_resume = campaign_commands.add_parser(
         "resume", help="execute a campaign's remaining runs, skipping finished ones"
@@ -94,6 +96,28 @@ def parser() -> argparse.ArgumentParser:
 
     campaign_cancel = campaign_commands.add_parser("cancel")
     campaign_cancel.add_argument("campaign_id")
+
+    pre = commands.add_parser(
+        "preflight",
+        help="check every UI selector against one device before running a real test",
+    )
+    pre.add_argument("--serial", required=True)
+    scope = pre.add_mutually_exclusive_group()
+    scope.add_argument("--scenario", action="append", dest="scenarios",
+                       help="check only this scenario (repeatable)")
+    scope.add_argument("--tier", choices=youtube_scenarios.TIERS)
+    scope.add_argument("--all", action="store_true",
+                       help="check every scenario instead of a minimal covering set")
+    pre.add_argument("--allow-fallback", action="store_true",
+                     help="treat a coordinate fallback as acceptable rather than as a finding")
+
+    ui_dump = commands.add_parser(
+        "ui-dump",
+        help="print the device's on-screen elements, for capturing real selectors",
+    )
+    ui_dump.add_argument("--serial", required=True)
+    ui_dump.add_argument("--limit", type=int, default=60)
+    ui_dump.add_argument("--raw", action="store_true", help="print the raw hierarchy XML instead")
     return root
 
 
@@ -116,12 +140,72 @@ def _progress_reporter(total: int):
     return report
 
 
+def _run_preflight(adb: AdbClient, serial: str, *, scenarios=None, allow_fallback=False) -> tuple[int, dict]:
+    """Check the selectors on one device and print a work list.
+
+    Returns (exit_code, summary). A coordinate fallback counts as a finding by
+    default: the target still got tapped, but it was located the fragile way,
+    which is precisely what this command exists to detect before an hour of
+    measurement is spent on top of it.
+    """
+    from . import preflight as preflight_core
+    from .adapters import select_adapter
+
+    adapter = select_adapter(adb, serial)
+    names = scenarios or preflight_core.covering_scenarios()
+    print(f"preflight: {len(names)} scenario(s) covering every selector target", file=sys.stderr)
+
+    def announce(name):
+        print(f"  -> {name}", file=sys.stderr)
+
+    def report(check):
+        if check.status != preflight_core.MATCHED:
+            print(f"     [{check.status}] {check.target}", file=sys.stderr)
+
+    summary = preflight_core.run_preflight(
+        adb, adapter, serial, scenarios=names, on_scenario=announce, on_check=report
+    )
+    if allow_fallback:
+        # Fallbacks stay in the report either way -- this only stops them
+        # from failing the command.
+        blocking = [entry for entry in summary["needs_attention"]
+                    if entry["status"] != [preflight_core.FALLBACK]]
+        summary["ok"] = not blocking and not summary["failed_verifications"]
+    return (0 if summary["ok"] else 1), summary
+
+
 def _campaign_command(args, storage: Storage, adb: AdbClient) -> int:
     if args.campaign_command == "start":
         spec = campaign_core.CampaignSpec(
             kind=args.kind, serial=args.serial, duration=args.duration,
             scenario=args.scenario, tier=args.tier, iterations=args.iterations,
         )
+        if getattr(args, "preflight", False):
+            try:
+                validated = spec.validated()
+            except ValueError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 1
+            # Scoped to the scenarios this campaign will actually run, not to
+            # every scenario that exists: blocking a campaign over a selector
+            # it is never going to touch would make the gate an obstacle
+            # rather than a safeguard. Deduplicated, and `None` entries
+            # (plain sampling runs) dropped since they drive no UI at all.
+            planned = sorted({name for name in validated.planned_scenarios() if name})
+            if not planned:
+                print("preflight: campaign drives no UI, nothing to check", file=sys.stderr)
+            else:
+                # Runs before the campaign row exists: a campaign that aborts
+                # partway leaves a half-finished record to clean up, and the
+                # point of a preflight is to stop before any of it is created.
+                code, summary = _run_preflight(adb, args.serial, scenarios=planned)
+                if code:
+                    print(json.dumps(summary, indent=2))
+                    print("preflight failed -- campaign not started. Fix the selectors listed "
+                          "above in scenarios/selectors.py, or re-run with --allow-fallback.",
+                          file=sys.stderr)
+                    return code
+                print("preflight passed", file=sys.stderr)
         try:
             created = campaign_core.create_campaign(storage, spec)
         except ValueError as exc:
@@ -256,16 +340,68 @@ def main(argv: list[str] | None = None) -> int:
         baseline_stats = stats_from_aggregates(storage.aggregate_samples(baseline["run_id"]))
         candidate_stats = stats_from_aggregates(storage.aggregate_samples(args.run_id))
         results = compare(baseline_stats, candidate_stats, threshold_pct=args.threshold)
+        versions = app_version_delta(storage.get_run(baseline["run_id"]), run)
+        quality = storage.run_quality(args.run_id)
+        if versions["changed"]:
+            print("WARNING: the app under test changed between these two runs; "
+                  "the delta below describes the app's change, not the device's.",
+                  file=sys.stderr)
+        if not quality["verified"]:
+            print(f"WARNING: candidate run recorded {quality['verification_failures']} verification "
+                  "failure(s) -- its metrics measure a screen the scenario never reached.",
+                  file=sys.stderr)
         print(json.dumps({
             "baseline_run_id": baseline["run_id"],
             "candidate_run_id": args.run_id,
             "regressed": any(r.regressed for r in results),
+            "app_version": versions,
+            "candidate_quality": quality,
             "metrics": [asdict(r) for r in results],
         }, indent=2))
     elif args.command == "youtube-scenarios":
         print(json.dumps(youtube_scenarios.describe_scenarios(tier=args.tier), indent=2))
     elif args.command == "campaign":
         return _campaign_command(args, storage, adb)
+    elif args.command == "preflight":
+        if args.all:
+            scenarios = youtube_scenarios.list_scenarios()
+        elif args.tier:
+            scenarios = youtube_scenarios.list_scenarios(tier=args.tier)
+        else:
+            scenarios = args.scenarios  # None -> minimal covering set
+        code, summary = _run_preflight(
+            adb, args.serial, scenarios=scenarios, allow_fallback=args.allow_fallback
+        )
+        print(json.dumps(summary, indent=2))
+        if summary["needs_attention"]:
+            print(f"\n{len(summary['needs_attention'])} target(s) need their selectors updated "
+                  "in src/autoperf/scenarios/selectors.py:", file=sys.stderr)
+            for entry in summary["needs_attention"]:
+                print(f"  {entry['target']}: {entry['detail']}", file=sys.stderr)
+        return code
+    elif args.command == "ui-dump":
+        # The resource-ids and labels in scenarios/selectors.py cannot be
+        # verified without the app in front of you -- they are internal to
+        # each app build and published nowhere. This is how the real ones get
+        # captured: open the screen in question on the device, run this, and
+        # paste what it prints into that table.
+        from . import uiauto
+
+        try:
+            xml = uiauto.dump_hierarchy(adb, args.serial)
+        except Exception as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        if args.raw:
+            print(xml)
+            return 0
+        nodes = uiauto.parse_hierarchy(xml)
+        print(json.dumps({
+            "serial": args.serial,
+            "focus": uiauto.current_focus(adb, args.serial),
+            "node_count": len(nodes),
+            "elements": uiauto.describe_clickables(nodes, limit=args.limit),
+        }, indent=2))
     else:
         adapter = AndroidAdapter()
         screen = adapter.screen_size(adb, args.serial)
