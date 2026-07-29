@@ -3,30 +3,16 @@ import unittest
 from autoperf import uiauto
 from autoperf.uiauto import Node, Selector, Target
 
-SCREEN = (1080, 2340)
-
-HIERARCHY = """<?xml version="1.0" encoding="UTF-8"?>
-<hierarchy rotation="0">
- <node class="android.widget.FrameLayout" bounds="[0,0][1080,2340]" package="com.google.android.youtube">
-  <node class="android.widget.ImageView" resource-id="com.google.android.youtube:id/search_button"
-        content-desc="Search" clickable="true" bounds="[940,80][1040,180]"/>
-  <node class="androidx.recyclerview.widget.RecyclerView"
-        resource-id="com.google.android.youtube:id/results" bounds="[0,200][1080,2200]">
-   <node class="android.view.ViewGroup" clickable="true" bounds="[0,200][1080,800]" content-desc="Video A"/>
-   <node class="android.view.ViewGroup" clickable="true" bounds="[0,800][1080,1400]" content-desc="Video B"/>
-   <node class="android.view.ViewGroup" clickable="true" bounds="[0,1400][1080,2000]" content-desc="Video C"/>
-  </node>
-  <node class="android.widget.Button" text="Like" clickable="true" bounds="[100,2250][200,2320]" enabled="false"/>
-  <node class="android.widget.Button" content-desc="Shorts" clickable="true" focused="true"
-        bounds="[600,2250][700,2320]"/>
- </node>
-</hierarchy>"""
+from tests.support import HOME_FEED as HIERARCHY, SCREEN, TOGGLES
 
 
 class ParseHierarchyTests(unittest.TestCase):
     def test_flattens_nested_nodes_with_their_attributes(self):
         nodes = uiauto.parse_hierarchy(HIERARCHY)
-        self.assertEqual(len(nodes), 8)
+        # Asserted structurally rather than by count: a node count couples
+        # every test in this class to the shared fixture, so adding a node for
+        # one test breaks the others for no reason.
+        self.assertIn("Video C", [n.content_desc for n in nodes])   # nested three deep
         search = next(n for n in nodes if n.content_desc == "Search")
         self.assertEqual(search.resource_id, "com.google.android.youtube:id/search_button")
         self.assertEqual(search.bounds, (940, 80, 1040, 180))
@@ -44,6 +30,41 @@ class ParseHierarchyTests(unittest.TestCase):
         nodes = uiauto.parse_hierarchy('<hierarchy><node class="X"/></hierarchy>')
         self.assertEqual(nodes[0].bounds, (0, 0, 0, 0))
         self.assertEqual(nodes[0].center, (0, 0))
+
+
+class ToggleStateTests(unittest.TestCase):
+    """What backs `verify_element_state`: the node's own reported state."""
+
+    def setUp(self):
+        self.nodes = uiauto.parse_hierarchy(TOGGLES)
+
+    def test_parses_selected_and_checked(self):
+        by_desc = {n.content_desc: n for n in self.nodes}
+        self.assertTrue(by_desc["喜歡這部影片"].selected)
+        self.assertTrue(by_desc["Autoplay"].checked)
+
+    def test_an_absent_attribute_reads_as_false_not_as_unknown(self):
+        # A node that never mentions the attribute is the common case; the
+        # "couldn't tell" distinction lives in the adapter, which knows
+        # whether the node was found at all.
+        by_desc = {n.content_desc: n for n in self.nodes}
+        self.assertFalse(by_desc["訂閱"].selected)
+        self.assertFalse(by_desc["喜歡這部影片"].checked)
+
+    def test_describe_clickables_reports_toggle_state(self):
+        # Whether a build exposes its toggle state at all can only be learned
+        # from the device, and this is the report that answers it.
+        described = uiauto.describe_clickables(self.nodes)
+        by_desc = {d["content_desc"]: d for d in described}
+        self.assertTrue(by_desc["喜歡這部影片"]["selected"])
+        self.assertTrue(by_desc["Autoplay"]["checked"])
+        self.assertFalse(by_desc["訂閱"]["selected"])
+
+    def test_verifiable_states_excludes_states_that_cannot_be_asserted(self):
+        # `enabled` is filtered out by `find` before an assertion could ever
+        # see it, so offering it would be offering something unwritable.
+        self.assertEqual(uiauto.VERIFIABLE_STATES, ("selected", "checked"))
+        self.assertTrue(all(hasattr(Node(), state) for state in uiauto.VERIFIABLE_STATES))
 
 
 class SelectorTests(unittest.TestCase):

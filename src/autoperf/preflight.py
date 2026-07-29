@@ -40,6 +40,12 @@ ERROR = "error"             # the check itself could not be performed
 
 DEGRADED = (FALLBACK, MISSING, ERROR)
 
+# Steps that assert rather than navigate: graded by their own outcome instead
+# of by how a target resolved. Listed here rather than inline so adding an
+# assertion to the adapter does not silently leave preflight ungraded -- the
+# test below pins this list against the actions the scenarios actually use.
+VERIFICATION_ACTIONS = ("verify_foreground", "verify_playing", "verify_element_state")
+
 # How many on-screen elements to capture when a target degrades. Enough to
 # find the intended control in, small enough to read.
 OBSERVED_LIMIT = 25
@@ -120,7 +126,7 @@ def _observe(adb: AdbClientProtocol, serial: str) -> list[dict]:
 
 
 def check_scenario(adb: AdbClientProtocol, adapter: Adapter, serial: str, scenario: str, *,
-                   screen: tuple[int, int] | None = None, sleep=time.sleep,
+                   screen: tuple[int, int] | None = None, sleep=None,
                    on_check=None) -> ScenarioReport:
     """Walk one scenario on the device, recording how each target resolved.
 
@@ -128,7 +134,15 @@ def check_scenario(adb: AdbClientProtocol, adapter: Adapter, serial: str, scenar
     scripted times: skipping the taps would leave every later screen
     unreached, and every target on it would be reported missing for a reason
     that has nothing to do with its selector.
+
+    `sleep` defaults to None rather than to `time.sleep` itself, so the lookup
+    happens per call. A default of `sleep=time.sleep` binds the function
+    object at import, which quietly makes the seam unpatchable: a caller that
+    patches `time.sleep` still gets the original, and the paced timeline runs
+    at wall-clock speed. That is what made the preflight CLI tests take six
+    seconds each while appearing to have stubbed the wait out.
     """
+    sleep = time.sleep if sleep is None else sleep
     screen = screen or adapter.screen_size(adb, serial)
     steps = sorted(youtube_scenarios.build(scenario, screen), key=lambda s: s.at)
     targets: list[TargetCheck] = []
@@ -147,7 +161,7 @@ def check_scenario(adb: AdbClientProtocol, adapter: Adapter, serial: str, scenar
                 on_check(check)
             continue
 
-        if step.action in ("verify_foreground", "verify_playing"):
+        if step.action in VERIFICATION_ACTIONS:
             verifications.append(_check_verification(adapter, adb, serial, scenario, step))
             continue
 
@@ -325,9 +339,13 @@ def _reset(adb: AdbClientProtocol, adapter: Adapter, serial: str, scenario: str,
 
 
 def run_preflight(adb: AdbClientProtocol, adapter: Adapter, serial: str, *,
-                  scenarios: list[str] | None = None, sleep=time.sleep,
+                  scenarios: list[str] | None = None, sleep=None,
                   on_scenario=None, on_check=None) -> dict:
-    """Check one device, then stop. Returns the summary; writes nothing."""
+    """Check one device, then stop. Returns the summary; writes nothing.
+
+    See `check_scenario` for why `sleep` defaults to None.
+    """
+    sleep = time.sleep if sleep is None else sleep
     names = scenarios or covering_scenarios()
     screen = adapter.screen_size(adb, serial)
     reports = []

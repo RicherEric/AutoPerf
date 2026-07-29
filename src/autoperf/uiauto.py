@@ -47,6 +47,13 @@ class Node:
     clickable: bool = False
     focused: bool = False
     enabled: bool = True
+    # Toggle state, for asserting that an action landed rather than merely
+    # that its control was tapped. Android exposes two flavours and apps pick
+    # between them freely -- `selected` for highlight-style toggles, `checked`
+    # for checkbox-style ones -- so both are read and the caller says which
+    # one it means.
+    selected: bool = False
+    checked: bool = False
 
     @property
     def center(self) -> tuple[int, int]:
@@ -138,6 +145,13 @@ class Resolution:
     node: Node | None = field(default=None, compare=False)
 
 
+# Node attributes an assertion may be written against. Deliberately just the
+# two toggles: `enabled` is *not* here because `find` already skips disabled
+# nodes, so `expected=False` could never match and the assertion would look
+# supported while being unwritable.
+VERIFIABLE_STATES = ("selected", "checked")
+
+
 # Labels at or below this length must match a node's whole label rather than
 # appearing anywhere inside it. Substring matching is the right default --
 # YouTube appends state and counts to its labels, so "喜歡這部影片" has to match
@@ -202,6 +216,8 @@ def parse_hierarchy(xml: str) -> list[Node]:
             clickable=attrib.get("clickable") == "true",
             focused=attrib.get("focused") == "true",
             enabled=attrib.get("enabled", "true") == "true",
+            selected=attrib.get("selected") == "true",
+            checked=attrib.get("checked") == "true",
         ))
     return nodes
 
@@ -386,6 +402,11 @@ def describe_clickables(nodes: list[Node], limit: int = 60) -> list[dict]:
     The resource-ids a scenario should use can only be learned by looking at
     the app itself -- they differ per app version and are not published --
     so this backs the `autoperf ui-dump` command.
+
+    `selected` and `checked` are included for the same reason: whether a build
+    reports its toggle state at all is a property of that build, and
+    `verify_element_state` is only worth writing against a control that does.
+    Dumping the screen with the toggle pressed answers that.
     """
     seen: set[tuple[str, str, str]] = set()
     described = []
@@ -402,6 +423,8 @@ def describe_clickables(nodes: list[Node], limit: int = 60) -> list[dict]:
             "content_desc": node.content_desc,
             "class": node.class_name,
             "clickable": node.clickable,
+            "selected": node.selected,
+            "checked": node.checked,
             "center": list(node.center),
             "bounds": list(node.bounds),
         })

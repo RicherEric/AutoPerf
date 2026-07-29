@@ -179,6 +179,64 @@ class ElementActionsMixin:
             raise VerificationError(f"expected {package} in foreground, found {focus[0]}")
         return {"package": package, "verified": True, "activity": focus[1]}
 
+    # A state check fired immediately after a tap is the same mistake as a
+    # fixed-time tap, one layer up: the app needs a moment to re-render the
+    # control, and how long depends on the device. So it waits for the
+    # expected state rather than sampling once, the same correction
+    # verify_playing needed. Kept well inside TestRunner.adapter_action_timeout,
+    # since each pass costs a UI dump.
+    STATE_TIMEOUT = 4.0
+    STATE_POLL_DELAY = 0.5
+
+    def verify_element_state(self, adb: AdbClientProtocol, serial: str, target,
+                             state: str = "selected", expected: bool = True,
+                             timeout: float | None = None, screen=None) -> dict:
+        """Assert an element's toggle state, not just that it was tapped.
+
+        The gap this closes: `tap_element` proves a control was *found* and
+        tapped, which is all a like or a subscribe currently gets. Whether the
+        like registered is a different question, and the only evidence for it
+        on the device is the node's own state -- so the check has to re-read
+        the hierarchy and look.
+
+        Deliberately refuses the coordinate fallback. Every other action here
+        treats a pixel as an acceptable last resort, because tapping a
+        remembered coordinate is still a tap. There is no equivalent for
+        reading state: a coordinate carries no `selected` attribute, so an
+        unmatched selector means "could not tell", never "not selected".
+
+        Unreadable is reported as `verified: None`, in line with the other two
+        checks -- a build that does not expose the attribute at all, or a
+        signed-out account whose like button never changes, must not fail runs
+        for a reason that has nothing to do with performance.
+        """
+        from . import uiauto
+
+        if state not in uiauto.VERIFIABLE_STATES:
+            raise ValueError(
+                f"Unsupported element state {state!r}; expected one of {uiauto.VERIFIABLE_STATES}"
+            )
+        name = target.name or "target"
+        deadline = time.monotonic() + (self.STATE_TIMEOUT if timeout is None else timeout)
+        node = None
+        while True:
+            resolution, screen = self._resolve(adb, serial, target, screen)
+            node = resolution.node if resolution is not None else None
+            if node is not None and getattr(node, state) is expected:
+                return {"target": target.name, "state": state, "expected": expected,
+                        "verified": True, "strategy": resolution.strategy}
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(self.STATE_POLL_DELAY)
+
+        if node is None:
+            return {"target": target.name, "state": state, "expected": expected,
+                    "verified": None,
+                    "detail": f"{name} was not located by any selector; state is unreadable"}
+        raise VerificationError(
+            f"expected {name}.{state} to be {expected}, found {getattr(node, state)}"
+        )
+
     # How long to wait for playback to actually start. Opening a video is
     # asynchronous -- the app has to resolve, buffer and begin rendering --
     # so sampling the state once at an arbitrary instant is inherently
