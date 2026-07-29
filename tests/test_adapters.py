@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 from autoperf.adapters import HOME, AndroidAdapter, AndroidTvAdapter
 
@@ -220,6 +221,15 @@ class ElementAdbStub:
 
 
 class TapElementTests(unittest.TestCase):
+    def setUp(self):
+        # A stub device never changes between attempts, so the retry delay
+        # only buys wall-clock. The production default is exercised on
+        # hardware, not here.
+        from autoperf.adapters import ElementActionsMixin
+        patcher = patch.object(ElementActionsMixin, "RESOLVE_RETRY_DELAY", 0)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def _target(self, **kwargs):
         from autoperf.uiauto import Selector, Target
 

@@ -294,6 +294,36 @@ def _describe_selectors(target_name: str) -> list[dict]:
     return described
 
 
+def _packages_of(scenario: str) -> set[str]:
+    return {
+        step.kwargs["package"]
+        for step in youtube_scenarios.build(scenario, (1080, 2340))
+        if step.action == "launch_app" and step.kwargs.get("package")
+    }
+
+
+def _reset(adb: AdbClientProtocol, adapter: Adapter, serial: str, scenario: str, sleep) -> None:
+    """Force-stop the scenario's apps so the next one starts from a clean state.
+
+    Without this, state leaks between scenarios and produces findings that
+    have nothing to do with selectors. Observed on a Galaxy A55: after
+    `home_feed_tap_video` opened a video, the following scenario's `launch_app`
+    merely returned the already-running app to the foreground -- still on the
+    watch screen -- so its bottom-navigation target was legitimately absent and
+    was reported as a decayed selector.
+
+    Real runs do not have this problem: each is a separate TestRunner.run()
+    that force-stops the app when it finishes. Preflight has to do the same
+    thing itself.
+    """
+    for package in _packages_of(scenario):
+        try:
+            adapter.stop_app(adb, serial, package)
+        except Exception:
+            pass
+    sleep(1.0)
+
+
 def run_preflight(adb: AdbClientProtocol, adapter: Adapter, serial: str, *,
                   scenarios: list[str] | None = None, sleep=time.sleep,
                   on_scenario=None, on_check=None) -> dict:
@@ -304,6 +334,7 @@ def run_preflight(adb: AdbClientProtocol, adapter: Adapter, serial: str, *,
     for name in names:
         if on_scenario is not None:
             on_scenario(name)
+        _reset(adb, adapter, serial, name, sleep)
         reports.append(check_scenario(adb, adapter, serial, name,
                                       screen=screen, sleep=sleep, on_check=on_check))
     summary = summarise(reports)
