@@ -175,27 +175,42 @@ so its bottom-navigation target was legitimately absent. Real runs never hit
 this because each is a separate `TestRunner.run()` that force-stops the app at
 the end; preflight now does the same between scenarios.
 
-**4. Account state and entitlements — not fixable at all.** Two scenarios
-cannot work on this account no matter what the selector table says:
+**4. Account state — not fixable in the selector table.** Signed out, two
+scenarios could not work at all no matter what the table said:
 
-- `library_and_downloads_browse` looks for Downloads, which is a **Premium
-  entitlement**. On this free account the entry does not exist — the screen
-  offers 觀看記錄 / 稍後觀看 / 你的影片 / 喜歡的影片 and an "升級至 Premium"
-  upsell instead.
-- `subscriptions_feed_browse` expects a subscription feed, but the account
-  subscribes to nothing, so YouTube shows a channel-suggestion screen
-  (`訂閱「Domingo Ayala」。`…) rather than videos.
+- `library_and_downloads_browse` found no downloads entry anywhere, scrolled
+  or not. The screen showed 觀看記錄 / 稍後觀看 / 你的影片 / 喜歡的影片 and an
+  "升級至 Premium" upsell.
+- `subscriptions_feed_browse` got a channel-suggestion screen
+  (`訂閱「Domingo Ayala」。`…) instead of a feed, because the account
+  subscribed to nothing.
 
-This is the category worth knowing about: **a scenario can be perfectly
-written and still be meaningless on a given account.** No amount of selector
-work fixes it; it needs the right account, or the scenario has to be dropped
-for that device. Preflight surfaces it in a couple of minutes rather than after
-an hour of measurement.
+Signing in resolved both. The downloads entry appeared as **「已下載的內容」**
+— a label none of the guesses matched — and it sits **below the fold**, so the
+scenario now scrolls before reaching for it. Tapping straight after opening the
+tab found nothing however good the selector was.
 
-`downloads_row` now lists the always-present library entries after the
-Downloads candidates, so a Premium account still opens Downloads and a free one
-still performs the same library-to-detail navigation — and the recorded
-strategy says which happened.
+(An earlier draft of this document called Downloads a Premium-only entitlement.
+That was inferred from its absence while signed out and is not supported by the
+evidence: the entry appeared on signing in, and whether Premium additionally
+gates it was never tested.)
+
+The category still holds even though this instance was fixable: **a scenario
+can be perfectly written and still be meaningless on a given account.**
+Preflight surfaces that in a couple of minutes rather than after an hour of
+measurement.
+
+`downloads_row` lists the always-present library entries after the downloads
+candidates, so an account without downloads still performs the same
+library-to-detail navigation the scenario measures rather than dropping to a
+blind coordinate — and the recorded strategy says which one matched.
+
+**Feed timing is network-dependent, and fixed step times are therefore
+inherently flaky.** `subscriptions_feed_browse` passes when run alone and
+sometimes falls back when run after other scenarios, because the feed is
+re-fetched and a fixed t=9.5s tap can arrive first. The retry in
+`ElementActionsMixin` absorbs some of this; the rest is exactly what a repeat
+campaign's flaky rate exists to quantify.
 
 ## Three bugs this session found
 
