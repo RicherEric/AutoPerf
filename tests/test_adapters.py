@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 
-from autoperf.adapters import HOME, AndroidAdapter, AndroidTvAdapter
+from autoperf.adapters import HOME, AndroidAdapter, AndroidTvAdapter, VerificationError
 
 
 class RecordingAdb:
@@ -136,6 +136,76 @@ class AndroidAdapterTests(unittest.TestCase):
             ("tv", "input keyevent KEYCODE_DPAD_CENTER", 10),
             ("tv", "input keyevent KEYCODE_DPAD_DOWN", 10),
         ])
+
+
+class TypeTextTests(unittest.TestCase):
+    def test_escapes_spaces_so_the_whole_phrase_arrives(self):
+        # An unescaped space ends the argument, so only the first word would
+        # be typed and the search would be for something else entirely.
+        adb = RecordingAdb()
+        AndroidAdapter().type_text(adb, "device", "lofi hip hop radio")
+        self.assertEqual(adb.calls, [("device", "input text lofi%ship%shop%sradio", 10)])
+
+    def test_rejects_shell_metacharacters(self):
+        adb = RecordingAdb()
+        for hostile in ("a; reboot", "a && rm -rf /", "$(id)", "a`id`", "a|b"):
+            with self.subTest(text=hostile):
+                with self.assertRaises(ValueError):
+                    AndroidAdapter().type_text(adb, "device", hostile)
+        self.assertEqual(adb.calls, [])
+
+    def test_rejects_non_ascii(self):
+        # `input text` is an ASCII keystroke injector: a Chinese query would
+        # silently type nothing rather than fail, which is worse.
+        with self.assertRaises(ValueError):
+            AndroidAdapter().type_text(RecordingAdb(), "device", "搜尋關鍵字")
+
+
+class VerifyPlayingWaitTests(unittest.TestCase):
+    """Playback starts asynchronously, so the check waits rather than samples."""
+
+    class Adb:
+        def __init__(self, states):
+            self.states = list(states)
+            self.reads = 0
+
+        def shell(self, serial, command, timeout=10):
+            if command != "dumpsys media_session":
+                return ""
+            self.reads += 1
+            state = self.states.pop(0) if self.states else self.states_last
+            self.states_last = state
+            if state is None:
+                return ""
+            return f"package=com.google.android.youtube\n state=PlaybackState {{state={state}}}"
+
+    def setUp(self):
+        patcher = patch.object(AndroidAdapter, "PLAYBACK_POLL_DELAY", 0)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_waits_through_buffering_before_succeeding(self):
+        # Measured on a Galaxy A55: a flow that had genuinely reached the
+        # right video still read as not-playing two seconds after the tap,
+        # because a livestream was still buffering.
+        adb = self.Adb([6, 6, 6, 3])
+        self.assertEqual(AndroidAdapter().verify_playing(adb, "S1"), {"verified": True})
+        self.assertEqual(adb.reads, 4)
+
+    def test_still_fails_when_playback_never_starts(self):
+        adb = self.Adb([2] * 50)
+        with self.assertRaises(VerificationError):
+            AndroidAdapter().verify_playing(adb, "S1", timeout=0.05)
+
+    def test_an_unreadable_session_stays_unknown_rather_than_failing(self):
+        adb = self.Adb([None] * 50)
+        self.assertEqual(AndroidAdapter().verify_playing(adb, "S1", timeout=0.05),
+                         {"verified": None})
+
+    def test_succeeds_immediately_when_already_playing(self):
+        adb = self.Adb([3])
+        self.assertEqual(AndroidAdapter().verify_playing(adb, "S1"), {"verified": True})
+        self.assertEqual(adb.reads, 1)
 
 
 class ScreenSizeTests(unittest.TestCase):

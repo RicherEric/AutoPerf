@@ -19,8 +19,10 @@ _OVERRIDE_SIZE_RE = re.compile(r"Override size:\s*(\d+)x(\d+)")
 # on the Android version; all of them carry the Surface.ROTATION_* ordinal.
 _ROTATION_RE = re.compile(r"(?:mCurrentRotation|cur=|rotation)[=\s]*(\d)\b")
 _URI_RE = re.compile(r"^https://[A-Za-z0-9./:?=_&%-]+$")
+_INPUT_TEXT_RE = re.compile(r"^[A-Za-z0-9 _.\-]+$")
 
 HOME = "KEYCODE_HOME"
+ENTER = "KEYCODE_ENTER"
 BACK = "KEYCODE_BACK"
 APP_SWITCH = "KEYCODE_APP_SWITCH"
 DPAD_UP = "KEYCODE_DPAD_UP"
@@ -52,6 +54,20 @@ def _require_uri(uri: str) -> str:
     if not _URI_RE.fullmatch(uri):
         raise ValueError(f"Invalid or unsafe URI: {uri!r}")
     return uri
+
+
+def _require_input_text(text: str) -> str:
+    """Validate text destined for `adb shell input text`.
+
+    Deliberately narrow, for two separate reasons. It goes into a shell
+    command, so the same injection concern that governs every other argument
+    here applies. And `input text` is an ASCII keystroke injector: it does not
+    reliably deliver non-ASCII on most devices, so accepting a Chinese query
+    would silently type nothing rather than fail.
+    """
+    if not _INPUT_TEXT_RE.fullmatch(text):
+        raise ValueError(f"Invalid or unsafe input text: {text!r}")
+    return text
 
 
 @dataclass(slots=True)
@@ -163,22 +179,43 @@ class ElementActionsMixin:
             raise VerificationError(f"expected {package} in foreground, found {focus[0]}")
         return {"package": package, "verified": True, "activity": focus[1]}
 
-    def verify_playing(self, adb: AdbClientProtocol, serial: str, package: str | None = None) -> dict:
-        """Assert media is actually playing.
+    # How long to wait for playback to actually start. Opening a video is
+    # asynchronous -- the app has to resolve, buffer and begin rendering --
+    # so sampling the state once at an arbitrary instant is inherently
+    # flaky. Measured on a Galaxy A55: a search flow that had genuinely
+    # reached the right video still read as not-playing two seconds after
+    # the tap, because a livestream was still buffering.
+    PLAYBACK_TIMEOUT = 8.0
+    PLAYBACK_POLL_DELAY = 0.5
+
+    def verify_playing(self, adb: AdbClientProtocol, serial: str, package: str | None = None,
+                       timeout: float | None = None) -> dict:
+        """Assert media actually starts playing, waiting for it to begin.
 
         The strongest check available, and the only one that separates
-        "search_and_play worked" from "search_and_play tapped four times into
-        empty space and left the home feed on screen" -- a foreground check
-        passes in both cases.
+        "search_and_play worked" from "the taps hit empty space and left the
+        home feed on screen" -- a foreground check passes in both cases.
+
+        Waits rather than samples, since the alternative is a check that
+        fails on slow networks and passes on fast ones.
         """
         from . import uiauto
 
-        playing = uiauto.is_playing(adb, serial, package)
+        deadline = time.monotonic() + (self.PLAYBACK_TIMEOUT if timeout is None else timeout)
+        playing = None
+        while True:
+            playing = uiauto.is_playing(adb, serial, package)
+            if playing:
+                return {"verified": True}
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(self.PLAYBACK_POLL_DELAY)
+
         if playing is None:
+            # No session to read at all -- "could not tell", not "not
+            # playing". Failing here would fail runs for the wrong reason.
             return {"verified": None}
-        if not playing:
-            raise VerificationError("expected active media playback, found none")
-        return {"verified": True}
+        raise VerificationError("expected active media playback, found none")
 
 
 class AndroidAdapter(ElementActionsMixin, Adapter):
@@ -215,6 +252,20 @@ class AndroidAdapter(ElementActionsMixin, Adapter):
 
     def key_event(self, adb, serial, keycode):
         adb.shell(serial, f"input keyevent {_require_keycode(keycode)}")
+
+    def type_text(self, adb, serial, text):
+        """Type into whatever field currently has focus.
+
+        `input text` needs spaces escaped as `%s`; an unescaped space would
+        be read as the end of the argument and only the first word would
+        arrive.
+
+        This is a keystroke injector, not a UI interaction: it depends on
+        nothing being introspectable and works identically wherever a text
+        field is focused, which is why it is a sound way to make a search
+        flow deterministic.
+        """
+        adb.shell(serial, f"input text {_require_input_text(text).replace(' ', '%s')}")
 
     def screen_size(self, adb, serial):
         """The coordinate space taps and swipes actually land in.
