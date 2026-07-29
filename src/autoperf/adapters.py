@@ -71,7 +71,89 @@ class Adapter(ABC):
     def screen_size(self, adb: AdbClientProtocol, serial: str) -> tuple[int, int]: ...
 
 
-class AndroidAdapter(Adapter):
+class VerificationError(AssertionError):
+    """A scenario step could not be satisfied on the device.
+
+    Raised rather than returning quietly because `adb shell input tap`
+    reports success for any on-screen coordinate, occupied or not. Without
+    an exception the runner records "adapter_action completed" and the run
+    ends green having measured an untouched screen. TestRunner turns this
+    into a `verification_failed` event, which in turn marks the run
+    unverified -- so a decayed selector shows up as missing data rather than
+    as a plausible-looking result.
+    """
+
+
+class ElementNotFound(VerificationError):
+    pass
+
+
+# Mixed into both adapters below. Kept separate from Adapter itself so the
+# abstract interface stays the minimal set a plug-in must implement --
+# these are all built from launch/tap/swipe plus a UI dump.
+class ElementActionsMixin:
+    def _resolve(self, adb: AdbClientProtocol, serial: str, target, screen=None):
+        from . import uiauto
+
+        screen = screen or self.screen_size(adb, serial)
+        try:
+            nodes = uiauto.parse_hierarchy(uiauto.dump_hierarchy(adb, serial))
+        except Exception:
+            # A failed dump must not be fatal on its own: the coordinate
+            # fallback is exactly as good as the behaviour that preceded this
+            # module, so degrade to it rather than failing the step.
+            nodes = []
+        return uiauto.resolve(target, nodes, screen), screen
+
+    def tap_element(self, adb: AdbClientProtocol, serial: str, target, screen=None) -> dict:
+        """Tap an element located by selector chain, coordinates last.
+
+        Returns which strategy matched so the runner can record it: a step
+        that quietly fell through to `coordinates` still worked, but it is
+        the early warning that a selector has gone stale, and it is invisible
+        unless reported.
+        """
+        resolution, _ = self._resolve(adb, serial, target, screen)
+        if resolution is None:
+            raise ElementNotFound(
+                f"no element matched {target.name or 'target'} and no coordinate fallback was given"
+            )
+        x, y = resolution.point
+        self.tap(adb, serial, x, y)
+        return {"target": target.name, "strategy": resolution.strategy, "x": x, "y": y}
+
+    def verify_foreground(self, adb: AdbClientProtocol, serial: str, package: str) -> dict:
+        """Assert `package` is actually the app in front."""
+        from . import uiauto
+
+        focus = uiauto.current_focus(adb, serial)
+        if focus is None:
+            # Unreadable focus is not evidence of failure; saying so beats
+            # failing a run because dumpsys was momentarily unavailable.
+            return {"package": package, "verified": None}
+        if focus[0] != package:
+            raise VerificationError(f"expected {package} in foreground, found {focus[0]}")
+        return {"package": package, "verified": True, "activity": focus[1]}
+
+    def verify_playing(self, adb: AdbClientProtocol, serial: str, package: str | None = None) -> dict:
+        """Assert media is actually playing.
+
+        The strongest check available, and the only one that separates
+        "search_and_play worked" from "search_and_play tapped four times into
+        empty space and left the home feed on screen" -- a foreground check
+        passes in both cases.
+        """
+        from . import uiauto
+
+        playing = uiauto.is_playing(adb, serial, package)
+        if playing is None:
+            return {"verified": None}
+        if not playing:
+            raise VerificationError("expected active media playback, found none")
+        return {"verified": True}
+
+
+class AndroidAdapter(ElementActionsMixin, Adapter):
     """Generic AOSP adapter: drives the device with plain `adb shell input`/`am`/`monkey`
     commands only, no OEM-private APIs.
 
@@ -143,6 +225,59 @@ class AndroidTvAdapter(AndroidAdapter):
         else:
             keycode = DPAD_RIGHT if dx < 0 else DPAD_LEFT
         self.key_event(adb, serial, keycode)
+
+    # How many DPAD presses focus may take to reach a target before the step
+    # is called a failure. Bounded because a target that focus cannot reach
+    # (off-screen, unfocusable) would otherwise loop until the run ended.
+    MAX_FOCUS_STEPS = 12
+
+    def tap_element(self, adb, serial, target, screen=None):
+        """Move focus onto the element, then press select.
+
+        Inheriting the phone implementation would locate the element
+        correctly and then press DPAD_CENTER regardless -- since `tap` on a
+        TV discards its coordinates -- activating whatever happened to be
+        focused. That is the same silent-wrong-action problem this whole
+        layer exists to remove, just one level up.
+
+        So focus is actually walked toward the target: compare the focused
+        node's centre with the target's, press the DPAD key that closes the
+        larger gap, re-read the hierarchy, repeat. The coordinate fallback is
+        deliberately *not* honoured here -- a pixel is not something a remote
+        control can address, and pretending otherwise is what produced
+        meaningless TV runs before.
+        """
+        from . import uiauto
+
+        screen = screen or self.screen_size(adb, serial)
+        for _ in range(self.MAX_FOCUS_STEPS):
+            nodes = uiauto.parse_hierarchy(uiauto.dump_hierarchy(adb, serial))
+            resolution = uiauto.resolve(target, nodes, screen)
+            if resolution is None or resolution.node is None:
+                raise ElementNotFound(
+                    f"{target.name or 'target'} is not on screen; a TV cannot fall back to coordinates"
+                )
+            focused = next((node for node in nodes if node.focused), None)
+            if focused is None:
+                # Nothing focused yet -- one press establishes focus somewhere
+                # and the next iteration navigates from there.
+                self.key_event(adb, serial, DPAD_DOWN)
+                continue
+            if focused.bounds == resolution.node.bounds:
+                self.key_event(adb, serial, DPAD_CENTER)
+                return {"target": target.name, "strategy": resolution.strategy,
+                        "x": resolution.point[0], "y": resolution.point[1]}
+            self.key_event(adb, serial, self._step_toward(focused.center, resolution.node.center))
+        raise VerificationError(
+            f"focus did not reach {target.name or 'target'} within {self.MAX_FOCUS_STEPS} steps"
+        )
+
+    @staticmethod
+    def _step_toward(origin: tuple[int, int], destination: tuple[int, int]) -> str:
+        dx, dy = destination[0] - origin[0], destination[1] - origin[1]
+        if abs(dy) >= abs(dx):
+            return DPAD_DOWN if dy > 0 else DPAD_UP
+        return DPAD_RIGHT if dx > 0 else DPAD_LEFT
 
 
 def select_adapter(adb: AdbClientProtocol, serial: str) -> Adapter:

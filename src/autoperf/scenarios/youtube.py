@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from ..adapters import APP_SWITCH, BACK, HOME, ScenarioStep
-from . import coords
+from . import coords, selectors
 
 PACKAGE = "com.google.android.youtube"
 SETTINGS_PACKAGE = "com.android.settings"
@@ -31,6 +31,21 @@ class ScenarioPreset:
 
 def _launch(at: float = 0.0) -> ScenarioStep:
     return ScenarioStep(at, "launch_app", {"package": PACKAGE})
+
+
+def _launch_verified(at: float = 0.0, package: str = PACKAGE, settle: float = 2.5) -> list[ScenarioStep]:
+    """Launch, then assert the app really came to the front.
+
+    `am start` / `monkey` return success once the intent is *dispatched*, not
+    once the app is usable, so a launch that crashes on startup or is
+    swallowed by a system dialog looks identical to a good one. Every step
+    after it then operates on whatever is actually on screen, and the run
+    still finishes green. The check costs one `dumpsys window` read.
+    """
+    return [
+        ScenarioStep(at, "launch_app", {"package": package}),
+        ScenarioStep(at + settle, "verify_foreground", {"package": package}),
+    ]
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,29 +78,39 @@ NAMED_VIDEOS = (
 def _play_named_video(video: NamedVideo) -> Callable[[tuple[int, int]], list[ScenarioStep]]:
     def build_fn(screen: tuple[int, int]) -> list[ScenarioStep]:
         url = f"https://www.youtube.com/watch?v={video.video_id}"
-        return [ScenarioStep(0.0, "launch_app", {"package": PACKAGE, "data": url})]
+        return [
+            ScenarioStep(0.0, "launch_app", {"package": PACKAGE, "data": url}),
+            ScenarioStep(3.0, "verify_foreground", {"package": PACKAGE}),
+            # These presets exist to give baseline comparisons fixed,
+            # reproducible content -- a deep link that silently failed to
+            # play would quietly undermine exactly that.
+            ScenarioStep(8.0, "verify_playing", {"package": PACKAGE}),
+        ]
     return build_fn
 
 
 def _enter_video_steps(screen, start_at: float = 0.0) -> list[ScenarioStep]:
     """Launch, search, and tap into a result -- lands on a playing video by ~start_at+8.0."""
     return [
-        _launch(start_at + 0.0),
-        ScenarioStep(start_at + 3.0, "tap", coords.rel_tap(screen, 0.92, 0.06)),   # search icon
-        ScenarioStep(start_at + 4.5, "tap", coords.rel_tap(screen, 0.5, 0.08)),    # search bar
-        ScenarioStep(start_at + 6.0, "tap", coords.rel_tap(screen, 0.5, 0.2)),     # first suggestion
-        ScenarioStep(start_at + 8.0, "tap", coords.rel_tap(screen, 0.5, 0.35)),    # result thumbnail
+        *_launch_verified(start_at + 0.0),
+        ScenarioStep(start_at + 3.0, "tap_element", {"target": selectors.SEARCH_ICON}),
+        ScenarioStep(start_at + 4.5, "tap_element", {"target": selectors.SEARCH_BAR}),
+        ScenarioStep(start_at + 6.0, "tap_element", {"target": selectors.FIRST_SUGGESTION}),
+        ScenarioStep(start_at + 8.0, "tap_element", {"target": selectors.RESULT_THUMBNAIL}),
+        # Proves the flow actually reached playback. A foreground check
+        # would pass even if all four taps above hit empty space.
+        ScenarioStep(start_at + 11.0, "verify_playing", {"package": PACKAGE}),
     ]
 
 
 def cold_start(screen) -> list[ScenarioStep]:
-    return [_launch(0.0)]
+    return _launch_verified(0.0)
 
 
 def device_settings_scroll(screen) -> list[ScenarioStep]:
     """Visible smoke flow supported by both phones and Android TV."""
     return [
-        ScenarioStep(0.0, "launch_app", {"package": SETTINGS_PACKAGE}),
+        *_launch_verified(0.0, SETTINGS_PACKAGE),
         ScenarioStep(3.0, "swipe", coords.rel_swipe(screen, 0.5, 0.8, 0.5, 0.3)),
         ScenarioStep(6.0, "swipe", coords.rel_swipe(screen, 0.5, 0.8, 0.5, 0.3)),
         ScenarioStep(9.0, "swipe", coords.rel_swipe(screen, 0.5, 0.3, 0.5, 0.8)),
@@ -94,7 +119,7 @@ def device_settings_scroll(screen) -> list[ScenarioStep]:
 
 
 def cold_start_and_stop(screen) -> list[ScenarioStep]:
-    return [_launch(0.0), ScenarioStep(8.0, "stop_app", {"package": PACKAGE})]
+    return [*_launch_verified(0.0), ScenarioStep(8.0, "stop_app", {"package": PACKAGE})]
 
 
 def search_and_play(screen) -> list[ScenarioStep]:
@@ -102,7 +127,7 @@ def search_and_play(screen) -> list[ScenarioStep]:
 
 
 def home_feed_scroll(screen) -> list[ScenarioStep]:
-    steps = [_launch(0.0)]
+    steps = _launch_verified(0.0)
     for at in (3.0, 6.0, 9.0):
         steps.append(ScenarioStep(at, "swipe", coords.rel_swipe(screen, 0.5, 0.8, 0.5, 0.3)))
     return steps
@@ -110,16 +135,16 @@ def home_feed_scroll(screen) -> list[ScenarioStep]:
 
 def home_feed_tap_video(screen) -> list[ScenarioStep]:
     return [
-        _launch(0.0),
+        *_launch_verified(0.0),
         ScenarioStep(3.0, "swipe", coords.rel_swipe(screen, 0.5, 0.8, 0.5, 0.3)),
-        ScenarioStep(5.0, "tap", coords.rel_tap(screen, 0.5, 0.45)),
+        ScenarioStep(5.0, "tap_element", {"target": selectors.HOME_FEED_VIDEO}),
     ]
 
 
 def shorts_browsing(screen) -> list[ScenarioStep]:
     steps = [
-        _launch(0.0),
-        ScenarioStep(3.0, "tap", coords.rel_tap(screen, 0.6, 0.95)),  # Shorts tab
+        *_launch_verified(0.0),
+        ScenarioStep(3.0, "tap_element", {"target": selectors.SHORTS_TAB}),
     ]
     for at in (5.0, 7.0, 9.0, 11.0, 13.0):
         steps.append(ScenarioStep(at, "swipe", coords.rel_swipe(screen, 0.5, 0.8, 0.5, 0.2, duration_ms=250)))
@@ -128,79 +153,89 @@ def shorts_browsing(screen) -> list[ScenarioStep]:
 
 def shorts_like_and_next(screen) -> list[ScenarioStep]:
     return [
-        _launch(0.0),
-        ScenarioStep(3.0, "tap", coords.rel_tap(screen, 0.6, 0.95)),
-        ScenarioStep(5.0, "tap", coords.rel_tap(screen, 0.9, 0.55)),  # like
+        *_launch_verified(0.0),
+        ScenarioStep(3.0, "tap_element", {"target": selectors.SHORTS_TAB}),
+        ScenarioStep(5.0, "tap_element", {"target": selectors.SHORTS_LIKE_BUTTON}),
         ScenarioStep(6.0, "swipe", coords.rel_swipe(screen, 0.5, 0.8, 0.5, 0.2)),
-        ScenarioStep(8.0, "tap", coords.rel_tap(screen, 0.9, 0.55)),
+        ScenarioStep(8.0, "tap_element", {"target": selectors.SHORTS_LIKE_BUTTON}),
     ]
 
 
 def quality_switch_manual(screen) -> list[ScenarioStep]:
     return _enter_video_steps(screen, 0.0) + [
-        ScenarioStep(9.0, "tap", coords.rel_tap(screen, 0.95, 0.4)),   # overflow menu
-        ScenarioStep(10.0, "tap", coords.rel_tap(screen, 0.5, 0.55)),  # Quality row
-        ScenarioStep(11.0, "tap", coords.rel_tap(screen, 0.5, 0.4)),   # a resolution entry
+        ScenarioStep(12.0, "tap_element", {"target": selectors.OVERFLOW_MENU}),
+        ScenarioStep(13.0, "tap_element", {"target": selectors.QUALITY_ROW}),
+        ScenarioStep(14.0, "tap_element", {"target": selectors.QUALITY_OPTION}),
     ]
 
 
 def like_video(screen) -> list[ScenarioStep]:
     return _enter_video_steps(screen, 0.0) + [
-        ScenarioStep(9.0, "tap", coords.rel_tap(screen, 0.15, 0.62)),
+        ScenarioStep(12.0, "tap_element", {"target": selectors.LIKE_BUTTON}),
     ]
 
 
 def comment_scroll(screen) -> list[ScenarioStep]:
     steps = _enter_video_steps(screen, 0.0) + [
-        ScenarioStep(9.0, "tap", coords.rel_tap(screen, 0.5, 0.68)),  # comments row
+        ScenarioStep(12.0, "tap_element", {"target": selectors.COMMENTS_ROW}),
     ]
-    for at in (10.5, 12.5, 14.5):
+    for at in (13.5, 15.5, 17.5):
         steps.append(ScenarioStep(at, "swipe", coords.rel_swipe(screen, 0.5, 0.8, 0.5, 0.35)))
-    steps.append(ScenarioStep(16.5, "key_event", {"keycode": BACK}))
+    steps.append(ScenarioStep(19.5, "key_event", {"keycode": BACK}))
     return steps
 
 
 def fullscreen_toggle_cycle(screen) -> list[ScenarioStep]:
     steps = _enter_video_steps(screen, 0.0)
-    for i, at in enumerate((9.0, 12.0, 15.0, 18.0)):
-        fy = 0.58 if i % 2 == 0 else 0.9
-        steps.append(ScenarioStep(at, "tap", coords.rel_tap(screen, 0.93, fy)))
+    # Enter and exit alternate, and they are genuinely different controls --
+    # the button sits in a different place in each state, which is why the
+    # original had two hardcoded y positions. Naming them separately lets
+    # each carry its own accessibility label ("Enter fullscreen" vs "Exit
+    # fullscreen") rather than relying on the alternation being in step.
+    for index, at in enumerate((12.0, 15.0, 18.0, 21.0)):
+        target = selectors.FULLSCREEN_ENTER if index % 2 == 0 else selectors.FULLSCREEN_EXIT
+        steps.append(ScenarioStep(at, "tap_element", {"target": target}))
     return steps
 
 
 def seek_scrub_forward(screen) -> list[ScenarioStep]:
     return _enter_video_steps(screen, 0.0) + [
-        ScenarioStep(9.0, "tap", coords.rel_tap(screen, 0.5, 0.5)),  # reveal player controls
-        ScenarioStep(10.0, "swipe", coords.rel_swipe(screen, 0.3, 0.94, 0.7, 0.94)),
-        ScenarioStep(13.0, "swipe", coords.rel_swipe(screen, 0.5, 0.94, 0.65, 0.94)),
+        ScenarioStep(12.0, "tap_element", {"target": selectors.PLAYER_SURFACE}),
+        ScenarioStep(13.5, "swipe", coords.rel_swipe(screen, 0.3, 0.94, 0.7, 0.94)),
+        ScenarioStep(16.0, "swipe", coords.rel_swipe(screen, 0.5, 0.94, 0.65, 0.94)),
     ]
 
 
 def seek_long_press_skip(screen) -> list[ScenarioStep]:
     return _enter_video_steps(screen, 0.0) + [
-        ScenarioStep(9.0, "swipe", coords.long_press(screen, 0.8, 0.5, duration_ms=900)),
-        ScenarioStep(12.0, "swipe", coords.long_press(screen, 0.8, 0.5, duration_ms=900)),
+        ScenarioStep(12.5, "swipe", coords.long_press(screen, 0.8, 0.5, duration_ms=900)),
+        ScenarioStep(15.5, "swipe", coords.long_press(screen, 0.8, 0.5, duration_ms=900)),
     ]
 
 
 def background_foreground_resume(screen) -> list[ScenarioStep]:
     return _enter_video_steps(screen, 0.0) + [
-        ScenarioStep(10.0, "key_event", {"keycode": HOME}),
-        ScenarioStep(15.0, "launch_app", {"package": PACKAGE}),
+        ScenarioStep(14.0, "key_event", {"keycode": HOME}),
+        ScenarioStep(19.0, "launch_app", {"package": PACKAGE}),
+        # The whole point of the scenario is that playback survives the
+        # round trip, so resuming has to be asserted, not assumed.
+        ScenarioStep(23.0, "verify_playing", {"package": PACKAGE}),
     ]
 
 
 def app_switch_cycle(screen) -> list[ScenarioStep]:
     steps = _enter_video_steps(screen, 0.0)
-    for at in (10.0, 13.0, 16.0, 19.0):
+    # Starts after _enter_video_steps' playback check at 11.0 -- switching
+    # away before it would leave the assertion racing the recents screen.
+    for at in (13.0, 16.0, 19.0, 22.0):
         steps.append(ScenarioStep(at, "key_event", {"keycode": APP_SWITCH}))
     return steps
 
 
 def pip_minimize(screen) -> list[ScenarioStep]:
     return _enter_video_steps(screen, 0.0) + [
-        ScenarioStep(9.0, "tap", coords.rel_tap(screen, 0.06, 0.42)),  # PiP caret
-        ScenarioStep(11.0, "swipe", coords.rel_swipe(screen, 0.8, 0.2, 0.2, 0.7)),
+        ScenarioStep(12.0, "tap_element", {"target": selectors.PIP_CARET}),
+        ScenarioStep(14.0, "swipe", coords.rel_swipe(screen, 0.8, 0.2, 0.2, 0.7)),
     ]
 
 
@@ -208,27 +243,27 @@ def multi_video_session(screen) -> list[ScenarioStep]:
     return _enter_video_steps(screen, 0.0) + [
         ScenarioStep(12.0, "key_event", {"keycode": BACK}),
         ScenarioStep(13.0, "swipe", coords.rel_swipe(screen, 0.5, 0.8, 0.5, 0.3)),
-        ScenarioStep(15.0, "tap", coords.rel_tap(screen, 0.5, 0.45)),   # video B
+        ScenarioStep(15.0, "tap_element", {"target": selectors.SECOND_VIDEO}),
         ScenarioStep(21.0, "key_event", {"keycode": BACK}),
-        ScenarioStep(23.0, "tap", coords.rel_tap(screen, 0.5, 0.6)),    # video C
+        ScenarioStep(23.0, "tap_element", {"target": selectors.THIRD_VIDEO}),
     ]
 
 
 def subscriptions_feed_browse(screen) -> list[ScenarioStep]:
     return [
-        _launch(0.0),
-        ScenarioStep(3.0, "tap", coords.rel_tap(screen, 0.4, 0.95)),  # Subscriptions tab
+        *_launch_verified(0.0),
+        ScenarioStep(3.0, "tap_element", {"target": selectors.SUBSCRIPTIONS_TAB}),
         ScenarioStep(5.0, "swipe", coords.rel_swipe(screen, 0.5, 0.8, 0.5, 0.3)),
         ScenarioStep(7.5, "swipe", coords.rel_swipe(screen, 0.5, 0.8, 0.5, 0.3)),
-        ScenarioStep(9.5, "tap", coords.rel_tap(screen, 0.5, 0.45)),
+        ScenarioStep(9.5, "tap_element", {"target": selectors.SUBSCRIPTION_VIDEO}),
     ]
 
 
 def library_and_downloads_browse(screen) -> list[ScenarioStep]:
     return [
-        _launch(0.0),
-        ScenarioStep(3.0, "tap", coords.rel_tap(screen, 0.8, 0.95)),  # Library tab
-        ScenarioStep(5.0, "tap", coords.rel_tap(screen, 0.5, 0.3)),   # Downloads row
+        *_launch_verified(0.0),
+        ScenarioStep(3.0, "tap_element", {"target": selectors.LIBRARY_TAB}),
+        ScenarioStep(5.0, "tap_element", {"target": selectors.DOWNLOADS_ROW}),
         ScenarioStep(8.0, "key_event", {"keycode": BACK}),
     ]
 

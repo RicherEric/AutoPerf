@@ -422,6 +422,80 @@ class DownsampleSamplesTests(unittest.TestCase):
         self.assertEqual([row["count"] for row in rows], [1, 1, 1])
 
 
+class RunQualityTests(unittest.TestCase):
+    def _storage_with_events(self, directory, kinds):
+        storage = Storage(Path(directory) / "db.sqlite")
+        storage.initialize()
+        storage.create_run("run1", "device")
+        writer = BatchWriter(storage)
+        writer.start()
+        for kind in kinds:
+            writer.put(TestEvent("run1", kind, "message"))
+        writer.close()
+        return storage
+
+    def test_a_clean_run_is_verified(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = self._storage_with_events(directory, ["lifecycle", "adapter_action"])
+            quality = storage.run_quality("run1")
+            self.assertTrue(quality["verified"])
+            self.assertEqual(quality["verification_failures"], 0)
+
+    def test_a_verification_failure_makes_the_run_unverified(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = self._storage_with_events(
+                directory, ["adapter_action", "verification_failed", "verification_failed"])
+            quality = storage.run_quality("run1")
+            self.assertFalse(quality["verified"])
+            self.assertEqual(quality["verification_failures"], 2)
+
+    def test_a_coordinate_fallback_is_counted_but_does_not_unverify(self):
+        # The step worked -- exactly as well as before selectors existed --
+        # so it is a warning about decay, not a failure.
+        with tempfile.TemporaryDirectory() as directory:
+            storage = self._storage_with_events(directory, ["selector_fallback", "adapter_action"])
+            quality = storage.run_quality("run1")
+            self.assertTrue(quality["verified"])
+            self.assertEqual(quality["selector_fallbacks"], 1)
+
+    def test_counts_are_scoped_to_the_run(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = self._storage_with_events(directory, ["verification_failed"])
+            storage.create_run("run2", "device")
+            self.assertTrue(storage.run_quality("run2")["verified"])
+
+
+class AppVersionColumnTests(unittest.TestCase):
+    def test_migrates_a_database_predating_the_app_version_columns(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = Path(directory) / "db.sqlite"
+            conn = sqlite3.connect(str(db_path))
+            conn.execute(
+                "CREATE TABLE test_runs (id TEXT PRIMARY KEY, device_serial TEXT NOT NULL, status TEXT NOT NULL,"
+                " started_at TEXT, finished_at TEXT, checkpoint TEXT, error TEXT)"
+            )
+            conn.commit()
+            conn.close()
+
+            storage = Storage(db_path)
+            storage.initialize()
+            storage.create_run("run1", "device")
+            storage.set_run_app_version(
+                "run1", {"package": "com.example", "version_name": "1.2.3", "version_code": 45})
+            run = storage.get_run("run1")
+            self.assertEqual(run["app_package"], "com.example")
+            self.assertEqual(run["app_version_name"], "1.2.3")
+            self.assertEqual(run["app_version_code"], 45)
+
+    def test_setting_no_version_leaves_the_columns_null(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = Storage(Path(directory) / "db.sqlite")
+            storage.initialize()
+            storage.create_run("run1", "device")
+            storage.set_run_app_version("run1", None)
+            self.assertIsNone(storage.get_run("run1")["app_version_name"])
+
+
 class CampaignStorageTests(unittest.TestCase):
     def test_migrates_database_predating_campaign_id_column(self):
         with tempfile.TemporaryDirectory() as directory:

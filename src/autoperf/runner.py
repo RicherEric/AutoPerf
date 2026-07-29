@@ -6,7 +6,7 @@ import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 
-from .adapters import HOME, Adapter, ScenarioStep
+from .adapters import HOME, Adapter, ScenarioStep, VerificationError
 from .adb import AdbClientProtocol
 from .collectors import Collector
 from .models import RunStatus, TestEvent
@@ -15,6 +15,21 @@ from .storage import BatchWriter, Storage
 
 class DeviceBusyError(RuntimeError):
     pass
+
+
+def _step_details(step: ScenarioStep) -> dict:
+    """Scenario kwargs reduced to something JSON-serialisable.
+
+    Step kwargs now carry Selector/Target objects, which the batch writer
+    would choke on when it serialises an event's details.
+    """
+    safe: dict = {}
+    for key, value in step.kwargs.items():
+        if value is None or isinstance(value, (str, int, float, bool)):
+            safe[key] = value
+        else:
+            safe[key] = getattr(value, "name", None) or type(value).__name__
+    return safe
 
 
 @dataclass(slots=True)
@@ -40,6 +55,59 @@ class TestRunner:
     # enough to resume from while making heartbeat cost independent of run
     # length.
     heartbeat_interval: float = 1.0
+
+    def _record_step_outcome(self, writer, run_id: str, step: ScenarioStep, future: Future) -> None:
+        """Turn a finished scenario step into events.
+
+        Three outcomes are kept distinct on purpose:
+
+        - `verification_failed` -- the step could not be satisfied (element
+          absent, wrong app in front, nothing playing). Previously impossible
+          to express: `adb shell input tap` succeeds on empty space, so a
+          missed tap was recorded as a completed action and the run finished
+          green having measured nothing.
+        - `selector_fallback` -- the step worked, but only by falling through
+          to its hardcoded coordinate. That is exactly as reliable as the old
+          behaviour, so it is not a failure; it is the early warning that a
+          selector has decayed, and it is invisible unless recorded.
+        - `adapter_error` -- everything else, unchanged.
+        """
+        details = {"action": step.action, **_step_details(step)}
+        try:
+            outcome = future.result()
+        except VerificationError as exc:
+            writer.put(TestEvent(run_id, "verification_failed", str(exc), details=details))
+            return
+        except Exception as exc:
+            writer.put(TestEvent(run_id, "adapter_error", str(exc), details=details))
+            return
+        if isinstance(outcome, dict):
+            details.update(outcome)
+            if outcome.get("strategy") == "coordinates":
+                writer.put(TestEvent(
+                    run_id, "selector_fallback",
+                    f"{outcome.get('target') or step.action} resolved by coordinates, not by selector",
+                    details=details,
+                ))
+        writer.put(TestEvent(run_id, "adapter_action", f"{step.action} completed", details=details))
+
+    def _record_app_version(self, serial: str, run_id: str) -> None:
+        """Store which build of the app under test this run measured.
+
+        Without it a background app update between a baseline and its
+        candidate is indistinguishable from a device regression -- and it is
+        the likelier of the two explanations.
+        """
+        package = None
+        for step in self.scenario or []:
+            if step.action == "launch_app" and step.kwargs.get("package"):
+                package = step.kwargs["package"]
+                break
+        if not package:
+            return
+        from . import uiauto
+
+        self.storage.set_run_app_version(run_id, uiauto.package_version(self.adb, serial, package))
 
     def run(self, serial: str, duration: float, run_id: str | None = None) -> str:
         if self.scenario and self.adapter is None:
@@ -94,6 +162,13 @@ class TestRunner:
         )
         try:
             writer.put(TestEvent(run_id, "lifecycle", "run started"))
+            # Read once at the start, before the scenario has had a chance to
+            # change anything. Best-effort: an unreadable version is worth
+            # far less than the run itself, so it must never abort one.
+            try:
+                self._record_app_version(serial, run_id)
+            except Exception as exc:
+                writer.put(TestEvent(run_id, "app_version_unavailable", str(exc)))
             while not stop and time.monotonic() - started < duration:
                 now = time.monotonic()
                 # Dashboard-triggered runs execute in a separate Celery worker
@@ -134,18 +209,12 @@ class TestRunner:
                         if idx in scenario_timed_out:
                             scenario_timed_out.remove(idx)
                             continue
-                        try:
-                            future.result()
-                            writer.put(TestEvent(run_id, "adapter_action", f"{step.action} completed",
-                                                 details={"action": step.action, **step.kwargs}))
-                        except Exception as exc:
-                            writer.put(TestEvent(run_id, "adapter_error", str(exc),
-                                                 details={"action": step.action, **step.kwargs}))
+                        self._record_step_outcome(writer, run_id, step, future)
                     elif now - submitted >= self.adapter_action_timeout and idx not in scenario_timed_out:
                         scenario_timed_out.add(idx)
                         writer.put(TestEvent(run_id, "adapter_timeout",
                                              f"adapter action exceeded {self.adapter_action_timeout}s",
-                                             details={"action": step.action, **step.kwargs}))
+                                             details={"action": step.action, **_step_details(step)}))
                 while next_step < len(scenario_steps) and now - started >= scenario_steps[next_step].at:
                     step = scenario_steps[next_step]
                     action = getattr(self.adapter, step.action)
@@ -179,13 +248,7 @@ class TestRunner:
             for idx, (future, _, step) in scenario_active.items():
                 if idx in scenario_timed_out or future.cancelled():
                     continue
-                try:
-                    future.result()
-                    writer.put(TestEvent(run_id, "adapter_action", f"{step.action} completed",
-                                         details={"action": step.action, **step.kwargs}))
-                except Exception as exc:
-                    writer.put(TestEvent(run_id, "adapter_error", str(exc),
-                                         details={"action": step.action, **step.kwargs}))
+                self._record_step_outcome(writer, run_id, step, future)
             status = RunStatus.INTERRUPTED if stop else RunStatus.COMPLETED
             if self.adapter is not None:
                 # Whether a scenario run ends normally or gets cancelled, it
