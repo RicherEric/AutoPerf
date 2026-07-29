@@ -55,12 +55,14 @@ def _desc(*labels: str) -> tuple[Selector, ...]:
 # --- top-level navigation ---------------------------------------------------
 
 SEARCH_ICON = Target(
+    # Confirmed against a real build: the "搜尋" label and `menu_item_1` both
+    # match. The English label is kept first for English devices.
     selectors=(
         *_desc("Search", "搜尋"),
         _id("menu_item_1"),
         _id("search_button"),
     ),
-    fallback=(0.92, 0.06),
+    fallback=(0.937, 0.067),
     name="search_icon",
 )
 
@@ -74,27 +76,33 @@ SEARCH_BAR = Target(
     name="search_bar",
 )
 
+# Bottom-navigation coordinates below are measured, not guessed: captured
+# from a Galaxy A55 (1080x2340, zh-Hant-TW, YouTube 21.29.366). The values
+# they replace were off by a whole tab -- shorts_tab's old (0.6, 0.95) landed
+# on the Create button, and subscriptions_tab's landed between two tabs.
 SHORTS_TAB = Target(
     selectors=(*_desc("Shorts"), _id("pivot_shorts")),
-    fallback=(0.6, 0.95),
+    fallback=(0.30, 0.913),
     name="shorts_tab",
 )
 
 SUBSCRIPTIONS_TAB = Target(
     selectors=(*_desc("Subscriptions", "訂閱內容", "訂閱"), _id("pivot_subscriptions")),
-    fallback=(0.4, 0.95),
+    fallback=(0.70, 0.913),
     name="subscriptions_tab",
 )
 
 LIBRARY_TAB = Target(
-    # Renamed from "Library" to "You" in recent versions; both are listed
-    # rather than picking one, since which applies depends on the app build
-    # and a wrong guess costs a fallback to coordinates.
+    # "個人中心" is what a real zh-Hant-TW build labels this tab; the guesses
+    # it replaces ("你", "媒體庫") matched nothing. The bare "你" was worse than
+    # useless -- being a single character, substring matching found it inside a
+    # video title and resolved confidently to that video's overflow button.
+    # See uiauto.SHORT_LABEL_LENGTH for the guard that now prevents it.
     selectors=(
-        *_desc("You", "Library", "你", "媒體庫"),
+        *_desc("個人中心", "You", "Library", "媒體庫"),
         _id("pivot_library"),
     ),
-    fallback=(0.8, 0.95),
+    fallback=(0.90, 0.913),
     name="library_tab",
 )
 

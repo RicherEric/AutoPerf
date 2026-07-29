@@ -294,6 +294,27 @@ autoperf ui-dump --serial <SERIAL>
 and correct that one table. Nothing breaks in the meantime; wrong guesses just
 fall through to coordinates and say so.
 
+### Verified on a Chromecast (Google TV, Android 14)
+
+The first run against real hardware, and it changed two assumptions:
+
+- **`resource-id` is worthless on release builds here.** Every id in the Google
+  TV launcher came back as `0_resource_name_obfuscated` — resource names are
+  stripped by the release build's shrinker. Putting `content-desc` ahead of
+  `resource-id` in the chain turned out to matter far more than expected.
+- **YouTube on Google TV exposes no view hierarchy at all.** Its whole screen
+  is one fullscreen `android.view.View`: 15 nodes, zero labels, zero clickable
+  elements, unchanged after 10 seconds. It renders to a custom surface, so
+  **element location is impossible there** — not a limitation of TV, since the
+  TV Settings app dumps 76 nodes with 20 labelled and 11 clickable on the same
+  device. TV YouTube scenarios can only be driven blind, by DPAD key events.
+
+It also caught a real bug: `verify_foreground` compared a scenario's
+`com.google.android.youtube` against the `com.google.android.youtube.tv` the TV
+adapter actually launches, so **every TV run was marked unverified** while
+being perfectly healthy. Verification now applies the same package mapping as
+launching.
+
 ### Two caveats worth knowing before trusting this
 
 - `uiautomator dump` waits for the UI to be idle, and **a playing video is
