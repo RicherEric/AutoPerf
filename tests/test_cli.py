@@ -240,5 +240,143 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(storage.get_run(result["run_id"])["youtube_scenario"], result["scenario"])
 
 
+class CampaignCliTests(unittest.TestCase):
+    """The CLI must be able to drive a campaign with no Django, Celery or
+    Redis present -- the framework-first property the architecture bible
+    asks for, and the reason campaign logic lives in autoperf.campaigns
+    rather than in the dashboard's service layer."""
+
+    def _run(self, args):
+        out = io.StringIO()
+        with patch("autoperf.cli.AdbClient", FakeCampaignAdb):
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                code = cli.main(args)
+        return code, out.getvalue()
+
+    def test_start_creates_and_executes_a_repeat_campaign(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "cli.db"
+            code, out = self._run([
+                "--db", str(db), "campaign", "start", "--serial", "SERIAL1",
+                "--kind", "repeat", "--scenario", "cold_start",
+                "--iterations", "3", "--duration", "0.2",
+            ])
+            result = json.loads(out)
+            self.assertEqual(code, 0)
+            self.assertEqual(result["count"], 3)
+            self.assertEqual(result["executed"], 3)
+            self.assertEqual(result["status"], "completed")
+
+            storage = Storage(db)
+            runs = storage.list_campaign_runs(result["campaign_id"])
+            self.assertTrue(all(run["status"] == "completed" for run in runs))
+
+    def test_soak_start_runs_once_regardless_of_iterations(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "cli.db"
+            _, out = self._run([
+                "--db", str(db), "campaign", "start", "--serial", "SERIAL1",
+                "--kind", "soak", "--duration", "0.2", "--iterations", "20",
+            ])
+            self.assertEqual(json.loads(out)["count"], 1)
+
+    def test_create_only_persists_without_executing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "cli.db"
+            _, out = self._run([
+                "--db", str(db), "campaign", "start", "--serial", "SERIAL1",
+                "--kind", "repeat", "--scenario", "cold_start",
+                "--iterations", "2", "--duration", "0.2", "--create-only",
+            ])
+            campaign_id = json.loads(out)["campaign_id"]
+            storage = Storage(db)
+            statuses = [r["status"] for r in storage.list_campaign_runs(campaign_id)]
+            self.assertEqual(statuses, ["pending", "pending"])
+
+    def test_resume_executes_only_the_remaining_runs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "cli.db"
+            _, out = self._run([
+                "--db", str(db), "campaign", "start", "--serial", "SERIAL1",
+                "--kind", "repeat", "--scenario", "cold_start",
+                "--iterations", "3", "--duration", "0.2", "--create-only",
+            ])
+            campaign_id = json.loads(out)["campaign_id"]
+            storage = Storage(db)
+            storage.update_run(storage.list_campaign_runs(campaign_id)[0]["id"], "completed")
+
+            code, out = self._run(["--db", str(db), "campaign", "resume", campaign_id])
+            self.assertEqual(code, 0)
+            self.assertEqual(json.loads(out)["executed"], 2)
+
+    def test_invalid_spec_exits_nonzero_without_creating_a_campaign(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "cli.db"
+            code, _ = self._run([
+                "--db", str(db), "campaign", "start", "--serial", "SERIAL1",
+                "--kind", "repeat", "--duration", "30",
+            ])
+            self.assertEqual(code, 1)
+            self.assertEqual(Storage(db).list_campaigns(), [])
+
+    def test_list_show_and_cancel(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "cli.db"
+            _, out = self._run([
+                "--db", str(db), "campaign", "start", "--serial", "SERIAL1",
+                "--kind", "repeat", "--scenario", "cold_start",
+                "--iterations", "2", "--duration", "0.2",
+            ])
+            campaign_id = json.loads(out)["campaign_id"]
+
+            _, listed = self._run(["--db", str(db), "campaign", "list"])
+            self.assertEqual(json.loads(listed)[0]["id"], campaign_id)
+
+            _, shown = self._run(["--db", str(db), "campaign", "show", campaign_id])
+            detail = json.loads(shown)
+            self.assertEqual(detail["status"], "completed")
+            self.assertIn("repeat", detail)
+            # Child run rows are omitted unless asked for -- a long campaign's
+            # full run list would bury the analysis the command exists to show.
+            self.assertNotIn("runs", detail)
+
+            _, shown = self._run(["--db", str(db), "campaign", "show", campaign_id, "--runs"])
+            self.assertEqual(len(json.loads(shown)["runs"]), 2)
+
+            code, cancelled = self._run(["--db", str(db), "campaign", "cancel", campaign_id])
+            self.assertEqual(code, 0)
+            self.assertEqual(json.loads(cancelled)["campaign_id"], campaign_id)
+
+    def test_unknown_campaign_exits_nonzero(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "cli.db"
+            for command in (["campaign", "show", "missing"],
+                            ["campaign", "cancel", "missing"],
+                            ["campaign", "resume", "missing"]):
+                with self.subTest(command=command):
+                    code, _ = self._run(["--db", str(db), *command])
+                    self.assertEqual(code, 1)
+
+
+class FakeCampaignAdb:
+    """Answers everything a scenario-driven campaign run asks the device."""
+
+    def devices(self):
+        return [Device("SERIAL1", "device", "Pixel", "pixel")]
+
+    def shell(self, serial, command, timeout=10):
+        if command == "getprop ro.build.characteristics":
+            return "phone\n"
+        if command == "wm size":
+            return "Physical size: 1080x2340\n"
+        if command == "dumpsys cpuinfo":
+            return "1.0% TOTAL: 1.0% user + 0.0% kernel"
+        if command == "cat /proc/meminfo":
+            return "MemTotal: 100 kB\nMemAvailable: 50 kB\n"
+        if command == "dumpsys battery":
+            return " level: 50\n temperature: 300\n"
+        return ""
+
+
 if __name__ == "__main__":
     unittest.main()
