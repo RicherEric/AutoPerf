@@ -212,8 +212,27 @@ class AndroidTvAdapter(AndroidAdapter):
         super().launch_app(adb, serial, package, mapped_activity or activity, data)
 
     def stop_app(self, adb, serial, package):
-        package, _ = self._PACKAGE_MAP.get(package, (package, None))
-        super().stop_app(adb, serial, package)
+        super().stop_app(adb, serial, self.mapped_package(package))
+
+    def mapped_package(self, package: str) -> str:
+        """The package this adapter actually drives for `package`.
+
+        Scenarios are written against the phone package names; the TV variants
+        are substituted here. Verification has to apply the same substitution
+        or it compares a scenario's `com.google.android.youtube` against the
+        `com.google.android.youtube.tv` that was really launched and fails
+        every single time -- observed on a Chromecast, where it marked
+        otherwise healthy runs unverified.
+        """
+        mapped, _ = self._PACKAGE_MAP.get(package, (package, None))
+        return mapped
+
+    def verify_foreground(self, adb, serial, package):
+        return super().verify_foreground(adb, serial, self.mapped_package(package))
+
+    def verify_playing(self, adb, serial, package=None):
+        return super().verify_playing(
+            adb, serial, self.mapped_package(package) if package else None)
 
     def tap(self, adb, serial, x, y):
         self.key_event(adb, serial, DPAD_CENTER)

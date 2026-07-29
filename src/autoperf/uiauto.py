@@ -92,14 +92,16 @@ class Selector:
     clickable: bool | None = None
     index: int | None = None
     min_area: int | None = None
+    exact: bool = False
     description: str = ""
 
     def matches(self, node: Node) -> bool:
         if self.resource_id is not None and not _id_matches(self.resource_id, node.resource_id):
             return False
-        if self.text is not None and self.text.lower() not in node.text.lower():
+        if self.text is not None and not _text_matches(self.text, node.text, self.exact):
             return False
-        if self.content_desc is not None and self.content_desc.lower() not in node.content_desc.lower():
+        if self.content_desc is not None and not _text_matches(
+                self.content_desc, node.content_desc, self.exact):
             return False
         if self.class_name is not None and self.class_name not in node.class_name:
             return False
@@ -134,6 +136,26 @@ class Resolution:
     strategy: str          # "resource_id" | "content_desc" | "text" | "class" | "coordinates"
     selector_index: int | None = None
     node: Node | None = field(default=None, compare=False)
+
+
+# Labels at or below this length must match a node's whole label rather than
+# appearing anywhere inside it. Substring matching is the right default --
+# YouTube appends state and counts to its labels, so "喜歡這部影片" has to match
+# "喜歡這部影片，共 1.2 萬個喜歡" -- but it is actively dangerous for very short
+# labels. Observed on a Galaxy A55: the Library tab's "你" matched inside a
+# video title ("沒有聽完是你的損失"), so the selector confidently resolved to that
+# video's overflow-menu button and reported a successful match. A wrong match
+# is worse than no match: it taps the wrong control and looks like it worked.
+SHORT_LABEL_LENGTH = 2
+
+
+def _text_matches(wanted: str, actual: str, exact: bool) -> bool:
+    if not wanted:
+        return True
+    wanted, actual = wanted.lower(), (actual or "").lower()
+    if exact or len(wanted) <= SHORT_LABEL_LENGTH:
+        return wanted == actual
+    return wanted in actual
 
 
 def _id_matches(wanted: str, actual: str) -> bool:
@@ -271,8 +293,25 @@ def current_focus(adb: AdbClientProtocol, serial: str) -> tuple[str, str] | None
     return match.group(1), match.group(2)
 
 
-_PLAYBACK_STATE_RE = re.compile(r"state=PlaybackState\s*\{.*?state=(\d+)", re.DOTALL)
-_PLAYBACK_NUM_RE = re.compile(r"\bstate=(\d+)")
+# `dumpsys media_session` renders the inner state either as a bare number or,
+# on current Android, as a named constant carrying the number:
+#
+#     state=PlaybackState {state=PLAYING(3), position=37, ...}   <- Android 14/15
+#     state=PlaybackState {state=3, position=37, ...}            <- older
+#
+# Matching only the bare form made is_playing() return "unknown" on every
+# modern device, which meant verify_playing could never fail -- the strongest
+# check in the system quietly verified nothing. Observed on a Chromecast
+# running Android 14.
+_PLAYBACK_STATE_RE = re.compile(
+    r"state=PlaybackState\s*\{[^}]*?\bstate=(?:[A-Za-z_]+\((\d+)\)|(\d+))"
+)
+_PLAYBACK_NUM_RE = re.compile(r"\bstate=(?:[A-Za-z_]+\((\d+)\)|(\d+))")
+
+
+def _state_number(match: re.Match) -> int:
+    """The numeric state from whichever alternative the pattern matched."""
+    return int(next(group for group in match.groups() if group is not None))
 
 # android.media.session.PlaybackState
 STATE_PLAYING = 3
@@ -306,7 +345,7 @@ def is_playing(adb: AdbClientProtocol, serial: str, package: str | None = None) 
     match = _PLAYBACK_STATE_RE.search(output) or _PLAYBACK_NUM_RE.search(output)
     if not match:
         return None
-    return int(match.group(1)) == STATE_PLAYING
+    return _state_number(match) == STATE_PLAYING
 
 
 _VERSION_NAME_RE = re.compile(r"versionName=(\S+)")
