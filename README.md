@@ -32,13 +32,14 @@ The optional `--app <package>` flag drives the device via an `Adapter` (see `ada
 
 - `adb.py`: safe subprocess boundary and device discovery
 - `collectors.py`: plug-in sampling interface
-- `adapters.py`: plug-in device-control interface (launch/stop app, tap, swipe, key event)
+- `adapters.py`: plug-in device-control interface (launch/stop app, tap, swipe, key event) plus `select_adapter()`, which picks phone vs TV from `ro.build.characteristics`
+- `campaigns.py`: long-running soak/repeat programmes -- planning, execution, analysis
 - `runner.py`: lifecycle, scheduling, fault isolation, checkpoints
 - `storage.py`: WAL schema and single writer queue
 - `analyzer.py`: per-metric mean/stdev/min/max and baseline-vs-candidate comparison
 - `scenarios/`: relative-coordinate helpers (`coords.py`) and the YouTube preset library (`youtube.py`)
 - `screen_stream.py`: pure Annex-B NAL splitter / access-unit assembler used by the live-screen server
-- `cli.py`: headless control surface (`devices`, `run`, `run-many`, `status`, `baseline set/show`, `compare`, `youtube-scenarios list`)
+- `cli.py`: headless control surface (`devices`, `run`, `run-many`, `run-suite`, `status`, `baseline set/show`, `compare`, `youtube-scenarios list`, `campaign start/resume/list/show/cancel`)
 
 Run tests without third-party dependencies: `python -m unittest discover -s tests -v`.
 
@@ -188,8 +189,9 @@ header comment):
 ## Long-run regression testing (campaigns)
 
 A **campaign** is one long-running test programme that spawns many ordinary
-runs. Two kinds, started from the dashboard's **長時間測試 / Long-Run Tests**
-page (`/campaigns`, backed by `POST /api/campaigns`):
+runs. Two kinds, drivable from either the CLI or the dashboard's
+**長時間測試 / Long-Run Tests** page (`/campaigns`, backed by
+`POST /api/campaigns`):
 
 | Kind | What it does | What it catches |
 |---|---|---|
@@ -200,25 +202,51 @@ Child runs are plain `test_runs` rows tagged with a `campaign_id`, so
 baselines, the comparison endpoint, live screen, recordings and deletion all
 keep working on them unchanged.
 
-**Why there is no campaign orchestrator task.** All child runs are enqueued up
-front through the ordinary `trigger_run`/`run_test_task` path. A single
-long-lived Celery task looping for the campaign's duration looked simpler but
-behaves badly here: the Windows-compatible `--pool=solo` worker executes one
-task at a time, so a multi-hour campaign would monopolise it and stall every
-other device, and Celery re-delivers unacknowledged tasks, so a worker restart
-would silently begin again from iteration one. Pre-enqueueing reuses machinery
-that already works — same-device serialisation via `Storage.try_start_run()`,
-restart durability via Redis, fair interleaving with other devices. The
-consequence is that nothing "owns" campaign progress, so a campaign's status is
-*derived from its child runs on read* (`services._derived_campaign_status`).
-Cancellation is likewise one `UPDATE` flagging every unfinished child run
-(`Storage.cancel_campaign_runs`), which `TestRunner` already honours before
+```powershell
+autoperf campaign start --serial <SERIAL> --kind soak --scenario play_golden --duration 14400
+autoperf campaign start --serial <SERIAL> --kind repeat --tier smoke --iterations 20 --duration 30
+autoperf campaign list
+autoperf campaign show <CAMPAIGN_ID>
+autoperf campaign resume <CAMPAIGN_ID>
+autoperf campaign cancel <CAMPAIGN_ID>
+```
+
+Progress goes to stderr while the JSON result goes to stdout, so a campaign
+stays watchable at a terminal without breaking a pipe. `--create-only`
+persists a campaign without executing it; `resume` then executes whatever is
+left, skipping runs that already finished — which also makes it the recovery
+path after an interrupted campaign.
+
+### One core, two dispatch strategies
+
+`campaigns.py` owns planning, validation, execution and analysis, and depends
+on nothing beyond the framework core — no Django, no Celery, no Redis. The CLI
+and the dashboard differ only in *how they get the child runs run*:
+
+- **CLI** calls `campaigns.execute_campaign()`, a plain in-process loop. The
+  process *is* the campaign, so nothing more is needed.
+- **Dashboard** pre-enqueues each child run as its own Celery task. A single
+  long-lived orchestrator task looping for the campaign's duration looked
+  simpler but behaves badly there: the Windows-compatible `--pool=solo` worker
+  executes one task at a time, so a multi-hour campaign would monopolise it and
+  stall every other device, and Celery re-delivers unacknowledged tasks, so a
+  worker restart would silently begin again from iteration one. Pre-enqueueing
+  reuses machinery that already works — same-device serialisation via
+  `Storage.try_start_run()`, restart durability via Redis, fair interleaving
+  with other devices.
+
+Because the dashboard's strategy leaves nothing "owning" campaign progress, a
+campaign's status is *derived from its child runs on read*
+(`campaigns.derived_status`) rather than written by an orchestrator — which is
+also what lets both front ends report identical status without sharing an
+executor. Cancellation is likewise one `UPDATE` flagging every unfinished child
+run (`Storage.cancel_campaign_runs`), which `TestRunner` already honours before
 touching the device — no per-task `revoke()` against the solo pool's blind spot.
 
-`plan_campaign_runs` orders tier campaigns **iteration-major** (a full sweep of
-the tier, then the next) rather than scenario-major, so a campaign cut short
-still leaves an even number of samples for every scenario instead of fully
-sampling the first few and none of the rest.
+`CampaignSpec.planned_scenarios()` orders tier campaigns **iteration-major** (a
+full sweep of the tier, then the next) rather than scenario-major, so a
+campaign cut short still leaves an even number of samples for every scenario
+instead of fully sampling the first few and none of the rest.
 
 ### What long runs required changing first
 
