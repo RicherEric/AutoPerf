@@ -133,5 +133,51 @@ class AndroidAdapterTests(unittest.TestCase):
         ])
 
 
+class SelectAdapterTests(unittest.TestCase):
+    class _Props:
+        def __init__(self, value, fail=False):
+            self.value, self.fail = value, fail
+
+        def shell(self, serial, command, timeout=10):
+            if self.fail:
+                raise RuntimeError("device offline")
+            return self.value
+
+    def _select(self, value):
+        from autoperf.adapters import select_adapter
+
+        return select_adapter(self._Props(value), "SERIAL1")
+
+    def test_detects_tv_despite_the_trailing_newline_adb_returns(self):
+        """AdbClient._run returns adb's stdout verbatim, newline included.
+
+        `ro.build.characteristics` is very often exactly "tv", so the last
+        (here only) comma-separated entry arrives as "tv\\n". Comparing
+        without stripping missed it and silently handed the device the phone
+        adapter, which sends coordinate taps to hardware that only answers to
+        DPAD keys -- the scenario would appear to run and do nothing.
+        """
+        from autoperf.adapters import AndroidTvAdapter
+
+        for value in ("tv\n", "tv", "tv,nosdcard\n", "nosdcard,tv\n", "TV\n"):
+            with self.subTest(value=value):
+                self.assertIsInstance(self._select(value), AndroidTvAdapter)
+
+    def test_non_tv_devices_get_the_generic_adapter(self):
+        from autoperf.adapters import AndroidAdapter, AndroidTvAdapter
+
+        for value in ("phone\n", "default\n", "nosdcard\n", "\n", ""):
+            with self.subTest(value=value):
+                adapter = self._select(value)
+                self.assertIsInstance(adapter, AndroidAdapter)
+                self.assertNotIsInstance(adapter, AndroidTvAdapter)
+
+    def test_unreadable_property_falls_back_to_the_generic_adapter(self):
+        from autoperf.adapters import AndroidAdapter, select_adapter
+
+        adapter = select_adapter(self._Props("", fail=True), "SERIAL1")
+        self.assertIsInstance(adapter, AndroidAdapter)
+
+
 if __name__ == "__main__":
     unittest.main()

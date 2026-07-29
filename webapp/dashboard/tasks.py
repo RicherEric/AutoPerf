@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from celery import shared_task
 
-from autoperf.adapters import AndroidAdapter, AndroidTvAdapter
+from autoperf.adapters import select_adapter
 from autoperf.adb import AdbClient
 from autoperf.collectors import default_collectors
 from autoperf.runner import DeviceBusyError, TestRunner
@@ -41,8 +41,7 @@ def run_test_task(self, db_path: str, serial: str, duration: float, run_id: str,
     adapter = None
     scenario = None
     if youtube_scenario:
-        characteristics = adb.shell(serial, "getprop ro.build.characteristics").lower()
-        adapter = AndroidTvAdapter() if "tv" in characteristics.split(",") else AndroidAdapter()
+        adapter = select_adapter(adb, serial)
         screen = adapter.screen_size(adb, serial)
         scenario = youtube_scenarios.build(youtube_scenario, screen)
     try:

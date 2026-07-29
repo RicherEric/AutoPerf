@@ -145,6 +145,31 @@ class AndroidTvAdapter(AndroidAdapter):
         self.key_event(adb, serial, keycode)
 
 
+def select_adapter(adb: AdbClientProtocol, serial: str) -> Adapter:
+    """Pick the adapter matching what the device actually is.
+
+    `ro.build.characteristics` is a comma-separated list ("tv",
+    "tv,nosdcard", "phone", "default", ...). Each entry is stripped before
+    comparison because `AdbClient._run` returns adb's stdout verbatim,
+    trailing newline included -- so the final entry arrives as e.g. "tv\\n"
+    and a bare `"tv" in blob.split(",")` misses it. That silently handed
+    Android TVs the phone adapter, which sends `input tap`/`input swipe`
+    coordinates to a device that only responds to DPAD key events, so
+    scenarios appeared to run while doing nothing at all.
+
+    Falls back to the generic adapter if the property can't be read: an
+    unreadable characteristics string is not a reason to fail a whole run,
+    and the generic adapter is right for the large majority of devices.
+    """
+    try:
+        characteristics = adb.shell(serial, "getprop ro.build.characteristics").lower()
+    except Exception:
+        return AndroidAdapter()
+    if "tv" in {entry.strip() for entry in characteristics.split(",")}:
+        return AndroidTvAdapter()
+    return AndroidAdapter()
+
+
 @dataclass(frozen=True, slots=True)
 class ScenarioStep:
     at: float
