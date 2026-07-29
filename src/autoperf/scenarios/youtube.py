@@ -263,8 +263,13 @@ def library_and_downloads_browse(screen) -> list[ScenarioStep]:
     return [
         *_launch_verified(0.0),
         ScenarioStep(3.0, "tap_element", {"target": selectors.LIBRARY_TAB}),
-        ScenarioStep(5.0, "tap_element", {"target": selectors.DOWNLOADS_ROW}),
-        ScenarioStep(8.0, "key_event", {"keycode": BACK}),
+        # The downloads entry sits below the fold on 個人中心 -- measured on a
+        # Galaxy A55, where tapping straight after opening the tab found
+        # nothing no matter how good the selector was. Scrolling is part of
+        # reaching it, not an embellishment.
+        ScenarioStep(5.0, "swipe", coords.rel_swipe(screen, 0.5, 0.8, 0.5, 0.35)),
+        ScenarioStep(7.5, "tap_element", {"target": selectors.DOWNLOADS_ROW}),
+        ScenarioStep(11.0, "key_event", {"keycode": BACK}),
     ]
 
 

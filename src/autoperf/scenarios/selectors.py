@@ -139,17 +139,18 @@ SUBSCRIPTION_VIDEO = _feed_item(0, (0.5, 0.45), "subscription_video")
 SECOND_VIDEO = _feed_item(1, (0.5, 0.45), "second_video")
 THIRD_VIDEO = _feed_item(2, (0.5, 0.6), "third_video")
 DOWNLOADS_ROW = Target(
-    # Downloads is a Premium entitlement. On a free account the entry simply
-    # does not exist -- confirmed on a Galaxy A55, whose "個人中心" screen
-    # offers 觀看記錄 / 稍後觀看 / 你的影片 / 喜歡的影片 and an "升級至 Premium"
-    # upsell, with no Downloads row anywhere.
+    # Captured label: "已下載的內容". Two things about it are only learnable
+    # from a device. It sits *below the fold* on the 個人中心 screen, so the
+    # scenario scrolls before reaching for it -- tapping without scrolling
+    # found nothing however good the selector was. And it is gated on being
+    # signed in: the same phone signed out showed an "升級至 Premium" upsell
+    # and no downloads entry anywhere, scrolled or not.
     #
-    # The scenario's point is exercising the library-to-detail navigation, so
-    # the always-present entries are listed after it: a Premium account still
-    # opens Downloads, a free one still performs the same navigation, and
-    # neither has to fall through to a blind coordinate. Which one matched is
-    # recorded, so the difference stays visible.
-    selectors=(*_desc("Downloads", "已下載", "下載內容"),
+    # The always-present library entries follow it, so a signed-out or
+    # otherwise-limited account still performs the same library-to-detail
+    # navigation the scenario exists to measure rather than dropping to a
+    # blind coordinate. The recorded strategy says which one matched.
+    selectors=(*_desc("已下載的內容", "Downloads", "下載內容"),
                Selector(text="Downloads", clickable=True),
                *_desc("觀看記錄", "Watch history"),
                *_desc("稍後觀看", "Watch later"),
