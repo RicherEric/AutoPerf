@@ -346,6 +346,35 @@ class TvTapElementTests(unittest.TestCase):
         with self.assertRaises(VerificationError):
             AndroidTvAdapter().tap_element(ElementAdbStub(), "S1", self._target("Search"))
 
+    def test_verification_applies_the_same_package_mapping_as_launching(self):
+        """Observed on a Chromecast: every TV run was marked unverified.
+
+        Scenarios name the phone package and the TV adapter substitutes the
+        `.tv` variant when launching, so comparing the scenario's package
+        against what is actually in front failed unconditionally -- while the
+        run itself was perfectly healthy.
+        """
+        from autoperf.adapters import AndroidTvAdapter
+
+        adb = ElementAdbStub(focus_package="com.google.android.youtube.tv")
+        result = AndroidTvAdapter().verify_foreground(adb, "S1", "com.google.android.youtube")
+        self.assertTrue(result["verified"])
+
+    def test_verification_still_rejects_a_genuinely_wrong_app(self):
+        from autoperf.adapters import AndroidTvAdapter, VerificationError
+
+        adb = ElementAdbStub(focus_package="com.netflix.ninja")
+        with self.assertRaises(VerificationError):
+            AndroidTvAdapter().verify_foreground(adb, "S1", "com.google.android.youtube")
+
+    def test_mapped_package_leaves_unmapped_names_alone(self):
+        from autoperf.adapters import AndroidTvAdapter
+
+        adapter = AndroidTvAdapter()
+        self.assertEqual(adapter.mapped_package("com.google.android.youtube"),
+                         "com.google.android.youtube.tv")
+        self.assertEqual(adapter.mapped_package("com.example.other"), "com.example.other")
+
     def test_never_falls_back_to_coordinates_on_a_tv(self):
         from autoperf.adapters import AndroidTvAdapter, ElementNotFound
 

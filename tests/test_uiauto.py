@@ -150,6 +150,32 @@ class FocusAndPlaybackTests(unittest.TestCase):
         adb = self.FakeAdb({"media_session": "package=com.google.android.youtube\n state=PlaybackState {state=2, position=0}"})
         self.assertIs(uiauto.is_playing(adb, "S1"), False)
 
+    def test_reads_the_named_state_form_current_android_emits(self):
+        """Verbatim from a Chromecast on Android 14.
+
+        Only the bare-number form was handled at first, so is_playing()
+        returned "unknown" on every current device -- which meant
+        verify_playing could never fail, and the strongest check in the system
+        quietly verified nothing.
+        """
+        adb = self.FakeAdb({"media_session":
+                            "      package=com.google.android.youtube.tv\n"
+                            "      state=PlaybackState {state=PLAYING(3), position=37, "
+                            "buffered position=0, speed=1.0, updated=256403092, actions=382}"})
+        self.assertIs(uiauto.is_playing(adb, "S1"), True)
+
+    def test_reads_the_named_paused_state(self):
+        adb = self.FakeAdb({"media_session":
+                            "package=com.google.android.youtube\n"
+                            " state=PlaybackState {state=PAUSED(2), position=37}"})
+        self.assertIs(uiauto.is_playing(adb, "S1"), False)
+
+    def test_a_stopped_session_for_another_app_does_not_count_as_playing(self):
+        adb = self.FakeAdb({"media_session":
+                            "package=com.google.android.bluetooth\n"
+                            " state=PlaybackState {state=ERROR(7), position=0}"})
+        self.assertIs(uiauto.is_playing(adb, "S1", "com.google.android.youtube"), False)
+
     def test_unknown_playback_state_is_none_not_false(self):
         # "couldn't tell" must be distinguishable from "not playing", or a
         # momentarily unavailable dumpsys would fail runs for the wrong reason.
