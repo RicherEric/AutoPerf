@@ -277,8 +277,36 @@ def resolve(target: Target, nodes: list[Node], screen: tuple[int, int]) -> Resol
     return None
 
 
-def dump_hierarchy(adb: AdbClientProtocol, serial: str, timeout: float = 15.0) -> str:
-    """Capture the device's current UI hierarchy as XML."""
+def dump_hierarchy(adb: AdbClientProtocol, serial: str, timeout: float = 6.0) -> str:
+    """Capture the device's current UI hierarchy as XML.
+
+    The most expensive thing this project asks a device to do, by a factor of
+    twenty. Measured on a Galaxy A55, Android 15, median of five:
+
+        launcher, idle .............. 2.60s
+        YouTube home feed ........... 2.73s
+        watch page, video playing ... 3.01s median, 11.66s worst
+
+    Every other read is around 0.12s. `uiautomator dump` waits for an idle UI
+    and a playing video is never idle, which is where the long tail comes from.
+
+    The default timeout is 6s, not the 15s it was: 15 exceeds the runner's whole
+    per-action budget, so a single slow dump could take a step past it with
+    nothing to show. Being cut off and falling back to a coordinate is a worse
+    answer than a match and a much better one than a killed step.
+
+    Three cheaper-looking alternatives were measured and rejected:
+
+        uiautomator dump --compressed   6% faster, and 27 nodes instead of 72 --
+                                        it prunes the views selectors need
+        shell ... /dev/tty              returns no XML at all, only a status line
+        exec-out ... /dev/tty           2% faster, and appends a status line
+                                        after the closing tag, so it does not parse
+
+    All three are within 12% of each other because the cost is `uiautomator
+    dump` waiting for idle, not the transport. The only optimisation that
+    matters is dumping less often.
+    """
     output = adb.shell(serial, f"uiautomator dump {_DUMP_PATH}", timeout=timeout)
     if "ERROR" in output.upper() and "dumped" not in output.lower():
         raise UiDumpError(output.strip() or "uiautomator dump failed")
