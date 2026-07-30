@@ -44,8 +44,36 @@ The optional `--app <package>` flag drives the device via an `Adapter` (see `ada
 - `screen_stream.py`: pure Annex-B NAL splitter / access-unit assembler used by the live-screen server
 - `cli.py`: headless control surface (`devices`, `run`, `run-many`, `run-suite`, `status`, `baseline set/show`, `compare`, `youtube-scenarios list`, `campaign start/resume/list/show/cancel`)
 
-Run tests without third-party dependencies: `python -m unittest discover -s tests -v`.
-The webapp's are separate: `python webapp\manage.py test dashboard livescreen`.
+### Tests
+
+```powershell
+python scripts/run-tests.py            # everything: 320 core + 111 webapp
+python scripts/run-tests.py --list     # the groups, and when each one fails
+python scripts/run-tests.py elements   # just one group
+```
+
+Grouped by **what makes a test fail**, not by filename — that is the division
+that tells you where to look when something breaks and where to add when you
+write something new:
+
+| Group | Fails when |
+| --- | --- |
+| `logic` | our own logic changes. Nothing here knows a device exists. |
+| `parsing` | a device says something other than what a fixture assumed. Every hand-written device-output fixture is here. |
+| `commands` | the shape of a command we send changes. |
+| `elements` | selector resolution or a `verify_*` action changes. |
+| `flow` | a whole flow breaks against a fake device (runner, campaigns, preflight, CLI). |
+| `webapp` | the API, a Celery task, or live-screen streaming breaks. |
+
+A test module in no group, or in two, fails `test_suite_groups.py` — so placing
+a new file is a decision rather than something to discover later. The plain
+runners still work if you want them: `python -m unittest discover -s tests` and
+`python webapp\manage.py test dashboard livescreen`.
+
+Test files mirror the production boundary they cover, so where a test belongs is
+never a judgement call: `test_adapters.py` covers the `Adapter` ABC's primitives
+(what gets sent), `test_adapters_elements.py` covers the `ElementActionsMixin`
+built on top of them.
 
 Device-facing tests share two doubles from `tests/support.py`: `RecordingAdb`
 asserts what was *sent*, `DeviceAdb` supplies what the device *replies*. An
