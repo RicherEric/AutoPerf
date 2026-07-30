@@ -1,14 +1,7 @@
 import unittest
 
 from autoperf.collectors import BatteryCollector, CpuCollector, MemoryCollector, default_collectors
-
-
-class ScriptedAdb:
-    def __init__(self, response: str):
-        self.response = response
-
-    def shell(self, serial, command, timeout=10):
-        return self.response
+from tests.support import RecordingAdb as ScriptedAdb   # one canned reply is all these need
 
 
 class CollectorErrorTests(unittest.TestCase):

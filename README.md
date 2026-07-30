@@ -45,6 +45,14 @@ The optional `--app <package>` flag drives the device via an `Adapter` (see `ada
 - `cli.py`: headless control surface (`devices`, `run`, `run-many`, `run-suite`, `status`, `baseline set/show`, `compare`, `youtube-scenarios list`, `campaign start/resume/list/show/cancel`)
 
 Run tests without third-party dependencies: `python -m unittest discover -s tests -v`.
+The webapp's are separate: `python webapp\manage.py test dashboard livescreen`.
+
+Device-facing tests share two doubles from `tests/support.py`: `RecordingAdb`
+asserts what was *sent*, `DeviceAdb` supplies what the device *replies*. An
+unlisted command raises rather than returning `""`, so "the code only issues
+these commands" is an assertion rather than a hope; pass `allow_unknown=True`
+to opt out. Waits are zeroed by the `NoWaits` mixin, or better, by the
+`timeout=` a check already accepts.
 
 ## YouTube scenario library
 
@@ -219,8 +227,20 @@ came to the front (`am start` returns success once the intent is *dispatched*,
 not once the app is usable). `verify_playing` reads `dumpsys media_session` --
 the only check that distinguishes "search_and_play worked" from "four taps hit
 empty space and the home feed is still showing", since a foreground check
-passes in both cases. Either raises `VerificationError`, which the runner
-records as `verification_failed`.
+passes in both cases. `verify_element_state` reads a control's own
+`selected`/`checked` attribute -- the only evidence that a like or a subscribe
+actually registered, as opposed to its button having been found and tapped.
+Any of them raises `VerificationError`, which the runner records as
+`verification_failed`.
+
+Unlike every other action, `verify_element_state` refuses the coordinate
+fallback: a pixel has no state to read, so an unmatched selector is reported
+as "could not tell" (`verified: None`) rather than as "not selected". Same for
+a build that never exposes the attribute, or a signed-out account whose like
+button cannot change -- none of those are performance problems, and failing a
+run for them is the mistake this layer exists to avoid. Whether a given
+control reports its state is a fact about the build: dump the screen with the
+toggle pressed (`autoperf ui-dump`) and look, before writing the assertion.
 
 **Unverified runs are their own verdict**, alongside the existing
 `no_baseline` bucket -- neither pass nor fail, and excluded from the pass-rate

@@ -8,14 +8,11 @@ from autoperf.adapters import HOME, Adapter, AndroidAdapter, ScenarioStep
 from autoperf.collectors import Collector, CpuCollector
 from autoperf.runner import DeviceBusyError, TestRunner
 from autoperf.storage import Storage
+from tests.support import DeviceAdb
 
 
-class FakeAdb:
-    def shell(self, serial, command, timeout=10):
-        return {
-            "dumpsys cpuinfo": "1.0% TOTAL: 1.0% user + 0.0% kernel",
-            "monkey -p com.example.app -c android.intent.category.LAUNCHER 1": "",
-        }[command]
+def FakeAdb():
+    return DeviceAdb(metrics=True)
 
 
 class BoomCollector(Collector):
@@ -464,17 +461,16 @@ class CancelStopsTheDeviceFirstTests(unittest.TestCase):
 
 class AppVersionRecordingTests(unittest.TestCase):
     def test_records_the_launched_package_version(self):
-        class VersionAdb(FakeAdb):
-            def shell(self, serial, command, timeout=10):
-                if command.startswith("dumpsys package"):
-                    return "  versionCode=1543012928\n  versionName=19.09.37\n"
-                return super().shell(serial, command)
-
+        # A device that can report its build, which is one more reply rather
+        # than one more class.
+        version_adb = DeviceAdb(metrics=True, replies={
+            "dumpsys package com.example.app": "  versionCode=1543012928\n  versionName=19.09.37\n",
+        })
         with tempfile.TemporaryDirectory() as directory:
             storage = Storage(Path(directory) / "db.sqlite")
             storage.initialize()
             TestRunner(
-                storage, VersionAdb(), [CpuCollector(interval=0.05)],
+                storage, version_adb, [CpuCollector(interval=0.05)],
                 adapter=AndroidAdapter(),
                 scenario=[ScenarioStep(0.0, "launch_app", {"package": "com.example.app"})],
                 heartbeat_interval=0.25,
