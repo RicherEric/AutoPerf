@@ -197,6 +197,9 @@ def quality_switch_manual(screen) -> list[ScenarioStep]:
 
 
 def like_video(screen) -> list[ScenarioStep]:
+    # No assertion after the tap, and not for want of a mechanism:
+    # verify_element_state exists and works, but this build's like button
+    # reports no state to check. See selectors.LIKE_BUTTON for the measurement.
     return _enter_video_steps(screen, 0.0) + [
         ScenarioStep(12.0, "tap_element", {"target": selectors.LIKE_BUTTON}),
     ]
