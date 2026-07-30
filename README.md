@@ -270,6 +270,16 @@ run for them is the mistake this layer exists to avoid. Whether a given
 control reports its state is a fact about the build: dump the screen with the
 toggle pressed (`autoperf ui-dump`) and look, before writing the assertion.
 
+**Locating by identity is not free, and the run says how much it cost.**
+`uiautomator dump` takes one to three seconds on a real phone and is CPU-heavy
+-- and it runs while the collectors sample that same CPU. A hit costs one dump;
+a miss costs three, because the resolver retries for an app that has not drawn
+yet. Each lookup records a `ui_introspection` event with its dump count and
+seconds, and `run_quality` reports `ui_introspections`, so a run with many
+lookups is not silently compared against one with none. The `play_*` deep-link
+presets touch nothing and cost zero, which is part of why they are the right
+tool for baseline comparison.
+
 **Unverified runs are their own verdict**, alongside the existing
 `no_baseline` bucket -- neither pass nor fail, and excluded from the pass-rate
 denominator. Counting one as a pass would hide a broken test; counting it as a
