@@ -118,6 +118,18 @@ def parser() -> argparse.ArgumentParser:
     ui_dump.add_argument("--serial", required=True)
     ui_dump.add_argument("--limit", type=int, default=60)
     ui_dump.add_argument("--raw", action="store_true", help="print the raw hierarchy XML instead")
+
+    cap = commands.add_parser(
+        "capture",
+        help="store what the device says about the current screen, as a test fixture",
+    )
+    cap.add_argument("--serial", required=True)
+    cap.add_argument("--name", default=None,
+                     help="what screen this is, e.g. home_feed or watch_page")
+    cap.add_argument("--app", default=None,
+                     help="package to pin the capture to, so it records which build it came from")
+    cap.add_argument("--list", action="store_true", dest="list_only",
+                     help="list stored captures and stop")
     return root
 
 
@@ -385,6 +397,29 @@ def main(argv: list[str] | None = None) -> int:
             for entry in summary["needs_attention"]:
                 print(f"  {entry['target']}: {entry['detail']}", file=sys.stderr)
         return code
+    elif args.command == "capture":
+        # A hand-written fixture is a guess about a device nobody had in front
+        # of them, and the git log records what that costs: a parser that
+        # matched no modern device, nineteen wrong selector labels, a search
+        # flow that never typed. This is how a test gets evidence instead.
+        from . import capture as capture_core
+
+        if args.list_only:
+            print(json.dumps(capture_core.list_captures(), indent=2, ensure_ascii=False))
+            return 0
+        if not args.name:
+            print("error: --name is required (what screen is this?)", file=sys.stderr)
+            return 2
+        try:
+            entry = capture_core.capture_screen(adb, args.serial, args.name, package=args.app)
+        except Exception as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        print(json.dumps(entry, indent=2, ensure_ascii=False))
+        print(f"stored {len(entry['reads'])} read(s) for {entry['name']!r} "
+              f"from {entry['device']['model']} / Android {entry['device']['android_release']}",
+              file=sys.stderr)
+
     elif args.command == "ui-dump":
         # The resource-ids and labels in scenarios/selectors.py cannot be
         # verified without the app in front of you -- they are internal to

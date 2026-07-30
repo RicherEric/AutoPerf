@@ -137,11 +137,13 @@ RESULT_THUMBNAIL = _feed_item(0, (0.5, 0.35), "result_thumbnail")
 HOME_FEED_VIDEO = _feed_item(0, (0.5, 0.45), "home_feed_video")
 SUBSCRIPTION_VIDEO = _feed_item(0, (0.5, 0.45), "subscription_video")
 
-# Measured on a Galaxy A55 (1080x2340): the home feed shows two rows above the
-# fold, so `third_video`'s index-2 selector cannot match without scrolling and
-# falls through to its coordinate. Left as it is deliberately -- the coordinate
-# is the honest answer for "a row that is not on screen", and hard-coding a
-# scroll into a target would hide the reason from the preflight report.
+# `third_video` is the least reliable entry in this table, and the evidence says
+# why. On a Galaxy A55 it matched the captured home feed but fell through to its
+# coordinate in a live run seconds earlier: an index-2 structural selector needs
+# three feed rows to have rendered, and how many have depends on scroll position
+# and on how far the feed has loaded. Left as it is deliberately -- the
+# coordinate is the honest answer for "a row that is not there yet", and
+# hard-coding a scroll into a target would hide the reason from preflight.
 SECOND_VIDEO = _feed_item(1, (0.5, 0.45), "second_video")
 THIRD_VIDEO = _feed_item(2, (0.5, 0.6), "third_video")
 DOWNLOADS_ROW = Target(
