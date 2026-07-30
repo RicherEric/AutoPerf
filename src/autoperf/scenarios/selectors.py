@@ -136,6 +136,12 @@ FIRST_SUGGESTION = Target(
 RESULT_THUMBNAIL = _feed_item(0, (0.5, 0.35), "result_thumbnail")
 HOME_FEED_VIDEO = _feed_item(0, (0.5, 0.45), "home_feed_video")
 SUBSCRIPTION_VIDEO = _feed_item(0, (0.5, 0.45), "subscription_video")
+
+# Measured on a Galaxy A55 (1080x2340): the home feed shows two rows above the
+# fold, so `third_video`'s index-2 selector cannot match without scrolling and
+# falls through to its coordinate. Left as it is deliberately -- the coordinate
+# is the honest answer for "a row that is not on screen", and hard-coding a
+# scroll into a target would hide the reason from the preflight report.
 SECOND_VIDEO = _feed_item(1, (0.5, 0.45), "second_video")
 THIRD_VIDEO = _feed_item(2, (0.5, 0.6), "third_video")
 DOWNLOADS_ROW = Target(
@@ -173,11 +179,20 @@ PLAYER_SURFACE = Target(
 )
 
 LIKE_BUTTON = Target(
-    # Captured label: "和另外 11,235 人都喜歡這部影片" -- the count is part of it,
-    # so only a substring can match. Note "喜歡" alone would NOT: at two
+    # Captured label: "和另外 19,258,638 人都喜歡這部影片" -- the count is part of
+    # it, so only a substring can match. Note "喜歡" alone would NOT: at two
     # characters it trips uiauto.SHORT_LABEL_LENGTH and is compared exactly,
     # which is the guard that stopped a one-character label matching inside a
     # video title. The longer phrase is both safer and more specific.
+    #
+    # Do NOT point verify_element_state at this. Measured on a Galaxy A55,
+    # Android 15, by dumping the node before and after a real tap: `selected`
+    # and `checked` are both False either way, and the only thing that changes
+    # is the like *count* inside the label -- which is global traffic on the
+    # video, not this device's tap (it moved by 13 between two reads seconds
+    # apart). There is nothing here to assert on: a state check would report a
+    # failure for every run, and a before/after comparison would read other
+    # people's likes as proof of ours.
     selectors=(
         *_desc("喜歡這部影片", "like this video"),
         _id("like_button"),

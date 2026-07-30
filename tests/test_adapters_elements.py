@@ -61,6 +61,80 @@ class WaitSurfaceTests(unittest.TestCase):
         self.assertEqual(AndroidAdapter().waits.playback_timeout, Waits().playback_timeout)
 
 
+class ResolveBudgetTests(unittest.TestCase):
+    """A retry that gets the step killed is worse than no retry.
+
+    Measured on a Galaxy A55, one `uiautomator dump`: 2.60s on an idle
+    launcher, 2.73s on the YouTube home feed, 3.01s median on a playing watch
+    page with an 11.66s worst case -- the command waits for an idle UI and a
+    playing video is never idle. Three attempts plus two retry delays is 11.0s
+    at the median, against a 10.0s per-action timeout in the runner. So the
+    retry meant to rescue an early arrival instead lost the whole step.
+    """
+
+    def _target(self, desc="no such label"):
+        from autoperf.uiauto import Selector, Target
+
+        return Target(selectors=(Selector(content_desc=desc, clickable=True),),
+                      fallback=(0.5, 0.5), name="target")
+
+    def test_the_budget_must_fit_inside_the_runners_per_action_timeout(self):
+        """The invariant the measurement violated, pinned across two modules.
+
+        Nothing connected the resolve budget to the timeout that kills the
+        action it runs inside, which is exactly why they could contradict.
+        """
+        from dataclasses import fields
+
+        from autoperf.adapters import Waits
+        from autoperf.runner import TestRunner
+
+        # Read through `fields`: TestRunner is a slots dataclass, so the class
+        # attribute is a descriptor rather than the default value.
+        budget = next(f.default for f in fields(TestRunner)
+                      if f.name == "adapter_action_timeout")
+        waits = Waits()
+        self.assertLess(waits.resolve_budget, budget)
+        # A single dump must not be able to outlive the action either: the
+        # default was 15s, which alone exceeded the whole budget.
+        self.assertLess(waits.dump_timeout, budget)
+
+    def test_a_slow_device_gets_one_attempt_rather_than_a_killed_step(self):
+        from autoperf.adapters import Waits
+
+        adapter = AndroidAdapter(waits=Waits(resolve_retry=0.0, resolve_budget=0.06))
+        adb = DeviceAdb(dump_latency=0.05)
+        cost = {}
+        adapter._resolve(adb, "S1", self._target(), (1080, 2340), cost)
+
+        self.assertEqual(cost["dumps"], 1, "spent more than the budget allowed")
+        self.assertTrue(cost["resolve_budget_spent"])
+
+    def test_a_fast_device_still_gets_every_attempt(self):
+        # The retry exists for a real condition -- arriving before the app has
+        # drawn -- so a generous budget must not quietly disable it.
+        from autoperf.adapters import Waits
+
+        adapter = AndroidAdapter(waits=Waits(resolve_retry=0.0, resolve_budget=30.0))
+        adb = DeviceAdb()
+        cost = {}
+        adapter._resolve(adb, "S1", self._target(), (1080, 2340), cost)
+
+        self.assertEqual(cost["dumps"], 3)
+        self.assertNotIn("resolve_budget_spent", cost)
+
+    def test_a_match_stops_the_retrying_immediately(self):
+        from autoperf.adapters import Waits
+
+        adapter = AndroidAdapter(waits=Waits(resolve_retry=0.0))
+        adb = DeviceAdb()
+        cost = {}
+        resolution, _ = adapter._resolve(adb, "S1", self._target("Search"), (1080, 2340), cost)
+
+        self.assertEqual(resolution.strategy, "content_desc")
+        self.assertEqual(cost["dumps"], 1)
+
+
 class VerifyPlayingWaitTests(unittest.TestCase):
     """Playback starts asynchronously, so the check waits rather than samples.
 

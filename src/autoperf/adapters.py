@@ -149,8 +149,25 @@ class Waits:
     # single-shot lookup found nothing and reported the selector as decayed
     # when the real problem was arriving early. Retrying briefly turns that
     # common case back into a match.
+    #
+    # `resolve_attempts` is a ceiling, not a plan: what actually stops the
+    # retrying is `resolve_budget`, because an attempt's cost is not a constant.
+    # Measured on a Galaxy A55, one `uiautomator dump`:
+    #
+    #     launcher, idle .............. 2.60s
+    #     YouTube home feed ........... 2.73s
+    #     watch page, video playing ... 3.01s median, 11.66s worst
+    #
+    # `uiautomator dump` waits for an idle UI and a playing video is never
+    # idle, so the tail is long and unbounded. Three attempts plus two retry
+    # delays is 11.0s at the *median* against TestRunner.adapter_action_timeout
+    # of 10.0s -- so the retry that exists to rescue an early arrival instead
+    # got the step killed, which is strictly worse than not retrying at all.
     resolve_attempts: int = 3
     resolve_retry: float = 1.0
+    # Total for all attempts. Must stay under the runner's per-action timeout,
+    # which a test asserts; the margin covers the tap that follows the lookup.
+    resolve_budget: float = 7.0
 
     # A state check fired immediately after a tap is the same mistake as a
     # fixed-time tap, one layer up: the app needs a moment to re-render the
@@ -165,6 +182,12 @@ class Waits:
     # because a livestream was still buffering.
     playback_timeout: float = 8.0
     playback_poll: float = 0.5
+
+    # One `uiautomator dump`. The default was 15s, which alone exceeds the
+    # runner's per-action timeout -- a single slow dump could take the step
+    # past its budget with nothing to show. Sized to the observed worst case
+    # (11.66s on a playing watch page) being cut off rather than waited out.
+    dump_timeout: float = 6.0
 
     # How many DPAD presses focus may take to reach a target before the step is
     # called a failure. Bounded because a target focus cannot reach
@@ -238,25 +261,37 @@ class ElementActionsMixin:
 
         screen = screen or self.screen_size(adb, serial)
         resolution = None
+        deadline = time.monotonic() + self.waits.resolve_budget
         for attempt in range(self.waits.resolve_attempts):
             started = time.monotonic()
             try:
-                nodes = uiauto.parse_hierarchy(uiauto.dump_hierarchy(adb, serial))
+                nodes = uiauto.parse_hierarchy(
+                    uiauto.dump_hierarchy(adb, serial, timeout=self.waits.dump_timeout))
             except Exception:
                 # A failed dump must not be fatal on its own: the coordinate
                 # fallback is exactly as good as the behaviour that preceded
                 # this module, so degrade to it rather than failing the step.
                 nodes = []
+            spent = time.monotonic() - started
             if cost is not None:
                 # A dump that raised still cost the device the attempt.
                 cost["dumps"] = cost.get("dumps", 0) + 1
-                cost["dump_seconds"] = round(
-                    cost.get("dump_seconds", 0.0) + (time.monotonic() - started), 3)
+                cost["dump_seconds"] = round(cost.get("dump_seconds", 0.0) + spent, 3)
             resolution = uiauto.resolve(target, nodes, screen)
             # Only a *selector* match ends the retry loop. Stopping at the
             # coordinate fallback would defeat the point, since the fallback
             # is available on the first attempt and every attempt after it.
             if resolution is not None and resolution.strategy != "coordinates":
+                break
+            # Retry only if another attempt can finish. The last dump's own
+            # duration is the estimate, which makes this self-calibrating: on a
+            # device where dumps are quick the full three attempts run, and on
+            # one where they are slow a single attempt runs and falls back to
+            # the coordinate -- which is a worse answer than a match and a far
+            # better one than a step the runner kills mid-flight.
+            if time.monotonic() + self.waits.resolve_retry + spent > deadline:
+                if cost is not None:
+                    cost["resolve_budget_spent"] = True
                 break
             if attempt < self.waits.resolve_attempts - 1:
                 time.sleep(self.waits.resolve_retry)

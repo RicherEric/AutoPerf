@@ -26,6 +26,7 @@ where you happened to be.
 
 from __future__ import annotations
 
+import time
 from unittest.mock import patch
 
 SCREEN = (1080, 2340)
@@ -111,6 +112,7 @@ class DeviceAdb:
                  playback_state: int | None = PLAYING, playback_states: list[int | None] | None = None,
                  screen: tuple[int, int] = SCREEN, metrics: bool = False,
                  characteristics: str = "phone", dump_fails: bool | str = False,
+                 dump_latency: float = 0.0,
                  replies: dict[str, str] | None = None, fail_first: dict[str, int] | None = None,
                  allow_unknown: bool = False):
         self.hierarchy = hierarchy
@@ -120,6 +122,12 @@ class DeviceAdb:
         self.screen = screen
         self.characteristics = characteristics
         self.dump_fails = dump_fails
+        # A stub answers instantly; a device does not. Measured on a Galaxy
+        # A55, one `uiautomator dump` costs 2.6s on an idle screen and up to
+        # 11.7s on a playing watch page -- which is what makes the resolve
+        # budget bind in production and never in a test. Set this to make a
+        # test feel what the device feels.
+        self.dump_latency = dump_latency
         self.replies = dict(replies or {})
         if metrics:
             self.replies.update(METRIC_REPLIES)
@@ -172,6 +180,8 @@ class DeviceAdb:
     # -- handlers ----------------------------------------------------------
     def _dump(self):
         self.dumps += 1
+        if self.dump_latency:
+            time.sleep(self.dump_latency)
         if self.dump_fails:
             reason = self.dump_fails if isinstance(self.dump_fails, str) else "could not get idle state"
             raise RuntimeError(reason)
