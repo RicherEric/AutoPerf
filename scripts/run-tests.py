@@ -37,10 +37,11 @@ GROUPS: dict[str, tuple[str, tuple[str, ...]]] = {
          "test_scenarios_youtube", "test_screen_stream", "test_suite_groups"),
     ),
     "parsing": (
-        "Reading what a device says. Every hand-written fixture of device output "
-        "lives here, which makes this the group that goes stale when a device or "
-        "Android version differs from what was assumed.",
-        ("test_adb", "test_uiauto", "test_collectors_errors"),
+        "Reading what a device says. The fixtures live here, so this is the "
+        "group that goes stale when a device, an Android version or an app "
+        "build differs from what was assumed -- and test_captures is the only "
+        "part of the suite checked against what a device really said.",
+        ("test_adb", "test_uiauto", "test_collectors_errors", "test_captures"),
     ),
     "commands": (
         "What we send to a device: command strings, argument validation, and "
