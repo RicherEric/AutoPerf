@@ -125,6 +125,65 @@ class TapElementTests(NoWaits, unittest.TestCase):
             )
 
 
+class IntrospectionCostTests(NoWaits, unittest.TestCase):
+    """What a lookup costs the device, which a fake device otherwise hides.
+
+    `uiautomator dump` takes one to three seconds on a real phone and is
+    CPU-heavy, running concurrently with the collectors sampling that CPU. A
+    stub answers instantly, so every one of these numbers used to be free here
+    and expensive in production.
+    """
+
+    def _target(self, desc, fallback=(0.5, 0.5)):
+        from autoperf.uiauto import Selector, Target
+
+        return Target(selectors=(Selector(content_desc=desc, clickable=True),),
+                      fallback=fallback, name=desc)
+
+    def test_a_hit_costs_exactly_one_dump(self):
+        adb = DeviceAdb()
+        result = AndroidAdapter().tap_element(adb, "S1", self._target("Search"))
+        self.assertEqual(result["dumps"], 1)
+        self.assertEqual(adb.dumps, 1)
+
+    def test_a_miss_costs_one_dump_per_retry(self):
+        # The retry is deliberate -- a step can fire before the app has drawn --
+        # but it means a decayed selector is three times as expensive as a
+        # working one, on the platform where dumps are slow.
+        adb = DeviceAdb()
+        result = AndroidAdapter().tap_element(adb, "S1", self._target("no such label"))
+        self.assertEqual(result["strategy"], "coordinates")
+        self.assertEqual(result["dumps"], 3)
+        self.assertEqual(adb.dumps, 3)
+
+    def test_the_unrotated_size_is_read_once_no_matter_how_many_actions(self):
+        """It cannot change during a run, and it was on every action's path.
+
+        Rotation still is re-read every time, because that is the part that
+        moves.
+        """
+        adb = DeviceAdb()
+        adapter = AndroidAdapter()
+        for _ in range(4):
+            adapter.tap_element(adb, "S1", self._target("Search"))
+        self.assertEqual(adb.commands.count("wm size"), 1)
+        self.assertEqual(adb.commands.count("dumpsys window displays"), 4)
+
+    def test_a_failed_dump_still_reports_what_it_cost(self):
+        # The device spent the time whether or not it answered.
+        adb = DeviceAdb(dump_fails=True)
+        result = AndroidAdapter().tap_element(adb, "S1", self._target("Search"))
+        self.assertEqual(result["dumps"], 3)
+        self.assertIn("dump_seconds", result)
+
+    def test_a_state_check_reports_the_dumps_its_wait_spent(self):
+        adb = DeviceAdb(hierarchy=TOGGLES)
+        result = AndroidAdapter().verify_element_state(
+            adb, "S1", self._target("喜歡這部影片"), state="selected", expected=True, timeout=0)
+        self.assertTrue(result["verified"])
+        self.assertGreaterEqual(result["dumps"], 1)
+
+
 class VerificationActionTests(unittest.TestCase):
     def test_foreground_check_passes_for_the_expected_package(self):
         from autoperf.adapters import AndroidAdapter

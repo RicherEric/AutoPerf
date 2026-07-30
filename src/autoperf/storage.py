@@ -250,11 +250,19 @@ class Storage:
         the step worked via its coordinate, exactly as it always did -- but it
         is the early warning that a selector has gone stale.
         """
-        counts = self.count_run_events(run_id, ("verification_failed", "selector_fallback"))
+        counts = self.count_run_events(
+            run_id, ("verification_failed", "selector_fallback", "ui_introspection"))
         failures = counts.get("verification_failed", 0)
         return {
             "verification_failures": failures,
             "selector_fallbacks": counts.get("selector_fallback", 0),
+            # How much of this run the tool spent reading the screen. Not a
+            # failure and not a warning -- it is the cost of locating elements
+            # by identity instead of by coordinate, and it lands on the same
+            # CPU the collectors are sampling. A comparison between a run with
+            # many lookups and one with none is not comparing like with like,
+            # and that was previously impossible to notice.
+            "ui_introspections": counts.get("ui_introspection", 0),
             "verified": failures == 0,
         }
 

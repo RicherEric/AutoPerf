@@ -157,12 +157,29 @@ class ElementActionsMixin:
     RESOLVE_ATTEMPTS = 3
     RESOLVE_RETRY_DELAY = 1.0
 
-    def _resolve(self, adb: AdbClientProtocol, serial: str, target, screen=None):
+    def _resolve(self, adb: AdbClientProtocol, serial: str, target, screen=None,
+                 cost: dict | None = None):
+        """Locate `target`, reporting what the lookup cost the device.
+
+        `cost` accumulates `dumps` and `dump_seconds`. It is threaded out
+        rather than logged here because the adapter has no writer -- the runner
+        turns it into an event, the same way it turns `strategy` into a
+        `selector_fallback`.
+
+        Why it is worth reporting at all: `uiautomator dump` takes one to three
+        seconds on a real phone and is CPU-heavy, and it runs *concurrently
+        with the collectors sampling that CPU*. A scenario with four
+        tap_elements spends four to twelve dumps inside a thirteen-second
+        timeline, so a meaningful share of what this tool reports as the app's
+        CPU is its own instrumentation. Against a fake device that cost is
+        invisible, which is why it went unmeasured until now.
+        """
         from . import uiauto
 
         screen = screen or self.screen_size(adb, serial)
         resolution = None
         for attempt in range(self.RESOLVE_ATTEMPTS):
+            started = time.monotonic()
             try:
                 nodes = uiauto.parse_hierarchy(uiauto.dump_hierarchy(adb, serial))
             except Exception:
@@ -170,6 +187,11 @@ class ElementActionsMixin:
                 # fallback is exactly as good as the behaviour that preceded
                 # this module, so degrade to it rather than failing the step.
                 nodes = []
+            if cost is not None:
+                # A dump that raised still cost the device the attempt.
+                cost["dumps"] = cost.get("dumps", 0) + 1
+                cost["dump_seconds"] = round(
+                    cost.get("dump_seconds", 0.0) + (time.monotonic() - started), 3)
             resolution = uiauto.resolve(target, nodes, screen)
             # Only a *selector* match ends the retry loop. Stopping at the
             # coordinate fallback would defeat the point, since the fallback
@@ -188,14 +210,15 @@ class ElementActionsMixin:
         the early warning that a selector has gone stale, and it is invisible
         unless reported.
         """
-        resolution, _ = self._resolve(adb, serial, target, screen)
+        cost: dict = {}
+        resolution, _ = self._resolve(adb, serial, target, screen, cost)
         if resolution is None:
             raise ElementNotFound(
                 f"no element matched {target.name or 'target'} and no coordinate fallback was given"
             )
         x, y = resolution.point
         self.tap(adb, serial, x, y)
-        return {"target": target.name, "strategy": resolution.strategy, "x": x, "y": y}
+        return {"target": target.name, "strategy": resolution.strategy, "x": x, "y": y, **cost}
 
     def verify_foreground(self, adb: AdbClientProtocol, serial: str, package: str) -> dict:
         """Assert `package` is actually the app in front."""
@@ -249,21 +272,22 @@ class ElementActionsMixin:
                 f"Unsupported element state {state!r}; expected one of {uiauto.VERIFIABLE_STATES}"
             )
         name = target.name or "target"
+        cost: dict = {}
         deadline = time.monotonic() + (self.STATE_TIMEOUT if timeout is None else timeout)
         node = None
         while True:
-            resolution, screen = self._resolve(adb, serial, target, screen)
+            resolution, screen = self._resolve(adb, serial, target, screen, cost)
             node = resolution.node if resolution is not None else None
             if node is not None and getattr(node, state) is expected:
                 return {"target": target.name, "state": state, "expected": expected,
-                        "verified": True, "strategy": resolution.strategy}
+                        "verified": True, "strategy": resolution.strategy, **cost}
             if time.monotonic() >= deadline:
                 break
             time.sleep(self.STATE_POLL_DELAY)
 
         if node is None:
             return {"target": target.name, "state": state, "expected": expected,
-                    "verified": None,
+                    "verified": None, **cost,
                     "detail": f"{name} was not located by any selector; state is unreadable"}
         raise VerificationError(
             f"expected {name}.{state} to be {expected}, found {getattr(node, state)}"
@@ -319,6 +343,12 @@ class AndroidAdapter(ElementActionsMixin, Adapter):
     touchscreen that needs tap/swipe mapped to KEYCODE_DPAD_* instead). Don't
     pre-create empty subclasses before there's OEM logic to put in them.
     """
+
+    # Class-level default, not set in __init__: AndroidTvAdapter deliberately
+    # calls Adapter.__init__ directly, so anything only assigned here would be
+    # missing on a TV. Instances shadow it with their own tuple. Per-adapter,
+    # and the profile builds one per run, so it never outlives its device.
+    _cached_panel: tuple[int, int] | None = None
 
     def __init__(self):
         super().__init__("android")
@@ -377,14 +407,31 @@ class AndroidAdapter(ElementActionsMixin, Adapter):
         Rotation constants are Surface.ROTATION_0/90/180/270; 90 and 270 are
         the landscape ones.
         """
-        output = adb.shell(serial, "wm size")
-        match = _OVERRIDE_SIZE_RE.search(output) or _WM_SIZE_RE.search(output)
-        if not match:
-            raise ValueError("Unable to parse screen size")
-        width, height = int(match.group(1)), int(match.group(2))
+        width, height = self._panel_size(adb, serial)
         if self._rotation(adb, serial) in (1, 3):
             width, height = height, width
         return width, height
+
+    def _panel_size(self, adb, serial) -> tuple[int, int]:
+        """The unrotated dimensions, read once per adapter.
+
+        Cached because neither line `wm size` prints can change during a run --
+        a panel does not resize, and a display-size override is set by hand.
+        Rotation is the only part that moves, so it stays uncached above.
+
+        Worth caching because this is on the path of *every* element action:
+        `_resolve` needs the coordinate space, so a scenario with four
+        tap_elements asked the device for its unchanging dimensions four times.
+        Cheap next to a UI dump, but it is the kind of cost that is invisible
+        against a fake device and real against a phone.
+        """
+        if self._cached_panel is None:
+            output = adb.shell(serial, "wm size")
+            match = _OVERRIDE_SIZE_RE.search(output) or _WM_SIZE_RE.search(output)
+            if not match:
+                raise ValueError("Unable to parse screen size")
+            self._cached_panel = (int(match.group(1)), int(match.group(2)))
+        return self._cached_panel
 
     @staticmethod
     def _rotation(adb, serial) -> int:

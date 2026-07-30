@@ -459,6 +459,50 @@ class CancelStopsTheDeviceFirstTests(unittest.TestCase):
         self.assertNotIn(f"key_event:{HOME}", adapter.events)
 
 
+class IntrospectionRecordingTests(unittest.TestCase):
+    """The tool's own cost has to end up in the run's record.
+
+    Locating elements by identity is right, and it is not free: the dumps land
+    on the same CPU the collectors are sampling. A run with many lookups and a
+    run with none are not comparable, and without this event nothing in the
+    data says which is which.
+    """
+
+    def test_a_lookup_records_what_it_cost(self):
+        from autoperf.scenarios import selectors
+
+        with tempfile.TemporaryDirectory() as directory:
+            storage = Storage(Path(directory) / "db.sqlite")
+            storage.initialize()
+            scenario = [
+                ScenarioStep(0.0, "launch_app", {"package": "com.example.app"}),
+                ScenarioStep(0.0, "tap_element", {"target": selectors.SEARCH_ICON}),
+            ]
+            run_id = TestRunner(
+                storage, DeviceAdb(metrics=True), [CpuCollector(interval=0.05)],
+                adapter=AndroidAdapter(), scenario=scenario, heartbeat_interval=0.25,
+            ).run("serial", 0.4)
+
+            quality = storage.run_quality(run_id)
+            self.assertEqual(quality["ui_introspections"], 1)
+            # Not a failure and not a warning: it is the cost of locating by
+            # identity, reported so two runs can be told apart.
+            self.assertTrue(quality["verified"])
+
+    def test_a_run_with_no_lookups_records_none(self):
+        # A deep-link scenario touches nothing, which is exactly why those are
+        # the right presets for baseline comparison.
+        with tempfile.TemporaryDirectory() as directory:
+            storage = Storage(Path(directory) / "db.sqlite")
+            storage.initialize()
+            run_id = TestRunner(
+                storage, DeviceAdb(metrics=True), [CpuCollector(interval=0.05)],
+                adapter=AndroidAdapter(), heartbeat_interval=0.25,
+                scenario=[ScenarioStep(0.0, "launch_app", {"package": "com.example.app"})],
+            ).run("serial", 0.4)
+            self.assertEqual(storage.run_quality(run_id)["ui_introspections"], 0)
+
+
 class AppVersionRecordingTests(unittest.TestCase):
     def test_records_the_launched_package_version(self):
         # A device that can report its build, which is one more reply rather
