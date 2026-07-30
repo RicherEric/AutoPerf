@@ -1,0 +1,143 @@
+MEDIA SESSION SERVICE (dumpsys media_session)
+
+11 sessions listeners.
+Global priority session is com.android.server.telecom/HeadsetMediaButton/1 (userId=0)
+  HeadsetMediaButton com.android.server.telecom/HeadsetMediaButton/1 (userId=0)
+    ownerPid=1385, ownerUid=1000, userId=0
+    package=com.android.server.telecom
+    launchIntent=null
+    mediaButtonReceiver=null
+    active=false
+    flags=65537
+    rating type=0
+    controllers: 0
+    state=null
+    audioAttrs=AudioAttributes: usage=USAGE_VOICE_COMMUNICATION content=CONTENT_TYPE_SPEECH flags=0x800 tags= bundle=null
+    volumeType=LOCAL, controlType=ABSOLUTE, max=0, current=0, volumeControlId=null
+    metadata: null
+    queueTitle=null, size=0
+User Records:
+Record for full_user=0
+  Volume key long-press listener: null
+  Volume key long-press listener package: 
+  Media key listener: null
+  Media key listener package: 
+  OnMediaKeyEventDispatchedListener: added 0 listener(s)
+  OnMediaKeyEventSessionChangedListener: added 2 listener(s)
+    from com.samsung.android.app.routines
+    from com.samsung.android.knox.app.networkfilter
+  Last MediaButtonReceiver: null
+  High priority mediakey receiver: null
+  Volume key long-press receiver: null
+  Media button session is com.google.android.youtube/YouTube playerlib/77 (userId=0)
+  Sessions Stack - have 1 sessions:
+    YouTube playerlib com.google.android.youtube/YouTube playerlib/77 (userId=0)
+      ownerPid=11282, ownerUid=10251, userId=0
+      package=com.google.android.youtube
+      launchIntent=PendingIntent{e936e17: PendingIntentRecord{d1b1204 com.google.android.youtube startActivity}}
+      mediaButtonReceiver=null
+      active=false
+      flags=3
+      rating type=2
+      controllers: 4
+       com.android.bluetoothcom.android.server.media.MediaSessionRecord$ControllerStub$$ExternalSyntheticLambda0@71c13ed
+       com.android.bluetoothcom.android.server.media.MediaSessionRecord$ControllerStub$$ExternalSyntheticLambda0@b54e222
+       com.android.bluetoothcom.android.server.media.MediaSessionRecord$ControllerStub$$ExternalSyntheticLambda0@856d4b3
+       com.android.bluetoothcom.android.server.media.MediaSessionRecord$ControllerStub$$ExternalSyntheticLambda0@7394a70
+      state=PlaybackState {state=STOPPED(1), position=0, buffered position=0, speed=1.0, updated=70801739, actions=0, custom actions=[], active item id=-1, error=null}
+      audioAttrs=AudioAttributes: usage=USAGE_MEDIA content=CONTENT_TYPE_UNKNOWN flags=0x800 tags= bundle=null
+      volumeType=LOCAL, controlType=ABSOLUTE, max=0, current=0, volumeControlId=null
+      metadata: size=0, description=null
+      queueTitle=null, size=0
+isAppCastingOn:false
+isMultiSoundOn:false
+Events log: MediaSession events
+07-29 22:46:48:755 VolKeyEvt, pkg=com.google.android.youtube,opPkg=com.google.android.youtube,pid=27539,uid=10251,asSystem=true,code=KEYCODE_VOLUME_UP,act:ACTION_DOWN,stream=3,musicOnly=false
+07-29 22:46:48:804 VolKeyEvt, pkg=com.google.android.youtube,opPkg=com.google.android.youtube,pid=27539,uid=10251,asSystem=true,code=KEYCODE_VOLUME_UP,act:ACTION_DOWN,stream=3,musicOnly=false
+07-29 22:46:48:855 VolKeyEvt, pkg=com.google.android.youtube,opPkg=com.google.android.youtube,pid=27539,uid=10251,asSystem=true,code=KEYCODE_VOLUME_UP,act:ACTION_DOWN,stream=3,musicOnly=false
+07-29 22:46:48:905 VolKeyEvt, pkg=com.google.android.youtube,opPkg=com.google.android.youtube,pid=27539,uid=10251,asSystem=true,code=KEYCODE_VOLUME_UP,act:ACTION_DOWN,stream=3,musicOnly=false
+07-29 22:46:48:959 VolKeyEvt, pkg=com.google.android.youtube,opPkg=com.google.android.youtube,pid=27539,uid=10251,asSystem=true,code=KEYCODE_VOLUME_UP,act:ACTION_DOWN,stream=3,musicOnly=false
+07-29 22:46:49:010 VolKeyEvt, pkg=com.google.android.youtube,opPkg=com.google.android.youtube,pid=27539,uid=10251,asSystem=true,code=KEYCODE_VOLUME_UP,act:ACTION_DOWN,stream=3,musicOnly=false
+07-29 22:46:49:015 VolKeyEvt, pkg=com.google.android.youtube,opPkg=com.google.android.youtube,pid=27539,uid=10251,asSystem=true,code=KEYCODE_VOLUME_UP,act:ACTION_UP,stream=3,musicOnly=false
+07-29 22:46:49:439 VolKeyEvt, pkg=com.google.android.youtube,opPkg=com.google.android.youtube,pid=27539,uid=10251,asSystem=true,code=KEYCODE_VOLUME_UP,act:ACTION_DOWN,stream=3,musicOnly=false
+07-29 22:46:49:688 VolKeyEvt, pkg=com.google.android.youtube,opPkg=com.google.android.youtube,pid=27539,uid=10251,asSystem=true,code=KEYCODE_VOLUME_UP,act:ACTION_DOWN,stream=3,musicOnly=false
+07-29 22:46:49:707 VolKeyEvt, pkg=com.google.android.youtube,opPkg=com.google.android.youtube,pid=27539,uid=10251,asSystem=true,code=KEYCODE_VOLUME_UP,act:ACTION_UP,stream=3,musicOnly=false
+07-29 22:46:50:091 VolKeyEvt, pkg=com.google.android.youtube,opPkg=com.google.android.youtube,pid=27539,uid=10251,asSystem=true,code=KEYCODE_VOLUME_UP,act:ACTION_DOWN,stream=3,musicOnly=false
+07-29 22:46:50:135 VolKeyEvt, pkg=com.google.android.youtube,opPkg=com.google.android.youtube,pid=27539,uid=10251,asSystem=true,code=KEYCODE_VOLUME_UP,act:ACTION_UP,stream=3,musicOnly=false
+07-30 09:53:41:923 VolKeyEvt, pkg=android,opPkg=android,pid=1385,uid=1000,asSystem=false,code=KEYCODE_VOLUME_UP,act:ACTION_DOWN,stream=-2147483648,musicOnly=true
+07-30 09:53:41:934 VolKeyEvt, pkg=android,opPkg=android,pid=1385,uid=1000,asSystem=false,code=KEYCODE_VOLUME_UP,act:ACTION_UP,stream=-2147483648,musicOnly=true
+07-30 09:54:22:062 VolKeyEvt, pkg=com.android.systemui,opPkg=com.android.systemui,pid=2118,uid=10050,asSystem=false,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=true
+07-30 09:54:22:467 VolKeyEvt, pkg=com.android.systemui,opPkg=com.android.systemui,pid=2118,uid=10050,asSystem=false,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=true
+07-30 09:54:22:513 VolKeyEvt, pkg=com.android.systemui,opPkg=com.android.systemui,pid=2118,uid=10050,asSystem=false,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=true
+07-30 09:54:22:564 VolKeyEvt, pkg=com.android.systemui,opPkg=com.android.systemui,pid=2118,uid=10050,asSystem=false,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=true
+07-30 09:54:22:615 VolKeyEvt, pkg=com.android.systemui,opPkg=com.android.systemui,pid=2118,uid=10050,asSystem=false,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=true
+07-30 09:54:22:666 VolKeyEvt, pkg=com.android.systemui,opPkg=com.android.systemui,pid=2118,uid=10050,asSystem=false,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=true
+07-30 09:54:22:716 VolKeyEvt, pkg=com.android.systemui,opPkg=com.android.systemui,pid=2118,uid=10050,asSystem=false,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=true
+07-30 09:54:22:767 VolKeyEvt, pkg=com.android.systemui,opPkg=com.android.systemui,pid=2118,uid=10050,asSystem=false,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=true
+07-30 09:54:22:818 VolKeyEvt, pkg=com.android.systemui,opPkg=com.android.systemui,pid=2118,uid=10050,asSystem=false,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=true
+07-30 09:54:22:868 VolKeyEvt, pkg=com.android.systemui,opPkg=com.android.systemui,pid=2118,uid=10050,asSystem=false,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=true
+07-30 09:54:22:919 VolKeyEvt, pkg=com.android.systemui,opPkg=com.android.systemui,pid=2118,uid=10050,asSystem=false,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=true
+07-30 09:54:22:970 VolKeyEvt, pkg=com.android.systemui,opPkg=com.android.systemui,pid=2118,uid=10050,asSystem=false,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=true
+07-30 09:54:23:024 VolKeyEvt, pkg=com.android.systemui,opPkg=com.android.systemui,pid=2118,uid=10050,asSystem=false,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=true
+07-30 09:54:23:071 VolKeyEvt, pkg=com.android.systemui,opPkg=com.android.systemui,pid=2118,uid=10050,asSystem=false,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=true
+07-30 09:54:23:122 VolKeyEvt, pkg=com.android.systemui,opPkg=com.android.systemui,pid=2118,uid=10050,asSystem=false,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=true
+07-30 09:54:23:177 VolKeyEvt, pkg=com.android.systemui,opPkg=com.android.systemui,pid=2118,uid=10050,asSystem=false,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=true
+07-30 09:54:23:230 VolKeyEvt, pkg=com.android.systemui,opPkg=com.android.systemui,pid=2118,uid=10050,asSystem=false,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=true
+07-30 09:54:23:277 VolKeyEvt, pkg=com.android.systemui,opPkg=com.android.systemui,pid=2118,uid=10050,asSystem=false,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=true
+07-30 09:54:23:331 VolKeyEvt, pkg=com.android.systemui,opPkg=com.android.systemui,pid=2118,uid=10050,asSystem=false,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=true
+07-30 09:54:23:378 VolKeyEvt, pkg=com.android.systemui,opPkg=com.android.systemui,pid=2118,uid=10050,asSystem=false,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=true
+07-30 09:54:23:427 VolKeyEvt, pkg=com.android.systemui,opPkg=com.android.systemui,pid=2118,uid=10050,asSystem=false,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=true
+07-30 09:54:23:478 VolKeyEvt, pkg=com.android.systemui,opPkg=com.android.systemui,pid=2118,uid=10050,asSystem=false,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=true
+07-30 09:54:23:528 VolKeyEvt, pkg=com.android.systemui,opPkg=com.android.systemui,pid=2118,uid=10050,asSystem=false,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=true
+07-30 09:54:23:568 VolKeyEvt, pkg=com.android.systemui,opPkg=com.android.systemui,pid=2118,uid=10050,asSystem=false,code=KEYCODE_VOLUME_DOWN,act:ACTION_UP,stream=-2147483648,musicOnly=true
+07-30 09:54:27:608 VolKeyEvt, pkg=android,opPkg=android,pid=1385,uid=1000,asSystem=false,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=true
+07-30 09:54:28:151 VolKeyEvt, pkg=android,opPkg=android,pid=1385,uid=1000,asSystem=false,code=KEYCODE_VOLUME_DOWN,act:ACTION_UP,stream=-2147483648,musicOnly=true
+07-30 09:59:35:436 VolKeyEvt, pkg=com.sec.android.app.launcher,opPkg=com.sec.android.app.launcher,pid=2818,uid=10137,asSystem=true,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=false
+07-30 09:59:35:685 VolKeyEvt, pkg=com.sec.android.app.launcher,opPkg=com.sec.android.app.launcher,pid=2818,uid=10137,asSystem=true,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=false
+07-30 09:59:35:732 VolKeyEvt, pkg=com.sec.android.app.launcher,opPkg=com.sec.android.app.launcher,pid=2818,uid=10137,asSystem=true,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=false
+07-30 09:59:35:784 VolKeyEvt, pkg=com.sec.android.app.launcher,opPkg=com.sec.android.app.launcher,pid=2818,uid=10137,asSystem=true,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=false
+07-30 09:59:35:834 VolKeyEvt, pkg=com.sec.android.app.launcher,opPkg=com.sec.android.app.launcher,pid=2818,uid=10137,asSystem=true,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=false
+07-30 09:59:35:887 VolKeyEvt, pkg=com.sec.android.app.launcher,opPkg=com.sec.android.app.launcher,pid=2818,uid=10137,asSystem=true,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=false
+07-30 09:59:35:936 VolKeyEvt, pkg=com.sec.android.app.launcher,opPkg=com.sec.android.app.launcher,pid=2818,uid=10137,asSystem=true,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=false
+07-30 09:59:35:988 VolKeyEvt, pkg=com.sec.android.app.launcher,opPkg=com.sec.android.app.launcher,pid=2818,uid=10137,asSystem=true,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=false
+07-30 09:59:36:036 VolKeyEvt, pkg=com.sec.android.app.launcher,opPkg=com.sec.android.app.launcher,pid=2818,uid=10137,asSystem=true,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=false
+07-30 09:59:36:089 VolKeyEvt, pkg=com.sec.android.app.launcher,opPkg=com.sec.android.app.launcher,pid=2818,uid=10137,asSystem=true,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=false
+07-30 09:59:36:140 VolKeyEvt, pkg=com.sec.android.app.launcher,opPkg=com.sec.android.app.launcher,pid=2818,uid=10137,asSystem=true,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=false
+07-30 09:59:36:192 VolKeyEvt, pkg=com.sec.android.app.launcher,opPkg=com.sec.android.app.launcher,pid=2818,uid=10137,asSystem=true,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=false
+07-30 09:59:36:240 VolKeyEvt, pkg=com.sec.android.app.launcher,opPkg=com.sec.android.app.launcher,pid=2818,uid=10137,asSystem=true,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=false
+07-30 09:59:36:293 VolKeyEvt, pkg=com.sec.android.app.launcher,opPkg=com.sec.android.app.launcher,pid=2818,uid=10137,asSystem=true,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=false
+07-30 09:59:36:342 VolKeyEvt, pkg=com.sec.android.app.launcher,opPkg=com.sec.android.app.launcher,pid=2818,uid=10137,asSystem=true,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=false
+07-30 09:59:36:380 VolKeyEvt, pkg=com.sec.android.app.launcher,opPkg=com.sec.android.app.launcher,pid=2818,uid=10137,asSystem=true,code=KEYCODE_VOLUME_DOWN,act:ACTION_UP,stream=-2147483648,musicOnly=false
+07-30 10:31:21:186 VolKeyEvt, pkg=com.sec.android.app.launcher,opPkg=com.sec.android.app.launcher,pid=2818,uid=10137,asSystem=true,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=false
+07-30 10:31:21:430 VolKeyEvt, pkg=com.sec.android.app.launcher,opPkg=com.sec.android.app.launcher,pid=2818,uid=10137,asSystem=true,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=false
+07-30 10:31:21:479 VolKeyEvt, pkg=com.sec.android.app.launcher,opPkg=com.sec.android.app.launcher,pid=2818,uid=10137,asSystem=true,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=false
+07-30 10:31:21:532 VolKeyEvt, pkg=com.sec.android.app.launcher,opPkg=com.sec.android.app.launcher,pid=2818,uid=10137,asSystem=true,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=false
+07-30 10:31:21:585 VolKeyEvt, pkg=com.sec.android.app.launcher,opPkg=com.sec.android.app.launcher,pid=2818,uid=10137,asSystem=true,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=false
+07-30 10:31:21:598 VolKeyEvt, pkg=com.sec.android.app.launcher,opPkg=com.sec.android.app.launcher,pid=2818,uid=10137,asSystem=true,code=KEYCODE_VOLUME_DOWN,act:ACTION_UP,stream=-2147483648,musicOnly=false
+07-30 10:31:22:423 VolKeyEvt, pkg=com.sec.android.app.launcher,opPkg=com.sec.android.app.launcher,pid=2818,uid=10137,asSystem=true,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=false
+07-30 10:31:22:668 VolKeyEvt, pkg=com.sec.android.app.launcher,opPkg=com.sec.android.app.launcher,pid=2818,uid=10137,asSystem=true,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=false
+07-30 10:31:22:682 VolKeyEvt, pkg=com.sec.android.app.launcher,opPkg=com.sec.android.app.launcher,pid=2818,uid=10137,asSystem=true,code=KEYCODE_VOLUME_DOWN,act:ACTION_UP,stream=-2147483648,musicOnly=false
+07-30 10:31:55:226 VolKeyEvt, pkg=com.sec.android.app.launcher,opPkg=com.sec.android.app.launcher,pid=2818,uid=10137,asSystem=true,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=false
+07-30 10:31:55:303 VolKeyEvt, pkg=com.sec.android.app.launcher,opPkg=com.sec.android.app.launcher,pid=2818,uid=10137,asSystem=true,code=KEYCODE_VOLUME_DOWN,act:ACTION_UP,stream=-2147483648,musicOnly=false
+07-30 10:31:56:515 VolKeyEvt, pkg=com.sec.android.app.launcher,opPkg=com.sec.android.app.launcher,pid=2818,uid=10137,asSystem=true,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=false
+07-30 10:31:56:671 VolKeyEvt, pkg=com.sec.android.app.launcher,opPkg=com.sec.android.app.launcher,pid=2818,uid=10137,asSystem=true,code=KEYCODE_VOLUME_DOWN,act:ACTION_UP,stream=-2147483648,musicOnly=false
+07-30 10:31:57:035 VolKeyEvt, pkg=com.sec.android.app.launcher,opPkg=com.sec.android.app.launcher,pid=2818,uid=10137,asSystem=true,code=KEYCODE_VOLUME_UP,act:ACTION_DOWN,stream=-2147483648,musicOnly=false
+07-30 10:31:57:109 VolKeyEvt, pkg=com.sec.android.app.launcher,opPkg=com.sec.android.app.launcher,pid=2818,uid=10137,asSystem=true,code=KEYCODE_VOLUME_UP,act:ACTION_UP,stream=-2147483648,musicOnly=false
+07-30 10:31:57:835 VolKeyEvt, pkg=com.sec.android.app.launcher,opPkg=com.sec.android.app.launcher,pid=2818,uid=10137,asSystem=true,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=false
+07-30 10:31:58:081 VolKeyEvt, pkg=com.sec.android.app.launcher,opPkg=com.sec.android.app.launcher,pid=2818,uid=10137,asSystem=true,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=false
+07-30 10:31:58:130 VolKeyEvt, pkg=com.sec.android.app.launcher,opPkg=com.sec.android.app.launcher,pid=2818,uid=10137,asSystem=true,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=false
+07-30 10:31:58:183 VolKeyEvt, pkg=com.sec.android.app.launcher,opPkg=com.sec.android.app.launcher,pid=2818,uid=10137,asSystem=true,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=false
+07-30 10:31:58:233 VolKeyEvt, pkg=com.sec.android.app.launcher,opPkg=com.sec.android.app.launcher,pid=2818,uid=10137,asSystem=true,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=false
+07-30 10:31:58:284 VolKeyEvt, pkg=com.sec.android.app.launcher,opPkg=com.sec.android.app.launcher,pid=2818,uid=10137,asSystem=true,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=false
+07-30 10:31:58:336 VolKeyEvt, pkg=com.sec.android.app.launcher,opPkg=com.sec.android.app.launcher,pid=2818,uid=10137,asSystem=true,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=false
+07-30 10:31:58:387 VolKeyEvt, pkg=com.sec.android.app.launcher,opPkg=com.sec.android.app.launcher,pid=2818,uid=10137,asSystem=true,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=false
+07-30 10:31:58:417 VolKeyEvt, pkg=com.sec.android.app.launcher,opPkg=com.sec.android.app.launcher,pid=2818,uid=10137,asSystem=true,code=KEYCODE_VOLUME_DOWN,act:ACTION_UP,stream=-2147483648,musicOnly=false
+
+isSupportMediaDataPlatform:false
+
+Audio playback (lastly played comes first)
+  uid=10251 packages=com.google.android.youtube 
+Media session config:
+  media_button_receiver_fgs_allowlist_duration_ms: [cur: 10000, def: 10000]
+  media_session_calback_fgs_allowlist_duration_ms: [cur: 10000, def: 10000]
+  media_session_callback_fgs_while_in_use_temp_allow_duration_ms: [cur: 10000, def: 10000]

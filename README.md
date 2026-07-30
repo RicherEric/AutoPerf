@@ -83,6 +83,35 @@ class attributes, and the two that tests forgot to zero cost the suite 24 of its
 87 seconds. A test asserts that no `*_TIMEOUT` / `*_DELAY` / `*_ATTEMPTS` can
 live anywhere else.
 
+### Captures: what the device really said
+
+```powershell
+autoperf capture --serial <SERIAL> --name home_feed --app com.google.android.youtube
+autoperf capture --serial <SERIAL> --list
+```
+
+Every other fixture in the suite is a literal somebody typed, which makes it a
+guess about a device they did not have. A capture is the same text taken off a
+phone and stored under `tests/captures/<model>_android<release>/`, with a
+manifest recording the model, the Android release, the app build, when it was
+taken, and how long the reads spanned.
+
+`test_captures.py` is the only part of the suite checked against real output, and
+it is the part that would have caught the three worst bugs this project has had:
+a `dumpsys media_session` parser that matched no modern device (so the strongest
+check verified nothing while 305 tests stayed green), nineteen wrong selector
+labels, and a search flow that never typed. **These tests are meant to fail when
+YouTube updates** -- that is the signal the selector table has expired. Re-capture,
+read the diff, fix `selectors.py`.
+
+Two things a capture records because they were learned the hard way: the focused
+package, which caught a capture of the launcher stored under the name `shorts`
+after a guessed coordinate missed the tab; and the read span, because a capture
+is a window and not an instant -- the hierarchy dump takes up to 11.7s while the
+dumpsys reads take 120ms, and the first watch-page capture paired a playing
+hierarchy with a `media_session` that said STOPPED, the 19-second video having
+ended mid-dump. The cheap reads are now taken first.
+
 Device-facing tests share two doubles from `tests/support.py`: `RecordingAdb`
 asserts what was *sent*, `DeviceAdb` supplies what the device *replies*. An
 unlisted command raises rather than returning `""`, so "the code only issues

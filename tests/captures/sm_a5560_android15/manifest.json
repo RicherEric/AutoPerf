@@ -1,0 +1,205 @@
+{
+  "captures": {
+    "launcher": {
+      "name": "launcher",
+      "captured_at": "2026-07-30T03:33:41Z",
+      "device": {
+        "model": "SM-A5560",
+        "android_release": "15",
+        "sdk": "35",
+        "characteristics": "phone"
+      },
+      "reads": [
+        "hierarchy",
+        "window",
+        "media_session"
+      ],
+      "node_count": 72,
+      "focus": {
+        "package": "com.sec.android.app.launcher",
+        "activity": "com.sec.android.app.launcher.activities.LauncherActivity"
+      },
+      "app": {
+        "package": "com.google.android.youtube",
+        "version_name": "21.29.366",
+        "version_code": 1561186612
+      }
+    },
+    "home_feed": {
+      "name": "home_feed",
+      "captured_at": "2026-07-30T03:33:53Z",
+      "device": {
+        "model": "SM-A5560",
+        "android_release": "15",
+        "sdk": "35",
+        "characteristics": "phone"
+      },
+      "reads": [
+        "hierarchy",
+        "window",
+        "media_session"
+      ],
+      "node_count": 141,
+      "focus": {
+        "package": "com.google.android.youtube",
+        "activity": "com.google.android.youtube.app.honeycomb.Shell$HomeActivity"
+      },
+      "app": {
+        "package": "com.google.android.youtube",
+        "version_name": "21.29.366",
+        "version_code": 1561186612
+      }
+    },
+    "search_typed": {
+      "name": "search_typed",
+      "captured_at": "2026-07-30T03:34:02Z",
+      "device": {
+        "model": "SM-A5560",
+        "android_release": "15",
+        "sdk": "35",
+        "characteristics": "phone"
+      },
+      "reads": [
+        "hierarchy",
+        "window",
+        "media_session"
+      ],
+      "node_count": 66,
+      "focus": {
+        "package": "com.google.android.youtube",
+        "activity": "com.google.android.youtube.app.honeycomb.Shell$HomeActivity"
+      },
+      "app": {
+        "package": "com.google.android.youtube",
+        "version_name": "21.29.366",
+        "version_code": 1561186612
+      }
+    },
+    "search_results": {
+      "name": "search_results",
+      "captured_at": "2026-07-30T03:34:11Z",
+      "device": {
+        "model": "SM-A5560",
+        "android_release": "15",
+        "sdk": "35",
+        "characteristics": "phone"
+      },
+      "reads": [
+        "hierarchy",
+        "window",
+        "media_session"
+      ],
+      "node_count": 98,
+      "focus": {
+        "package": "com.google.android.youtube",
+        "activity": "com.google.android.youtube.app.honeycomb.Shell$HomeActivity"
+      },
+      "app": {
+        "package": "com.google.android.youtube",
+        "version_name": "21.29.366",
+        "version_code": 1561186612
+      }
+    },
+    "library": {
+      "name": "library",
+      "captured_at": "2026-07-30T03:35:04Z",
+      "device": {
+        "model": "SM-A5560",
+        "android_release": "15",
+        "sdk": "35",
+        "characteristics": "phone"
+      },
+      "reads": [
+        "hierarchy",
+        "window",
+        "media_session"
+      ],
+      "node_count": 115,
+      "focus": {
+        "package": "com.google.android.youtube",
+        "activity": "com.google.android.youtube.app.honeycomb.Shell$HomeActivity"
+      },
+      "app": {
+        "package": "com.google.android.youtube",
+        "version_name": "21.29.366",
+        "version_code": 1561186612
+      }
+    },
+    "watch_page_playing": {
+      "name": "watch_page_playing",
+      "captured_at": "2026-07-30T03:41:20Z",
+      "device": {
+        "model": "SM-A5560",
+        "android_release": "15",
+        "sdk": "35",
+        "characteristics": "phone"
+      },
+      "reads": [
+        "window",
+        "media_session",
+        "hierarchy"
+      ],
+      "node_count": 67,
+      "capture_seconds": 11.7,
+      "focus": {
+        "package": "com.google.android.youtube",
+        "activity": "com.google.android.apps.youtube.app.watchwhile.InternalMainActivity"
+      },
+      "app": {
+        "package": "com.google.android.youtube",
+        "version_name": "21.29.366",
+        "version_code": 1561186612
+      }
+    },
+    "shorts": {
+      "name": "shorts",
+      "captured_at": "2026-07-30T03:38:04Z",
+      "device": {
+        "model": "SM-A5560",
+        "android_release": "15",
+        "sdk": "35",
+        "characteristics": "phone"
+      },
+      "reads": [
+        "hierarchy",
+        "window",
+        "media_session"
+      ],
+      "node_count": 107,
+      "focus": {
+        "package": "com.google.android.youtube",
+        "activity": "com.google.android.youtube.app.honeycomb.Shell$HomeActivity"
+      },
+      "app": {
+        "package": "com.google.android.youtube",
+        "version_name": "21.29.366",
+        "version_code": 1561186612
+      }
+    },
+    "search_suggestions": {
+      "name": "search_suggestions",
+      "captured_at": "2026-07-30T03:38:25Z",
+      "device": {
+        "model": "SM-A5560",
+        "android_release": "15",
+        "sdk": "35",
+        "characteristics": "phone"
+      },
+      "reads": [
+        "hierarchy",
+        "window",
+        "media_session"
+      ],
+      "node_count": 67,
+      "focus": {
+        "package": "com.google.android.youtube",
+        "activity": "com.google.android.youtube.app.honeycomb.Shell$HomeActivity"
+      },
+      "app": {
+        "package": "com.google.android.youtube",
+        "version_name": "21.29.366",
+        "version_code": 1561186612
+      }
+    }
+  }
+}
