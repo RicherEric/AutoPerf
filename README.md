@@ -119,6 +119,9 @@ these commands" is an assertion rather than a hope; pass `allow_unknown=True`
 to opt out. Waits are zeroed by the `NoWaits` mixin, or better, by the
 `timeout=` a check already accepts.
 
+繁體中文的裝置測試架構與設計哲學文件（含架構圖與流程圖）：
+[docs/DEVICE_TESTING_zh-TW.md](docs/DEVICE_TESTING_zh-TW.md)
+
 ## YouTube scenario library
 
 `scenarios/youtube.py` has 24 named presets (cold start, search+play, home feed
