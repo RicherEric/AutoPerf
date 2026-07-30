@@ -152,6 +152,47 @@ class CheckScenarioTests(NoWaits, unittest.TestCase):
         # -- not "failed", which would blame the device for a decayed selector.
         self.assertEqual(check.result, "unknown")
 
+    def test_a_platform_with_no_introspectable_ui_is_not_reported_as_decayed(self):
+        """The 19 false findings this removes.
+
+        A Chromecast publishes no hierarchy for the YouTube TV build, so every
+        selector missed and every target was reported as having fallen through
+        to its coordinate -- a report where each entry was false and none named
+        the actual reason. It is not decay and there is nothing to fix.
+        """
+        from autoperf.profiles import AndroidTvProfile
+
+        report = preflight.check_scenario(
+            FakeDevice(hierarchy=EMPTY_SCREEN), AndroidAdapter(), "S1", "home_feed_tap_video",
+            screen=SCREEN, sleep=_no_sleep, profile=AndroidTvProfile())
+
+        self.assertTrue(report.targets)
+        for check in report.targets:
+            with self.subTest(target=check.target):
+                self.assertEqual(check.status, preflight.NOT_APPLICABLE)
+                self.assertIn("accessibility tree", check.detail)
+        # Not a finding, so it does not condemn the scenario.
+        self.assertTrue(report.ok)
+
+    def test_the_actions_still_happen_so_later_verifications_mean_something(self):
+        # Verification is what works on that platform; it needs the flow to
+        # have advanced.
+        from autoperf.profiles import AndroidTvProfile
+
+        device = FakeDevice(hierarchy=EMPTY_SCREEN)
+        preflight.check_scenario(device, AndroidAdapter(), "S1", "home_feed_tap_video",
+                                 screen=SCREEN, sleep=_no_sleep, profile=AndroidTvProfile())
+        self.assertTrue(device.taps)
+
+    def test_a_phone_profile_still_grades_selectors(self):
+        from autoperf.profiles import PhoneProfile
+
+        report = preflight.check_scenario(
+            FakeDevice(hierarchy=EMPTY_SCREEN), AndroidAdapter(), "S1", "home_feed_tap_video",
+            screen=SCREEN, sleep=_no_sleep, profile=PhoneProfile())
+        self.assertTrue(any(c.status == preflight.FALLBACK for c in report.targets))
+        self.assertFalse(report.ok)
+
     def test_a_failed_verification_makes_the_scenario_not_ok(self):
         report = preflight.check_scenario(
             FakeDevice(playing=False), AndroidAdapter(), "S1", "search_and_play",
@@ -201,6 +242,18 @@ class SummariseTests(unittest.TestCase):
         # Self-contained: what the table says now, next to what was on screen.
         self.assertTrue(entry["current_selectors"])
         self.assertTrue(any("content_desc" in s for s in entry["current_selectors"]))
+
+    def test_not_applicable_targets_are_neither_findings_nor_healthy(self):
+        checks = [preflight.TargetCheck("a", 1.0, "search_icon", preflight.NOT_APPLICABLE,
+                                        detail="no accessibility tree here")]
+        summary = preflight.summarise([self._report("a", checks)])
+
+        self.assertEqual(summary["targets_needing_attention"], 0)
+        self.assertEqual(summary["targets_ok"], 0)
+        self.assertEqual(summary["targets_not_applicable"], 1)
+        # Claiming it healthy would say selectors work on a platform with no UI
+        # to look in; claiming it broken is the false finding this replaces.
+        self.assertTrue(summary["ok"])
 
     def test_a_failed_verification_fails_the_whole_summary(self):
         report = preflight.ScenarioReport(
