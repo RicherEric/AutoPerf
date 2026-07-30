@@ -26,6 +26,8 @@ where you happened to be.
 
 from __future__ import annotations
 
+import json
+import pathlib
 import time
 from unittest.mock import patch
 
@@ -75,6 +77,69 @@ METRIC_REPLIES = {
 
 PLAYING = 3      # android.media.session.PlaybackState.STATE_PLAYING
 PAUSED = 2
+
+
+CAPTURES = pathlib.Path(__file__).resolve().parent / "captures"
+
+
+def capture_dirs() -> list[str]:
+    """Device directories holding captures, e.g. `sm_a5560_android15`."""
+    if not CAPTURES.exists():
+        return []
+    return sorted(d.name for d in CAPTURES.iterdir() if d.is_dir())
+
+
+def capture_manifest(device: str | None = None) -> dict:
+    """The provenance record for one device's captures."""
+    device = device or (capture_dirs() or [""])[0]
+    path = CAPTURES / device / "manifest.json"
+    if not path.exists():
+        return {"captures": {}}
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def load_capture(name: str, kind: str = "hierarchy", device: str | None = None) -> str:
+    """What a real device actually said, as text.
+
+    The alternative -- and what every other fixture here still is -- is a
+    literal somebody typed, which is a guess about a device they did not have.
+    Raises rather than skipping when a capture is missing: a silently skipped
+    validity test is indistinguishable from a passing one.
+    """
+    device = device or (capture_dirs() or [""])[0]
+    suffix = "xml" if kind == "hierarchy" else "txt"
+    path = CAPTURES / device / f"{name}.{kind}.{suffix}"
+    if not path.exists():
+        raise FileNotFoundError(
+            f"no capture at {path}. Take one with:\n"
+            f"    autoperf capture --serial <SERIAL> --name {name} "
+            f"--app com.google.android.youtube"
+        )
+    return path.read_text(encoding="utf-8")
+
+
+class CapturedAdb:
+    """An adb that replays one capture, for the parsers that read raw text.
+
+    Not `DeviceAdb`: that models a well-behaved device from parameters, and the
+    whole point here is that the text was not written by anyone -- it came off a
+    phone, with the ordering, the fields and the noise a phone actually emits.
+    """
+
+    def __init__(self, name: str, device: str | None = None):
+        self.name = name
+        self.device = device
+
+    def shell(self, serial, command, timeout=10):
+        if command.startswith("uiautomator"):
+            return "UI hierchary dumped to: /sdcard/window_dump.xml"
+        if command.startswith("cat /sdcard/"):
+            return load_capture(self.name, "hierarchy", self.device)
+        if command.startswith("dumpsys media_session"):
+            return load_capture(self.name, "media_session", self.device)
+        if command.startswith("dumpsys window"):
+            return load_capture(self.name, "window", self.device)
+        return ""
 
 
 class RecordingAdb:
