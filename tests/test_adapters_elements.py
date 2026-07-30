@@ -9,41 +9,72 @@ follows the production boundary between `Adapter` and `ElementActionsMixin`.
 """
 
 import unittest
-from unittest.mock import patch
 
 from autoperf.adapters import AndroidAdapter, AndroidTvAdapter, VerificationError
 from tests.support import PAUSED, TOGGLES, DeviceAdb, NoWaits
 
 class WaitSurfaceTests(unittest.TestCase):
-    def test_every_device_wait_is_listed_in_the_shared_helper(self):
-        """A wait the helper does not know about is a wait a test will sit through.
+    """There must be nowhere for a wait to hide.
 
-        Three tests waiting out PLAYBACK_TIMEOUT once cost 24 of the suite's
-        87 seconds, and nothing pointed at them. Adding a tunable to the mixin
-        now fails here until it is either listed or given an injectable
-        `timeout=`.
-        """
-        from autoperf.adapters import ElementActionsMixin
-        from tests.support import WAIT_ATTRIBUTES
+    Five loose attributes meant a test could sit through one nobody had
+    listed -- two were missed, and cost the suite 24 of its 87 seconds. The
+    guard is no longer "is it on the list": it is that patience lives in one
+    object and nothing else can hold any.
+    """
 
-        waits = {name for name in vars(ElementActionsMixin)
-                 if name.endswith(("_TIMEOUT", "_DELAY"))}
-        self.assertEqual(waits, set(WAIT_ATTRIBUTES),
-                         "unlisted device wait; add it to tests.support.WAIT_ATTRIBUTES")
+    def test_no_wait_lives_outside_the_waits_object(self):
+        from autoperf.adapters import Adapter, AndroidAdapter, AndroidTvAdapter, ElementActionsMixin
+
+        for owner in (ElementActionsMixin, Adapter, AndroidAdapter, AndroidTvAdapter):
+            with self.subTest(owner=owner.__name__):
+                loose = {name for name in vars(owner)
+                         if name.endswith(("_TIMEOUT", "_DELAY", "_ATTEMPTS", "_STEPS"))}
+                self.assertEqual(loose, set(), "put it on Waits instead")
+
+    def test_zeroing_every_wait_takes_one_move(self):
+        from autoperf.adapters import Waits
+
+        instant = Waits.instant()
+        self.assertEqual(instant.resolve_retry, 0)
+        self.assertEqual(instant.state_poll, 0)
+        self.assertEqual(instant.playback_poll, 0)
+        # Attempt counts survive: how often a lookup retries is behaviour a
+        # test should still see, and one of them asserts a dump count of 3.
+        self.assertEqual(instant.resolve_attempts, Waits().resolve_attempts)
+
+    def test_a_negative_wait_is_rejected_rather_than_silently_skipped(self):
+        from autoperf.adapters import Waits
+
+        for field, value in (("state_timeout", -1), ("resolve_retry", -0.5),
+                             ("playback_timeout", -8)):
+            with self.subTest(field=field):
+                with self.assertRaises(ValueError):
+                    Waits(**{field: value})
+
+    def test_an_adapter_takes_its_patience_at_construction(self):
+        from autoperf.adapters import Waits
+
+        patient = Waits(playback_timeout=99.0)
+        self.assertEqual(AndroidAdapter(waits=patient).waits.playback_timeout, 99.0)
+        self.assertEqual(AndroidTvAdapter(waits=patient).waits.playback_timeout, 99.0)
+        # The default is untouched by an instance that overrode it.
+        self.assertEqual(AndroidAdapter().waits.playback_timeout, Waits().playback_timeout)
 
 
 class VerifyPlayingWaitTests(unittest.TestCase):
     """Playback starts asynchronously, so the check waits rather than samples.
 
     Deliberately does *not* use NoWaits: the waiting is the behaviour under
-    test. Only the poll delay is zeroed, and each case caps its own patience
-    with `timeout=`.
+    test. Only the poll delay is zeroed -- through the adapter's own
+    constructor, so nothing is patched at all -- and each case caps its own
+    patience with `timeout=`.
     """
 
-    def setUp(self):
-        patcher = patch.object(AndroidAdapter, "PLAYBACK_POLL_DELAY", 0)
-        patcher.start()
-        self.addCleanup(patcher.stop)
+    @staticmethod
+    def _adapter():
+        from autoperf.adapters import Waits
+
+        return AndroidAdapter(waits=Waits(playback_poll=0.0))
 
     @staticmethod
     def _adb(states):
@@ -54,22 +85,22 @@ class VerifyPlayingWaitTests(unittest.TestCase):
         # right video still read as not-playing two seconds after the tap,
         # because a livestream was still buffering.
         adb = self._adb([6, 6, 6, 3])
-        self.assertEqual(AndroidAdapter().verify_playing(adb, "S1"), {"verified": True})
+        self.assertEqual(self._adapter().verify_playing(adb, "S1"), {"verified": True})
         self.assertEqual(adb.playback_reads, 4)
 
     def test_still_fails_when_playback_never_starts(self):
         adb = self._adb([2] * 50)
         with self.assertRaises(VerificationError):
-            AndroidAdapter().verify_playing(adb, "S1", timeout=0.05)
+            self._adapter().verify_playing(adb, "S1", timeout=0.05)
 
     def test_an_unreadable_session_stays_unknown_rather_than_failing(self):
         adb = self._adb([None] * 50)
-        self.assertEqual(AndroidAdapter().verify_playing(adb, "S1", timeout=0.05),
+        self.assertEqual(self._adapter().verify_playing(adb, "S1", timeout=0.05),
                          {"verified": None})
 
     def test_succeeds_immediately_when_already_playing(self):
         adb = self._adb([3])
-        self.assertEqual(AndroidAdapter().verify_playing(adb, "S1"), {"verified": True})
+        self.assertEqual(self._adapter().verify_playing(adb, "S1"), {"verified": True})
         self.assertEqual(adb.playback_reads, 1)
 
 

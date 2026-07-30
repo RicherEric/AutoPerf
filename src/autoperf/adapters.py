@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 import time
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Any, ClassVar
 
 from .adb import AdbClientProtocol
@@ -125,6 +125,73 @@ class Adapter(ABC):
     def screen_size(self, adb: AdbClientProtocol, serial: str) -> tuple[int, int]: ...
 
 
+@dataclass(frozen=True, slots=True)
+class Waits:
+    """Every "how long do we give the device" number, in one place.
+
+    These were six class attributes spread down the mixin, and only two of the
+    behaviours they governed took an injectable `timeout`. That asymmetry was
+    not cosmetic: it cost the test suite 61 of its 87 seconds, because zeroing
+    the waits meant knowing four attribute names that nothing pointed to, and
+    two of them were simply missed. A single object cannot be half-injected.
+
+    Every value here is patience, not policy: how long the device is given
+    before an answer is treated as final. All were calibrated on a Galaxy A55.
+
+    Frozen because patience that changes mid-run makes two steps in the same
+    scenario incomparable.
+    """
+
+    # A scenario step fires at its scripted time, which is a guess about how
+    # long the app needs. Observed on a Galaxy A55: `subscriptions_feed_browse`
+    # taps the Subscriptions tab at t=3.0s, and at that moment YouTube has
+    # rendered its containers but not yet its bottom navigation -- so a
+    # single-shot lookup found nothing and reported the selector as decayed
+    # when the real problem was arriving early. Retrying briefly turns that
+    # common case back into a match.
+    resolve_attempts: int = 3
+    resolve_retry: float = 1.0
+
+    # A state check fired immediately after a tap is the same mistake as a
+    # fixed-time tap, one layer up: the app needs a moment to re-render the
+    # control, and how long depends on the device.
+    state_timeout: float = 4.0
+    state_poll: float = 0.5
+
+    # Opening a video is asynchronous -- the app has to resolve, buffer and
+    # begin rendering -- so sampling once at an arbitrary instant is inherently
+    # flaky. Measured on a Galaxy A55: a search flow that had genuinely reached
+    # the right video still read as not-playing two seconds after the tap,
+    # because a livestream was still buffering.
+    playback_timeout: float = 8.0
+    playback_poll: float = 0.5
+
+    # How many DPAD presses focus may take to reach a target before the step is
+    # called a failure. Bounded because a target focus cannot reach
+    # (off-screen, unfocusable) would otherwise loop until the run ended.
+    max_focus_steps: int = 12
+
+    def __post_init__(self):
+        # All of these sit on the path of an action the runner gives
+        # `adapter_action_timeout` seconds to finish. A negative value would
+        # not fail loudly, it would quietly turn a wait into no wait.
+        for f in fields(self):
+            if getattr(self, f.name) < 0:
+                raise ValueError(f"{f.name} cannot be negative")
+
+    @classmethod
+    def instant(cls) -> "Waits":
+        """No waiting, same number of attempts. For tests against a stub.
+
+        A stub device does not change between reads, so the delays can only buy
+        wall-clock -- but the attempt *counts* stay, because how many times a
+        lookup retries is behaviour a test should still see. The waiting itself
+        is covered separately, by tests that script a changing device.
+        """
+        return cls(resolve_retry=0.0, state_timeout=0.01, state_poll=0.0,
+                   playback_timeout=0.01, playback_poll=0.0)
+
+
 class VerificationError(AssertionError):
     """A scenario step could not be satisfied on the device.
 
@@ -146,16 +213,9 @@ class ElementNotFound(VerificationError):
 # abstract interface stays the minimal set a plug-in must implement --
 # these are all built from launch/tap/swipe plus a UI dump.
 class ElementActionsMixin:
-    # A scenario step fires at its scripted time, which is a guess about how
-    # long the app needs. Observed on a Galaxy A55: `subscriptions_feed_browse`
-    # taps the Subscriptions tab at t=3.0s, and at that moment YouTube has
-    # rendered its containers but not yet its bottom navigation -- so a
-    # single-shot lookup found nothing and reported the selector as decayed
-    # when the real problem was arriving early. Retrying briefly turns that
-    # common case back into a match; the budget stays well inside
-    # TestRunner.adapter_action_timeout.
-    RESOLVE_ATTEMPTS = 3
-    RESOLVE_RETRY_DELAY = 1.0
+    # One object rather than six attributes, so patience is injected in one
+    # move. An instance may shadow it: `AndroidAdapter(waits=Waits.instant())`.
+    waits: Waits = Waits()
 
     def _resolve(self, adb: AdbClientProtocol, serial: str, target, screen=None,
                  cost: dict | None = None):
@@ -178,7 +238,7 @@ class ElementActionsMixin:
 
         screen = screen or self.screen_size(adb, serial)
         resolution = None
-        for attempt in range(self.RESOLVE_ATTEMPTS):
+        for attempt in range(self.waits.resolve_attempts):
             started = time.monotonic()
             try:
                 nodes = uiauto.parse_hierarchy(uiauto.dump_hierarchy(adb, serial))
@@ -198,8 +258,8 @@ class ElementActionsMixin:
             # is available on the first attempt and every attempt after it.
             if resolution is not None and resolution.strategy != "coordinates":
                 break
-            if attempt < self.RESOLVE_ATTEMPTS - 1:
-                time.sleep(self.RESOLVE_RETRY_DELAY)
+            if attempt < self.waits.resolve_attempts - 1:
+                time.sleep(self.waits.resolve_retry)
         return resolution, screen
 
     def tap_element(self, adb: AdbClientProtocol, serial: str, target, screen=None) -> dict:
@@ -234,15 +294,6 @@ class ElementActionsMixin:
             raise VerificationError(f"expected {package} in foreground, found {focus[0]}")
         return {"package": package, "verified": True, "activity": focus[1]}
 
-    # A state check fired immediately after a tap is the same mistake as a
-    # fixed-time tap, one layer up: the app needs a moment to re-render the
-    # control, and how long depends on the device. So it waits for the
-    # expected state rather than sampling once, the same correction
-    # verify_playing needed. Kept well inside TestRunner.adapter_action_timeout,
-    # since each pass costs a UI dump.
-    STATE_TIMEOUT = 4.0
-    STATE_POLL_DELAY = 0.5
-
     def verify_element_state(self, adb: AdbClientProtocol, serial: str, target,
                              state: str = "selected", expected: bool = True,
                              timeout: float | None = None, screen=None) -> dict:
@@ -273,7 +324,7 @@ class ElementActionsMixin:
             )
         name = target.name or "target"
         cost: dict = {}
-        deadline = time.monotonic() + (self.STATE_TIMEOUT if timeout is None else timeout)
+        deadline = time.monotonic() + (self.waits.state_timeout if timeout is None else timeout)
         node = None
         while True:
             resolution, screen = self._resolve(adb, serial, target, screen, cost)
@@ -283,7 +334,7 @@ class ElementActionsMixin:
                         "verified": True, "strategy": resolution.strategy, **cost}
             if time.monotonic() >= deadline:
                 break
-            time.sleep(self.STATE_POLL_DELAY)
+            time.sleep(self.waits.state_poll)
 
         if node is None:
             return {"target": target.name, "state": state, "expected": expected,
@@ -292,15 +343,6 @@ class ElementActionsMixin:
         raise VerificationError(
             f"expected {name}.{state} to be {expected}, found {getattr(node, state)}"
         )
-
-    # How long to wait for playback to actually start. Opening a video is
-    # asynchronous -- the app has to resolve, buffer and begin rendering --
-    # so sampling the state once at an arbitrary instant is inherently
-    # flaky. Measured on a Galaxy A55: a search flow that had genuinely
-    # reached the right video still read as not-playing two seconds after
-    # the tap, because a livestream was still buffering.
-    PLAYBACK_TIMEOUT = 8.0
-    PLAYBACK_POLL_DELAY = 0.5
 
     def verify_playing(self, adb: AdbClientProtocol, serial: str, package: str | None = None,
                        timeout: float | None = None) -> dict:
@@ -316,7 +358,7 @@ class ElementActionsMixin:
         from . import uiauto
 
         package = self.mapped_package(package) if package else None
-        deadline = time.monotonic() + (self.PLAYBACK_TIMEOUT if timeout is None else timeout)
+        deadline = time.monotonic() + (self.waits.playback_timeout if timeout is None else timeout)
         playing = None
         while True:
             playing = uiauto.is_playing(adb, serial, package)
@@ -324,7 +366,7 @@ class ElementActionsMixin:
                 return {"verified": True}
             if time.monotonic() >= deadline:
                 break
-            time.sleep(self.PLAYBACK_POLL_DELAY)
+            time.sleep(self.waits.playback_poll)
 
         if playing is None:
             # No session to read at all -- "could not tell", not "not
@@ -350,8 +392,10 @@ class AndroidAdapter(ElementActionsMixin, Adapter):
     # and the profile builds one per run, so it never outlives its device.
     _cached_panel: tuple[int, int] | None = None
 
-    def __init__(self):
+    def __init__(self, waits: Waits | None = None):
         super().__init__("android")
+        if waits is not None:
+            self.waits = waits
 
     def launch_app(self, adb, serial, package, activity=None, data=None):
         package, activity = self._launch_target(package, activity)
@@ -454,8 +498,10 @@ class AndroidTvAdapter(AndroidAdapter):
 
     PACKAGE_MAP = TV_PACKAGE_MAP
 
-    def __init__(self):
+    def __init__(self, waits: Waits | None = None):
         Adapter.__init__(self, "android-tv")
+        if waits is not None:
+            self.waits = waits
 
     def tap(self, adb, serial, x, y):
         self.key_event(adb, serial, DPAD_CENTER)
@@ -467,11 +513,6 @@ class AndroidTvAdapter(AndroidAdapter):
         else:
             keycode = DPAD_RIGHT if dx < 0 else DPAD_LEFT
         self.key_event(adb, serial, keycode)
-
-    # How many DPAD presses focus may take to reach a target before the step
-    # is called a failure. Bounded because a target that focus cannot reach
-    # (off-screen, unfocusable) would otherwise loop until the run ended.
-    MAX_FOCUS_STEPS = 12
 
     def tap_element(self, adb, serial, target, screen=None):
         """Move focus onto the element, then press select.
@@ -492,7 +533,7 @@ class AndroidTvAdapter(AndroidAdapter):
         from . import uiauto
 
         screen = screen or self.screen_size(adb, serial)
-        for _ in range(self.MAX_FOCUS_STEPS):
+        for _ in range(self.waits.max_focus_steps):
             nodes = uiauto.parse_hierarchy(uiauto.dump_hierarchy(adb, serial))
             resolution = uiauto.resolve(target, nodes, screen)
             if resolution is None or resolution.node is None:
@@ -511,7 +552,8 @@ class AndroidTvAdapter(AndroidAdapter):
                         "x": resolution.point[0], "y": resolution.point[1]}
             self.key_event(adb, serial, self._step_toward(focused.center, resolution.node.center))
         raise VerificationError(
-            f"focus did not reach {target.name or 'target'} within {self.MAX_FOCUS_STEPS} steps"
+            f"focus did not reach {target.name or 'target'} "
+            f"within {self.waits.max_focus_steps} steps"
         )
 
     @staticmethod
