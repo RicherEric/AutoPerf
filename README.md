@@ -275,6 +275,30 @@ toggle pressed (`autoperf ui-dump`) and look, before writing the assertion.
 denominator. Counting one as a pass would hide a broken test; counting it as a
 fail would report a performance problem nobody observed.
 
+### Device profiles: one platform's parts, picked together
+
+Five things differ between a phone and a TV -- the adapter, the collector set,
+the selector table, the scenario library and the package names -- and until
+recently exactly one of them knew it. `profiles.select_profile(adb, serial)`
+returns the whole family:
+
+| | phone | Android TV |
+| --- | --- | --- |
+| input | touch | DPAD, no coordinate fallback |
+| collectors | cpu, memory, battery | cpu, memory (mains-powered: no battery to read) |
+| targets | the selector table | none -- the TV build draws its own UI |
+| package | `com.google.android.youtube` | `com.google.android.youtube.tv` |
+
+The point is not indirection, it is that the wrong pairing stops being
+expressible: handing a TV adapter the phone's target table was one line of
+ordinary-looking code, and it is how a Chromecast got driven correctly while
+being measured against a phone's assumptions. `preflight` now reports a TV's
+targets as `not_applicable` rather than as nineteen decayed selectors -- not
+decay, and nothing to fix.
+
+Deliberately narrow: `Storage`, `AdbClient` and the analyzer do **not** vary by
+platform and are not produced here.
+
 On Android TV, `tap_element` walks focus with DPAD keys toward the target
 instead of inheriting the phone path, which would locate the element correctly
 and then press select on whatever happened to be focused. TV deliberately has
