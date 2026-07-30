@@ -6,18 +6,16 @@ from pathlib import Path
 from autoperf.collectors import BatteryCollector, CpuCollector, MemoryCollector
 from autoperf.runner import TestRunner as Runner
 from autoperf.storage import Storage
+from tests.support import DeviceAdb
 
 
-class FakeAdb:
-    def devices(self):
-        return []
-
-    def shell(self, serial, command, timeout=10):
-        return {
-            "dumpsys cpuinfo": "12.5% TOTAL: 8.0% user + 4.5% kernel",
-            "cat /proc/meminfo": "MemTotal: 8000000 kB\nMemAvailable: 3000000 kB\n",
-            "dumpsys battery": " level: 88\n temperature: 315\n",
-        }[command]
+def FakeAdb():
+    """This file asserts on the parsed numbers, so it supplies its own output."""
+    return DeviceAdb(replies={
+        "dumpsys cpuinfo": "12.5% TOTAL: 8.0% user + 4.5% kernel",
+        "cat /proc/meminfo": "MemTotal: 8000000 kB\nMemAvailable: 3000000 kB\n",
+        "dumpsys battery": " level: 88\n temperature: 315\n",
+    })
 
 
 class CoreTests(unittest.TestCase):

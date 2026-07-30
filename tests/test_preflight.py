@@ -4,11 +4,12 @@ from unittest.mock import patch
 from autoperf import preflight
 from autoperf.adapters import AndroidAdapter
 from autoperf.scenarios import youtube
+from tests.support import EMPTY_SCREEN, PAUSED, PLAYING, SCREEN, DeviceAdb, NoWaits
 
-SCREEN = (1080, 2340)
-
-# A device showing a screen where some of the selector table's entries match
-# and the rest do not -- the realistic state of an unverified table.
+# A screen where some of the selector table's entries match and the rest do
+# not -- the realistic state of an unverified table. Local to this file
+# because that partial-match property is what preflight exists to report on;
+# the shared fixtures are deliberately either complete or empty.
 PARTIAL_SCREEN = """<hierarchy>
  <node class="android.widget.ImageView" content-desc="搜尋" clickable="true" bounds="[940,80][1040,180]"/>
  <node class="android.widget.Button" content-desc="Shorts" clickable="true" bounds="[600,2250][700,2320]"/>
@@ -17,32 +18,11 @@ PARTIAL_SCREEN = """<hierarchy>
  <node class="android.view.ViewGroup" clickable="true" bounds="[0,1400][1080,2000]" content-desc="影片三"/>
 </hierarchy>"""
 
-EMPTY_SCREEN = "<hierarchy></hierarchy>"
 
-
-class FakeDevice:
-    def __init__(self, hierarchy=PARTIAL_SCREEN, *, dump_fails=False, playing=True):
-        self.hierarchy = hierarchy
-        self.dump_fails = dump_fails
-        self.playing = playing
-        self.taps = []
-
-    def shell(self, serial, command, timeout=10):
-        if command.startswith("uiautomator"):
-            if self.dump_fails:
-                raise RuntimeError("could not get idle state")
-            return "dumped to: /sdcard/window_dump.xml"
-        if command.startswith("cat "):
-            return self.hierarchy
-        if command == "wm size":
-            return "Physical size: 1080x2340\n"
-        if command == "dumpsys window":
-            return "  mCurrentFocus=Window{a b com.google.android.youtube/.Main}"
-        if command == "dumpsys media_session":
-            return f"package=com.google.android.youtube\n state=PlaybackState {{state={3 if self.playing else 2}}}"
-        if command.startswith("input tap"):
-            self.taps.append(command)
-        return ""
+def FakeDevice(hierarchy=PARTIAL_SCREEN, *, dump_fails=False, playing=True):
+    """This file's default device: the partially-matching screen, playing."""
+    return DeviceAdb(hierarchy=hierarchy, dump_fails=dump_fails,
+                     playback_state=PLAYING if playing else PAUSED)
 
 
 def _no_sleep(_seconds):
@@ -80,16 +60,7 @@ class CoveringScenariosTests(unittest.TestCase):
         self.assertEqual(preflight.covering_scenarios(["cold_start", "play_golden"]), [])
 
 
-class CheckScenarioTests(unittest.TestCase):
-    def setUp(self):
-        # A stub device never changes between attempts, so the retry delay
-        # only buys wall-clock. The production default is exercised on
-        # hardware, not here.
-        from autoperf.adapters import ElementActionsMixin
-        patcher = patch.object(ElementActionsMixin, "RESOLVE_RETRY_DELAY", 0)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-
+class CheckScenarioTests(NoWaits, unittest.TestCase):
     def test_reports_targets_found_by_selector(self):
         device = FakeDevice()
         report = preflight.check_scenario(
@@ -143,6 +114,43 @@ class CheckScenarioTests(unittest.TestCase):
             FakeDevice(), AndroidAdapter(), "S1", "search_and_play", screen=SCREEN, sleep=_no_sleep)
         self.assertTrue(report.verifications)
         self.assertTrue(all(v.result in ("passed", "failed", "unknown") for v in report.verifications))
+
+    def test_every_asserting_action_a_scenario_uses_is_graded(self):
+        """An assertion preflight does not grade is an assertion it hides.
+
+        Adding a verify_* action to the adapter and wiring it into a scenario
+        without listing it here would make preflight *perform* the check and
+        then throw its result away -- it would fall through to the
+        navigation branch, which swallows exceptions on purpose.
+        """
+        used = {
+            step.action
+            for name in youtube.list_scenarios()
+            for step in youtube.build(name, SCREEN)
+            if step.action.startswith("verify_")
+        }
+        self.assertTrue(used <= set(preflight.VERIFICATION_ACTIONS),
+                        f"ungraded assertions: {sorted(used - set(preflight.VERIFICATION_ACTIONS))}")
+
+    def test_a_state_assertion_is_graded_by_its_own_outcome(self):
+        # Wired through build() rather than called directly, so the grading
+        # path is what is under test -- the same route a real scenario takes.
+        from autoperf.adapters import ScenarioStep
+        from autoperf.scenarios import selectors
+
+        steps = [
+            ScenarioStep(0.0, "launch_app", {"package": youtube.PACKAGE}),
+            ScenarioStep(0.0, "verify_element_state",
+                         {"target": selectors.LIKE_BUTTON, "state": "selected", "expected": True}),
+        ]
+        with patch.object(youtube, "build", return_value=steps):
+            report = preflight.check_scenario(
+                FakeDevice(), AndroidAdapter(), "S1", "like_video", screen=SCREEN, sleep=_no_sleep)
+
+        check = next(v for v in report.verifications if v.action == "verify_element_state")
+        # PARTIAL_SCREEN has no like button, so the honest answer is "unknown"
+        # -- not "failed", which would blame the device for a decayed selector.
+        self.assertEqual(check.result, "unknown")
 
     def test_a_failed_verification_makes_the_scenario_not_ok(self):
         report = preflight.check_scenario(
@@ -207,16 +215,7 @@ class SummariseTests(unittest.TestCase):
         self.assertTrue(preflight.summarise([report])["ok"])
 
 
-class RunPreflightTests(unittest.TestCase):
-    def setUp(self):
-        # A stub device never changes between attempts, so the retry delay
-        # only buys wall-clock. The production default is exercised on
-        # hardware, not here.
-        from autoperf.adapters import ElementActionsMixin
-        patcher = patch.object(ElementActionsMixin, "RESOLVE_RETRY_DELAY", 0)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-
+class RunPreflightTests(NoWaits, unittest.TestCase):
     def test_returns_a_summary_and_writes_nothing(self):
         # A preflight is a question about the device and the selector table,
         # not a measurement -- it must leave no run, no metrics, no history.
