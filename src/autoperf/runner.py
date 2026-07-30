@@ -89,6 +89,20 @@ class TestRunner:
                     f"{outcome.get('target') or step.action} resolved by coordinates, not by selector",
                     details=details,
                 ))
+            if outcome.get("dumps"):
+                # The instrumentation's own cost, recorded because it competes
+                # with what is being measured: `uiautomator dump` takes seconds
+                # on a real device and is CPU-heavy, and the collectors are
+                # sampling that CPU at the same moment. Without this the
+                # contamination is real and invisible -- CPU attributed to the
+                # app that this tool spent looking at the screen.
+                writer.put(TestEvent(
+                    run_id, "ui_introspection",
+                    f"{outcome['dumps']} UI dump(s) over "
+                    f"{outcome.get('dump_seconds', 0)}s to resolve "
+                    f"{outcome.get('target') or step.action}",
+                    details=details,
+                ))
         writer.put(TestEvent(run_id, "adapter_action", f"{step.action} completed", details=details))
 
     def _stop_driven_app(self, serial: str, writer, run_id: str) -> None:
