@@ -75,6 +75,14 @@ never a judgement call: `test_adapters.py` covers the `Adapter` ABC's primitives
 (what gets sent), `test_adapters_elements.py` covers the `ElementActionsMixin`
 built on top of them.
 
+Every device wait lives on one `Waits` object -- resolve attempts and retry,
+state timeout and poll, playback timeout and poll, TV focus steps. Patience is
+therefore injected in one move: `AndroidAdapter(waits=Waits.instant())` in a
+test, one patch in the `NoWaits` mixin, nothing to remember. It was five loose
+class attributes, and the two that tests forgot to zero cost the suite 24 of its
+87 seconds. A test asserts that no `*_TIMEOUT` / `*_DELAY` / `*_ATTEMPTS` can
+live anywhere else.
+
 Device-facing tests share two doubles from `tests/support.py`: `RecordingAdb`
 asserts what was *sent*, `DeviceAdb` supplies what the device *replies*. An
 unlisted command raises rather than returning `""`, so "the code only issues

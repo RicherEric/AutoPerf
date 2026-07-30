@@ -204,33 +204,23 @@ class DeviceAdb:
         return [c for c in self.commands if c.startswith("input tap")]
 
 
-# Every wait on the element/verification actions. A stub device does not change
-# between reads, so each of these can only buy wall-clock in a test -- and
-# forgetting one is expensive: three tests waiting out PLAYBACK_TIMEOUT once
-# cost 24 of the suite's 87 seconds. The waiting *behaviour* is covered
-# separately, by tests that script a changing device.
-WAIT_ATTRIBUTES = {
-    "RESOLVE_RETRY_DELAY": 0,
-    "STATE_TIMEOUT": 0.01,
-    "STATE_POLL_DELAY": 0,
-    "PLAYBACK_TIMEOUT": 0.01,
-    "PLAYBACK_POLL_DELAY": 0,
-}
-
-
 class NoWaits:
-    """Mixin: zero every device wait for the duration of each test.
+    """Mixin: no device waiting for the duration of each test.
 
-    Prefer an injected `timeout=` where the method offers one -- it needs no
-    patching at all. This is for the paths that reach a wait through scenario
+    One patch, because patience is one object. It used to be five attribute
+    names that nothing pointed to, and the two that were missed cost the suite
+    24 of its 87 seconds -- which is the argument for `Waits` in a sentence.
+
+    Attempt *counts* are untouched: how many times a lookup retries is
+    behaviour a test should still see. Prefer an injected `timeout=` where the
+    method offers one; this is for the paths that reach a wait through scenario
     kwargs or a CLI, where there is no argument to pass.
     """
 
     def setUp(self):
         super().setUp()
-        from autoperf.adapters import ElementActionsMixin
+        from autoperf.adapters import ElementActionsMixin, Waits
 
-        for attribute, value in WAIT_ATTRIBUTES.items():
-            patcher = patch.object(ElementActionsMixin, attribute, value)
-            patcher.start()
-            self.addCleanup(patcher.stop)
+        patcher = patch.object(ElementActionsMixin, "waits", Waits.instant())
+        patcher.start()
+        self.addCleanup(patcher.stop)
