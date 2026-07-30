@@ -8,7 +8,7 @@ import uuid
 from dataclasses import dataclass
 
 from .adb import AdbClient
-from .collectors import default_collectors
+from .profiles import select_profile
 from .models import RunStatus
 from .runner import TestRunner
 from .storage import Storage
@@ -28,7 +28,9 @@ def _device_worker(db_path: str, serial: str, duration: float, run_id: str,
     try:
         storage = Storage(db_path)
         storage.initialize()
-        TestRunner(storage, AdbClient(), default_collectors()).run(serial, duration, run_id)
+        adb = AdbClient()
+        TestRunner(storage, adb, select_profile(adb, serial).collectors()).run(
+            serial, duration, run_id)
     finally:
         stopped.set()
         heartbeat.put((run_id, time.monotonic()))

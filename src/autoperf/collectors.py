@@ -90,4 +90,12 @@ class BatteryCollector(Collector):
 
 
 def default_collectors() -> list[Collector]:
+    """Every collector, regardless of device. Prefer `profiles.select_profile`.
+
+    Kept for callers with no device in hand. Which metrics exist *is* a
+    property of the platform -- a mains-powered TV has no battery level, and
+    BatteryCollector's contract is to raise on unparseable output, so asking
+    for it there produces a collector error on every run for a metric that
+    cannot exist. Anything holding a serial should ask the profile instead.
+    """
     return [CpuCollector(), MemoryCollector(), BatteryCollector()]

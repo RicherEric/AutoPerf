@@ -37,6 +37,11 @@ MATCHED = "selector"        # found by a selector: this is what "working" means
 FALLBACK = "coordinates"    # worked, but only via the hardcoded coordinate
 MISSING = "missing"         # not found at all, and no coordinate to fall back to
 ERROR = "error"             # the check itself could not be performed
+# The platform does not publish a UI to look in, so there is no selector to
+# grade. Distinct from FALLBACK because it is not decay and there is nothing to
+# fix: reporting it as a stale selector produced a report where every single
+# entry was a false finding, and none of them named the real reason.
+NOT_APPLICABLE = "not_applicable"
 
 DEGRADED = (FALLBACK, MISSING, ERROR)
 
@@ -80,6 +85,9 @@ class ScenarioReport:
 
     @property
     def ok(self) -> bool:
+        # NOT_APPLICABLE is absent from DEGRADED on purpose: on a platform with
+        # no introspectable UI, every target reads that way and the scenario is
+        # still fine -- its verifications are what carry the verdict there.
         return (not any(check.status in DEGRADED for check in self.targets)
                 and not any(check.result == "failed" for check in self.verifications))
 
@@ -127,7 +135,7 @@ def _observe(adb: AdbClientProtocol, serial: str) -> list[dict]:
 
 def check_scenario(adb: AdbClientProtocol, adapter: Adapter, serial: str, scenario: str, *,
                    screen: tuple[int, int] | None = None, sleep=None,
-                   on_check=None) -> ScenarioReport:
+                   on_check=None, profile=None) -> ScenarioReport:
     """Walk one scenario on the device, recording how each target resolved.
 
     The steps are performed for real, in their scripted order and at their
@@ -155,7 +163,7 @@ def check_scenario(adb: AdbClientProtocol, adapter: Adapter, serial: str, scenar
             sleep(delay)
 
         if step.action == "tap_element":
-            check = _check_target(adb, adapter, serial, scenario, step, screen)
+            check = _check_target(adb, adapter, serial, scenario, step, screen, profile)
             targets.append(check)
             if on_check is not None:
                 on_check(check)
@@ -176,8 +184,22 @@ def check_scenario(adb: AdbClientProtocol, adapter: Adapter, serial: str, scenar
     return ScenarioReport(scenario, targets, verifications)
 
 
-def _check_target(adb, adapter, serial, scenario, step, screen) -> TargetCheck:
+def _check_target(adb, adapter, serial, scenario, step, screen, profile=None) -> TargetCheck:
     target = step.kwargs["target"]
+    if profile is not None and not profile.ui_is_introspectable:
+        # Still perform the action, so the scenario advances and the
+        # verifications after it mean something -- they are the checks that
+        # actually work on this platform.
+        try:
+            adapter.tap_element(adb, serial, target, screen)
+        except Exception:
+            pass
+        return TargetCheck(
+            scenario, step.at, target.name, NOT_APPLICABLE,
+            detail=f"{profile.name} does not publish its UI to the accessibility tree; "
+                   "selectors cannot be graded here -- deep links plus outcome "
+                   "verification are the working strategy",
+        )
     try:
         nodes = uiauto.parse_hierarchy(uiauto.dump_hierarchy(adb, serial))
         dump_failed = False
@@ -251,7 +273,7 @@ def summarise(reports: list[ScenarioReport]) -> dict:
                 if not entry["observed"]:
                     entry["observed"] = check.observed
 
-    needs_attention, healthy = [], []
+    needs_attention, healthy, not_applicable = [], [], []
     for entry in sorted(by_target.values(), key=lambda e: e["target"]):
         record = {
             "target": entry["target"],
@@ -260,7 +282,12 @@ def summarise(reports: list[ScenarioReport]) -> dict:
             "scenarios": sorted(entry["scenarios"]),
             "strategies": sorted(s for s in entry["strategies"] if s),
         }
-        if entry["matched"] == entry["checked"]:
+        if entry["statuses"] == {NOT_APPLICABLE}:
+            # Neither healthy nor broken. Counting these as findings made every
+            # entry in a TV report a false one; counting them as healthy would
+            # claim selectors work on a platform that has no UI to look in.
+            not_applicable.append({**record, "detail": entry["detail"]})
+        elif entry["matched"] == entry["checked"]:
             healthy.append(record)
         else:
             needs_attention.append({
@@ -280,8 +307,10 @@ def summarise(reports: list[ScenarioReport]) -> dict:
         "targets_checked": len(by_target),
         "targets_ok": len(healthy),
         "targets_needing_attention": len(needs_attention),
+        "targets_not_applicable": len(not_applicable),
         "needs_attention": needs_attention,
         "healthy": healthy,
+        "not_applicable": not_applicable,
         "failed_verifications": failed_verifications,
         "ok": not needs_attention and not failed_verifications,
     }
@@ -340,8 +369,12 @@ def _reset(adb: AdbClientProtocol, adapter: Adapter, serial: str, scenario: str,
 
 def run_preflight(adb: AdbClientProtocol, adapter: Adapter, serial: str, *,
                   scenarios: list[str] | None = None, sleep=None,
-                  on_scenario=None, on_check=None) -> dict:
+                  on_scenario=None, on_check=None, profile=None) -> dict:
     """Check one device, then stop. Returns the summary; writes nothing.
+
+    `profile` decides whether the selector questions can be asked at all. It
+    is optional so existing callers keep working, but a caller that has one
+    should pass it -- without it, a TV is graded against a phone's assumptions.
 
     See `check_scenario` for why `sleep` defaults to None.
     """
@@ -353,9 +386,11 @@ def run_preflight(adb: AdbClientProtocol, adapter: Adapter, serial: str, *,
         if on_scenario is not None:
             on_scenario(name)
         _reset(adb, adapter, serial, name, sleep)
-        reports.append(check_scenario(adb, adapter, serial, name,
-                                      screen=screen, sleep=sleep, on_check=on_check))
+        reports.append(check_scenario(adb, adapter, serial, name, screen=screen,
+                                      sleep=sleep, on_check=on_check, profile=profile))
     summary = summarise(reports)
     summary["serial"] = serial
     summary["screen"] = list(screen)
+    if profile is not None:
+        summary["profile"] = profile.describe()
     return summary

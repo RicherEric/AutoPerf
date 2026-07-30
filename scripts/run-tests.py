@@ -43,9 +43,10 @@ GROUPS: dict[str, tuple[str, tuple[str, ...]]] = {
         ("test_adb", "test_uiauto", "test_collectors_errors"),
     ),
     "commands": (
-        "What we send to a device: command strings, argument validation, adapter "
-        "selection. Breaks when a command's shape changes.",
-        ("test_adapters",),
+        "What we send to a device: command strings, argument validation, and "
+        "which platform family a device belongs to. Breaks when a command's "
+        "shape changes, or when a platform gains a part that varies.",
+        ("test_adapters", "test_profiles"),
     ),
     "elements": (
         "Deciding what to touch and proving it worked: selector resolution, the "

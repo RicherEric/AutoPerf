@@ -21,10 +21,10 @@ import statistics
 import uuid
 from dataclasses import dataclass, replace
 
-from .adapters import Adapter, select_adapter
+from .adapters import Adapter
 from .adb import AdbClientProtocol
 from .analyzer import compare, compute_trend, stats_from_aggregates
-from .collectors import default_collectors
+from .profiles import select_profile
 from .models import RunStatus
 from .runner import TestRunner
 from .scenarios import youtube as youtube_scenarios
@@ -129,7 +129,7 @@ def create_campaign(storage: Storage, spec: CampaignSpec) -> dict:
 
 
 def execute_campaign(storage: Storage, adb: AdbClientProtocol, campaign_id: str, *,
-                     adapter_factory=select_adapter, on_run=None) -> dict:
+                     adapter_factory=None, on_run=None) -> dict:
     """Run a campaign's child runs in this process, one after another.
 
     This is the CLI's execution strategy. The dashboard deliberately does
@@ -152,6 +152,10 @@ def execute_campaign(storage: Storage, adb: AdbClientProtocol, campaign_id: str,
         raise ValueError("campaign not found")
 
     serial, duration = campaign["device_serial"], campaign["duration"]
+    # Probed once for the whole campaign: the device cannot change platform
+    # between child runs, and a campaign is exactly where re-probing per
+    # iteration would multiply a shell call by a hundred for no new answer.
+    profile = select_profile(adb, serial)
     storage.update_campaign(campaign_id, RunStatus.RUNNING)
     cancelled = False
     executed = []
@@ -171,9 +175,9 @@ def execute_campaign(storage: Storage, adb: AdbClientProtocol, campaign_id: str,
         scenario = None
         try:
             if scenario_name:
-                adapter = adapter_factory(adb, serial)
+                adapter = adapter_factory(adb, serial) if adapter_factory else profile.adapter()
                 scenario = youtube_scenarios.build(scenario_name, adapter.screen_size(adb, serial))
-            TestRunner(storage, adb, default_collectors(), adapter=adapter, scenario=scenario).run(
+            TestRunner(storage, adb, profile.collectors(), adapter=adapter, scenario=scenario).run(
                 serial, duration, run["id"]
             )
         except Exception as exc:

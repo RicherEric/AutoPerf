@@ -4,7 +4,7 @@ import re
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, ClassVar
 
 from .adb import AdbClientProtocol
 
@@ -30,6 +30,14 @@ DPAD_DOWN = "KEYCODE_DPAD_DOWN"
 DPAD_LEFT = "KEYCODE_DPAD_LEFT"
 DPAD_RIGHT = "KEYCODE_DPAD_RIGHT"
 DPAD_CENTER = "KEYCODE_DPAD_CENTER"
+
+# What the TV family ships instead of the phone packages a scenario names. A
+# module constant because two readers need exactly the same answer: the adapter
+# that launches, and the profile that reports what will be launched.
+TV_PACKAGE_MAP: dict[str, tuple[str, str | None]] = {
+    "com.android.settings": ("com.android.tv.settings", ".MainSettings"),
+    "com.google.android.youtube": ("com.google.android.youtube.tv", None),
+}
 
 
 def _require_package(package: str) -> str:
@@ -73,6 +81,29 @@ def _require_input_text(text: str) -> str:
 @dataclass(slots=True)
 class Adapter(ABC):
     name: str = "adapter"
+
+    # Logical package -> (the package this platform really has, activity override).
+    # Scenarios are written against the phone's names; a platform that ships the
+    # app under a different id declares the substitution here and every method
+    # below applies it, rather than each one remembering to.
+    #
+    # Applying it per-method is what this replaces. Four overrides did it by
+    # hand -- launch, stop, and two verifies -- so the correctness of a *new*
+    # action depended on noticing that they did. Observed on a Chromecast: a
+    # verify compared a scenario's `com.google.android.youtube` against the
+    # `.tv` package that was really launched and failed every single run.
+    # ClassVar so the dataclass leaves it alone: it is platform data shared by
+    # every instance of an adapter, not per-instance state.
+    PACKAGE_MAP: ClassVar[dict[str, tuple[str, str | None]]] = {}
+
+    def mapped_package(self, package: str) -> str:
+        """The package this platform actually drives for `package`."""
+        mapped, _activity = self.PACKAGE_MAP.get(package, (package, None))
+        return mapped
+
+    def _launch_target(self, package: str, activity: str | None) -> tuple[str, str | None]:
+        mapped, mapped_activity = self.PACKAGE_MAP.get(package, (package, None))
+        return mapped, mapped_activity or activity
 
     @abstractmethod
     def launch_app(self, adb: AdbClientProtocol, serial: str, package: str, activity: str | None = None,
@@ -170,6 +201,7 @@ class ElementActionsMixin:
         """Assert `package` is actually the app in front."""
         from . import uiauto
 
+        package = self.mapped_package(package)
         focus = uiauto.current_focus(adb, serial)
         if focus is None:
             # Unreadable focus is not evidence of failure; saying so beats
@@ -259,6 +291,7 @@ class ElementActionsMixin:
         """
         from . import uiauto
 
+        package = self.mapped_package(package) if package else None
         deadline = time.monotonic() + (self.PLAYBACK_TIMEOUT if timeout is None else timeout)
         playing = None
         while True:
@@ -291,6 +324,7 @@ class AndroidAdapter(ElementActionsMixin, Adapter):
         super().__init__("android")
 
     def launch_app(self, adb, serial, package, activity=None, data=None):
+        package, activity = self._launch_target(package, activity)
         package = _require_package(package)
         if data:
             adb.shell(serial, f'am start -a android.intent.action.VIEW -d "{_require_uri(data)}" {package}')
@@ -300,7 +334,7 @@ class AndroidAdapter(ElementActionsMixin, Adapter):
             adb.shell(serial, f"monkey -p {package} -c android.intent.category.LAUNCHER 1")
 
     def stop_app(self, adb, serial, package):
-        adb.shell(serial, f"am force-stop {_require_package(package)}")
+        adb.shell(serial, f"am force-stop {_require_package(self.mapped_package(package))}")
 
     def tap(self, adb, serial, x, y):
         adb.shell(serial, f"input tap {int(x)} {int(y)}")
@@ -371,40 +405,10 @@ class AndroidAdapter(ElementActionsMixin, Adapter):
 class AndroidTvAdapter(AndroidAdapter):
     """Maps phone-oriented scenarios onto Android TV packages and DPAD input."""
 
-    _PACKAGE_MAP = {
-        "com.android.settings": ("com.android.tv.settings", ".MainSettings"),
-        "com.google.android.youtube": ("com.google.android.youtube.tv", None),
-    }
+    PACKAGE_MAP = TV_PACKAGE_MAP
 
     def __init__(self):
         Adapter.__init__(self, "android-tv")
-
-    def launch_app(self, adb, serial, package, activity=None, data=None):
-        package, mapped_activity = self._PACKAGE_MAP.get(package, (package, None))
-        super().launch_app(adb, serial, package, mapped_activity or activity, data)
-
-    def stop_app(self, adb, serial, package):
-        super().stop_app(adb, serial, self.mapped_package(package))
-
-    def mapped_package(self, package: str) -> str:
-        """The package this adapter actually drives for `package`.
-
-        Scenarios are written against the phone package names; the TV variants
-        are substituted here. Verification has to apply the same substitution
-        or it compares a scenario's `com.google.android.youtube` against the
-        `com.google.android.youtube.tv` that was really launched and fails
-        every single time -- observed on a Chromecast, where it marked
-        otherwise healthy runs unverified.
-        """
-        mapped, _ = self._PACKAGE_MAP.get(package, (package, None))
-        return mapped
-
-    def verify_foreground(self, adb, serial, package):
-        return super().verify_foreground(adb, serial, self.mapped_package(package))
-
-    def verify_playing(self, adb, serial, package=None):
-        return super().verify_playing(
-            adb, serial, self.mapped_package(package) if package else None)
 
     def tap(self, adb, serial, x, y):
         self.key_event(adb, serial, DPAD_CENTER)
@@ -471,8 +475,8 @@ class AndroidTvAdapter(AndroidAdapter):
         return DPAD_RIGHT if dx > 0 else DPAD_LEFT
 
 
-def select_adapter(adb: AdbClientProtocol, serial: str) -> Adapter:
-    """Pick the adapter matching what the device actually is.
+def is_tv(adb: AdbClientProtocol, serial: str) -> bool:
+    """Whether this device is an Android TV, by its own report.
 
     `ro.build.characteristics` is a comma-separated list ("tv",
     "tv,nosdcard", "phone", "default", ...). Each entry is stripped before
@@ -483,17 +487,30 @@ def select_adapter(adb: AdbClientProtocol, serial: str) -> Adapter:
     coordinates to a device that only responds to DPAD key events, so
     scenarios appeared to run while doing nothing at all.
 
-    Falls back to the generic adapter if the property can't be read: an
-    unreadable characteristics string is not a reason to fail a whole run,
-    and the generic adapter is right for the large majority of devices.
+    An unreadable property answers False: it is not a reason to fail a run,
+    and the generic phone family is right for the large majority of devices.
+
+    The one place the platform is probed. `select_adapter` here and
+    `profiles.select_profile` both come through it, so the two cannot
+    disagree about what a device is.
     """
     try:
         characteristics = adb.shell(serial, "getprop ro.build.characteristics").lower()
     except Exception:
-        return AndroidAdapter()
-    if "tv" in {entry.strip() for entry in characteristics.split(",")}:
-        return AndroidTvAdapter()
-    return AndroidAdapter()
+        return False
+    return "tv" in {entry.strip() for entry in characteristics.split(",")}
+
+
+def select_adapter(adb: AdbClientProtocol, serial: str) -> Adapter:
+    """The adapter for this device.
+
+    Kept for callers that need only the adapter. Anything that also needs
+    collectors, a target table or a package name should ask
+    `profiles.select_profile` instead -- those vary by platform together, and
+    picking them separately is how a TV ends up driven by a TV adapter while
+    being measured against a phone's assumptions.
+    """
+    return AndroidTvAdapter() if is_tv(adb, serial) else AndroidAdapter()
 
 
 @dataclass(frozen=True, slots=True)

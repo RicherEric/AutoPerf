@@ -7,10 +7,10 @@ import uuid
 from dataclasses import asdict
 
 from . import campaigns as campaign_core
-from .adapters import AndroidAdapter, ScenarioStep
+from .adapters import ScenarioStep
 from .adb import AdbClient
+from .profiles import select_profile
 from .analyzer import app_version_delta, compare, stats_from_aggregates
-from .collectors import default_collectors
 from .runner import TestRunner
 from .scenarios import youtube as youtube_scenarios
 from .storage import Storage
@@ -149,9 +149,10 @@ def _run_preflight(adb: AdbClient, serial: str, *, scenarios=None, allow_fallbac
     measurement is spent on top of it.
     """
     from . import preflight as preflight_core
-    from .adapters import select_adapter
+    from .profiles import select_profile
 
-    adapter = select_adapter(adb, serial)
+    profile = select_profile(adb, serial)
+    adapter = profile.adapter()
     names = scenarios or preflight_core.covering_scenarios()
     print(f"preflight: {len(names)} scenario(s) covering every selector target", file=sys.stderr)
 
@@ -163,7 +164,8 @@ def _run_preflight(adb: AdbClient, serial: str, *, scenarios=None, allow_fallbac
             print(f"     [{check.status}] {check.target}", file=sys.stderr)
 
     summary = preflight_core.run_preflight(
-        adb, adapter, serial, scenarios=names, on_scenario=announce, on_check=report
+        adb, adapter, serial, scenarios=names, on_scenario=announce, on_check=report,
+        profile=profile,
     )
     if allow_fallback:
         # Fallbacks stay in the report either way -- this only stops them
@@ -280,11 +282,15 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print(json.dumps(result, indent=2))
     elif args.command == "run":
+        # One probe for the command, so the adapter and the collectors are the
+        # same platform's. Asking for them separately is how a TV gets driven
+        # correctly and then measured for a battery it does not have.
+        profile = select_profile(adb, args.serial)
         adapter = None
         scenario = None
         run_id = args.resume
         if args.youtube_scenario:
-            adapter = AndroidAdapter()
+            adapter = profile.adapter()
             screen = adapter.screen_size(adb, args.serial)
             scenario = youtube_scenarios.build(args.youtube_scenario, screen)
             if run_id is None:
@@ -294,9 +300,9 @@ def main(argv: list[str] | None = None) -> int:
                 run_id = uuid.uuid4().hex
                 storage.create_run(run_id, args.serial, youtube_scenario=args.youtube_scenario)
         elif args.app:
-            adapter = AndroidAdapter()
+            adapter = profile.adapter()
             scenario = [ScenarioStep(0.0, "launch_app", {"package": args.app})]
-        run_id = TestRunner(storage, adb, default_collectors(), adapter=adapter, scenario=scenario).run(
+        run_id = TestRunner(storage, adb, profile.collectors(), adapter=adapter, scenario=scenario).run(
             args.serial, args.duration, run_id
         )
         print(run_id)
@@ -403,14 +409,15 @@ def main(argv: list[str] | None = None) -> int:
             "elements": uiauto.describe_clickables(nodes, limit=args.limit),
         }, indent=2))
     else:
-        adapter = AndroidAdapter()
+        profile = select_profile(adb, args.serial)
+        adapter = profile.adapter()
         screen = adapter.screen_size(adb, args.serial)
         results = []
         for name in youtube_scenarios.list_scenarios(tier=args.tier):
             scenario = youtube_scenarios.build(name, screen)
             run_id = uuid.uuid4().hex
             storage.create_run(run_id, args.serial, youtube_scenario=name)
-            TestRunner(storage, adb, default_collectors(), adapter=adapter, scenario=scenario).run(
+            TestRunner(storage, adb, profile.collectors(), adapter=adapter, scenario=scenario).run(
                 args.serial, args.duration, run_id
             )
             results.append({"scenario": name, "run_id": run_id, "status": storage.get_run(run_id)["status"]})

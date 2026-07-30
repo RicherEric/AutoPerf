@@ -2,9 +2,8 @@ from __future__ import annotations
 
 from celery import shared_task
 
-from autoperf.adapters import select_adapter
+from autoperf.profiles import select_profile
 from autoperf.adb import AdbClient
-from autoperf.collectors import default_collectors
 from autoperf.runner import DeviceBusyError, TestRunner
 from autoperf.scenarios import youtube as youtube_scenarios
 from autoperf.storage import Storage
@@ -38,14 +37,17 @@ def run_test_task(self, db_path: str, serial: str, duration: float, run_id: str,
     if storage.get_run(run_id) is None:
         storage.create_run(run_id, serial, youtube_scenario)
     adb = AdbClient()
+    # One probe: the adapter that drives this device and the metrics worth
+    # sampling on it are the same platform's answer.
+    profile = select_profile(adb, serial)
     adapter = None
     scenario = None
     if youtube_scenario:
-        adapter = select_adapter(adb, serial)
+        adapter = profile.adapter()
         screen = adapter.screen_size(adb, serial)
         scenario = youtube_scenarios.build(youtube_scenario, screen)
     try:
-        TestRunner(storage, adb, default_collectors(), adapter=adapter, scenario=scenario).run(serial, duration, run_id)
+        TestRunner(storage, adb, profile.collectors(), adapter=adapter, scenario=scenario).run(serial, duration, run_id)
         completed = storage.get_run(run_id)
         if (
             completed
