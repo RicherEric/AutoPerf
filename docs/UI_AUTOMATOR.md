@@ -297,3 +297,87 @@ captured values.
   often. Expected, visible in `selector_fallback` events.
 - Pin the app version. Selectors cannot decay until it changes, and a
   comparison across two app builds measures the app rather than the device.
+
+## Measured on the hardware: what each primitive actually costs
+
+Galaxy A55 (SM-A5560), Android 15, adb over USB, median of five trials.
+
+| Read | Median | Payload | Note |
+| --- | --: | --: | --- |
+| `wm size` | 147ms | 25 B | cached per adapter now: it cannot change during a run |
+| `dumpsys window displays` | 122ms | 25 KB | rotation; re-read every action because rotation moves |
+| `dumpsys window` | 141ms | 69 KB | backs `verify_foreground` |
+| `dumpsys media_session` | 121ms | 20 KB | backs `verify_playing` |
+| `dumpsys cpuinfo` | 118ms | 8.8 KB | |
+| `cat /proc/meminfo` | 105ms | 1.6 KB | |
+| `dumpsys battery` | 113ms | 11 KB | |
+| **`uiautomator dump` + `cat`** | **2611ms** | 27 KB | **20x everything else** |
+
+### The dump is the whole cost, and no transport trick helps
+
+| Strategy | Median | Verdict |
+| --- | --: | --- |
+| `dump` + `cat` | 2611ms | current |
+| `dump --compressed` + `cat` | 2455ms | 6% faster, **27 nodes instead of 72** -- prunes what selectors need |
+| `shell uiautomator dump /dev/tty` | 2331ms | returns no XML, only a status line |
+| `exec-out uiautomator dump /dev/tty` | 2546ms | appends a status line after the closing tag, does not parse |
+| `exec-out dump --compressed /dev/tty` | 2484ms | both of the above problems |
+
+All within 12%: the cost is `uiautomator dump` waiting for an idle UI, not the
+transport. **The only optimisation that matters is dumping less often.**
+
+### Cost depends on what is on screen
+
+| Screen | Median | Worst |
+| --- | --: | --: |
+| launcher, idle | 2.60s | 2.64s |
+| YouTube home feed | 2.73s | 2.82s |
+| watch page, video playing | 3.01s | **11.66s** |
+
+A playing video is never idle, so the tail is long and unbounded.
+
+### Which is why the retry budget was wrong
+
+`resolve_attempts=3` with a 1s delay is 11.0s at the *median* watch-page cost,
+against `TestRunner.adapter_action_timeout` of 10.0s. Measured before the fix, a
+`tap_element` for an absent target on a playing watch page took **25.5s** (three
+dumps, 23.4s of dumping) -- so the retry that exists to rescue an early arrival
+instead got the step killed, which is strictly worse than not retrying.
+
+Now bounded by `resolve_budget` (7.0s) and `dump_timeout` (6.0s), both provably
+under the action timeout. Re-measured on the same screen: 6.25s and 3.28s, both
+fitting. A slow device gets one attempt and a coordinate fallback; a fast one
+still gets all three.
+
+### Launching: the deep link wins twice
+
+| | Command returns | App actually in front |
+| --- | --: | --: |
+| `monkey -c LAUNCHER` | 506ms | 0.95s |
+| `am start -a VIEW -d <watch url>` | 115ms | 0.57s |
+
+Faster *and* deterministic, which is why the `play_*` presets are the right tool
+for baseline comparison.
+
+### The like button reports no state
+
+Dumped the node before and after a real tap on the like control:
+
+```
+before  desc='和另外 19,258,638 人都喜歡這部影片'  selected=False  checked=False
+after   desc='和另外 19,258,651 人都喜歡這部影片'  selected=False  checked=False
+```
+
+`selected` and `checked` never move. The only thing that changes is the like
+*count* in the label -- global traffic on the video, not this device's tap; it
+moved by 13 between two reads seconds apart. So there is nothing to assert on:
+`verify_element_state` would report a failure on every run, and a before/after
+comparison would read other people's likes as proof of ours. The mechanism is
+sound and correct; this build gives it nothing to point at.
+
+### Selector health on the A55 home feed
+
+10 of 22 targets matched by selector; the rest fell to coordinates, and all but
+one legitimately -- they belong to screens the feed is not. The exception is
+`third_video`: this screen fits two feed rows above the fold, so an index-2
+structural selector cannot match without scrolling first.
