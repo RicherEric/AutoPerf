@@ -19,14 +19,47 @@ PARTIAL_SCREEN = """<hierarchy>
 </hierarchy>"""
 
 
-def FakeDevice(hierarchy=PARTIAL_SCREEN, *, dump_fails=False, playing=True):
+def FakeDevice(hierarchy=PARTIAL_SCREEN, *, dump_fails=False, playing=True, locked=False):
     """This file's default device: the partially-matching screen, playing."""
-    return DeviceAdb(hierarchy=hierarchy, dump_fails=dump_fails,
+    return DeviceAdb(hierarchy=hierarchy, dump_fails=dump_fails, locked=locked,
                      playback_state=PLAYING if playing else PAUSED)
 
 
 def _no_sleep(_seconds):
     """Preflight paces itself to the scenario's own timeline; tests must not."""
+
+
+class ScenarioScopeTests(unittest.TestCase):
+    """What one scenario would grade -- asked before spending a device on it."""
+
+    def test_targets_of_lists_only_that_scenario_s_targets(self):
+        expected = {
+            step.kwargs["target"].name
+            for step in youtube.build("search_and_play", SCREEN)
+            if step.action == "tap_element"
+        }
+        self.assertEqual(preflight.targets_of("search_and_play"), expected)
+        self.assertTrue(expected)
+
+    def test_deep_link_presets_grade_nothing(self):
+        # The reason they cost zero UI dumps is the reason there is nothing to
+        # preflight: they never resolve a selector. A caller has to be able to
+        # tell that apart from "checked and found nothing wrong".
+        for name in youtube.list_scenarios():
+            if name.startswith("play_"):
+                self.assertEqual(preflight.targets_of(name), set(), name)
+
+    def test_every_scenario_in_the_covering_set_has_something_to_grade(self):
+        for name in preflight.covering_scenarios():
+            self.assertTrue(preflight.targets_of(name), name)
+
+    def test_app_packages_names_the_build_being_graded(self):
+        packages = preflight.app_packages(["search_and_play"])
+        self.assertEqual(packages, ["com.google.android.youtube"])
+
+    def test_app_packages_deduplicates_across_scenarios(self):
+        names = preflight.covering_scenarios()
+        self.assertEqual(preflight.app_packages(names), sorted(set(preflight.app_packages(names))))
 
 
 class CoveringScenariosTests(unittest.TestCase):
@@ -78,6 +111,59 @@ class CheckScenarioTests(NoWaits, unittest.TestCase):
         video = next(c for c in report.targets if c.target == "home_feed_video")
         self.assertEqual(video.status, preflight.FALLBACK)
         self.assertFalse(report.ok)
+
+    def test_targets_after_a_blind_tap_are_not_graded(self):
+        """The screen is no longer the one the scenario describes.
+
+        Once a tap has gone to a coordinate it was blind, so the app is
+        wherever that pixel led. Grading the next target there measures the
+        navigation failure, not the selector -- and reads as a second stale
+        selector. On a Redmi Pad 2 this cascade turned one blind tap on
+        `library_tab` into `downloads_row` being reported broken too; both
+        resolve when the screen is reached properly.
+        """
+        device = FakeDevice(hierarchy=EMPTY_SCREEN)
+        report = preflight.check_scenario(
+            device, AndroidAdapter(), "S1", "library_and_downloads_browse",
+            screen=SCREEN, sleep=_no_sleep)
+
+        statuses = [c.status for c in report.targets]
+        # `library_tab` gave up its coordinate once two devices agreed it
+        # resolves, so a miss here is MISSING rather than a blind tap.
+        self.assertEqual(statuses[0], preflight.MISSING)
+        self.assertTrue(all(s == preflight.UNRELIABLE for s in statuses[1:]),
+                        f"expected everything after the blind tap to be ungraded, got {statuses}")
+
+    def test_an_ungraded_target_is_neither_a_finding_nor_a_pass(self):
+        device = FakeDevice(hierarchy=EMPTY_SCREEN)
+        report = preflight.check_scenario(
+            device, AndroidAdapter(), "S1", "library_and_downloads_browse",
+            screen=SCREEN, sleep=_no_sleep)
+        summary = preflight.summarise([report])
+
+        ungraded = {row["target"] for row in summary["ungraded"]}
+        self.assertTrue(ungraded)
+        # Counting these as findings would send someone to fix selectors that
+        # were never looked for; counting them as healthy would claim a check
+        # that never happened.
+        self.assertFalse(ungraded & {row["target"] for row in summary["needs_attention"]})
+        self.assertFalse(ungraded & {row["target"] for row in summary["healthy"]})
+        self.assertEqual(summary["targets_ungraded"], len(ungraded))
+
+    def test_a_locked_device_grades_nothing(self):
+        """A Redmi Pad 2 with a 60-second timeout locked mid-session, and the
+        report that came back said the selector table had collapsed. What it
+        had actually compared every target against was SystemUI's 18
+        lockscreen nodes.
+        """
+        device = FakeDevice(locked=True)
+        report = preflight.check_scenario(
+            device, AndroidAdapter(), "S1", "home_feed_tap_video",
+            screen=SCREEN, sleep=_no_sleep)
+
+        self.assertTrue(report.targets)
+        self.assertTrue(all(c.status == preflight.UNRELIABLE for c in report.targets))
+        self.assertIn("locked", report.targets[0].detail)
 
     def test_still_taps_when_a_selector_missed(self):
         # The scenario has to keep advancing, or every target on a later

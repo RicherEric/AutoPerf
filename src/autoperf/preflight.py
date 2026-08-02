@@ -42,6 +42,28 @@ ERROR = "error"             # the check itself could not be performed
 # fix: reporting it as a stale selector produced a report where every single
 # entry was a false finding, and none of them named the real reason.
 NOT_APPLICABLE = "not_applicable"
+# The screen this target would have been graded on is not the screen the
+# scenario intended, so whatever the selector did here says nothing about the
+# selector. Two causes, both measured on 2026-08-02:
+#
+#   * an earlier tap in the same scenario fell through to its coordinate, so
+#     it was blind and the app is wherever that pixel led;
+#   * the device locked mid-session -- a Redmi Pad 2 with a 60-second timeout
+#     did this, and every target graded afterwards was compared against
+#     SystemUI's 18 lockscreen nodes.
+#
+# Both produced a report that read "the selector table has collapsed on
+# tablets". Re-checked with the device awake and navigated by working
+# selectors, the same table resolved. Reporting these as decay is worse than
+# reporting nothing: it sends someone to rewrite selectors that are fine, and
+# the next real regression arrives in a report nobody believes.
+UNRELIABLE = "unreliable"
+# The target is marked `coordinate_only`: the app draws this control itself, so
+# it has never been in the accessibility tree on any device measured. Reaching
+# it by coordinate is the design, not decay. Reported apart from FALLBACK
+# because a finding nobody can act on is worse than no finding -- it is a
+# permanent red mark that teaches readers to skim past the list.
+BY_DESIGN = "by_design"
 
 DEGRADED = (FALLBACK, MISSING, ERROR)
 
@@ -92,6 +114,27 @@ class ScenarioReport:
                 and not any(check.result == "failed" for check in self.verifications))
 
 
+def targets_of(scenario: str) -> set[str]:
+    """The distinct targets one scenario would have graded.
+
+    Empty means the scenario resolves no selector at all -- every `play_*`
+    deep-link preset is in that class. Preflighting one of those costs a
+    launch and two verifications and can report nothing about the selector
+    table, so a caller that runs preflight on a schedule needs to be able to
+    ask this before spending the device time.
+    """
+    return {
+        step.kwargs["target"].name
+        for step in youtube_scenarios.build(scenario, (1080, 2340))
+        if step.action == "tap_element" and step.kwargs.get("target") is not None
+    }
+
+
+def app_packages(scenarios: list[str]) -> list[str]:
+    """Every app these scenarios launch -- i.e. the builds being graded."""
+    return sorted({package for name in scenarios for package in _packages_of(name)})
+
+
 def covering_scenarios(names: list[str] | None = None) -> list[str]:
     """The fewest scenarios that still exercise every distinct target.
 
@@ -102,11 +145,7 @@ def covering_scenarios(names: list[str] | None = None) -> list[str]:
     """
     remaining: dict[str, set[str]] = {}
     for name in names or youtube_scenarios.list_scenarios():
-        targets = {
-            step.kwargs["target"].name
-            for step in youtube_scenarios.build(name, (1080, 2340))
-            if step.action == "tap_element" and step.kwargs.get("target") is not None
-        }
+        targets = targets_of(name)
         if targets:
             remaining[name] = targets
 
@@ -156,6 +195,10 @@ def check_scenario(adb: AdbClientProtocol, adapter: Adapter, serial: str, scenar
     targets: list[TargetCheck] = []
     verifications: list[VerificationCheck] = []
     started = time.monotonic()
+    # Set once the app is no longer known to be on the screen the scenario
+    # describes. Everything after it is reported as UNRELIABLE rather than
+    # graded -- see the constant for what grading through this cost.
+    lost_the_screen = ""
 
     for step in steps:
         delay = step.at - (time.monotonic() - started)
@@ -163,7 +206,25 @@ def check_scenario(adb: AdbClientProtocol, adapter: Adapter, serial: str, scenar
             sleep(delay)
 
         if step.action == "tap_element":
-            check = _check_target(adb, adapter, serial, scenario, step, screen, profile)
+            if not lost_the_screen and _is_locked(adb, serial):
+                lost_the_screen = "device locked"
+            if lost_the_screen:
+                check = TargetCheck(
+                    scenario, step.at, step.kwargs["target"].name, UNRELIABLE,
+                    detail=f"not graded: {lost_the_screen}")
+            else:
+                check = _check_target(adb, adapter, serial, scenario, step, screen, profile)
+                # BY_DESIGN counts too: an intended coordinate is still a
+                # coordinate, and whether that pixel hit the control on *this*
+                # device is exactly what is not known. Its own grade stands --
+                # only what comes after it is in doubt.
+                if check.status in (FALLBACK, BY_DESIGN):
+                    lost_the_screen = f"{check.target} was tapped blind"
+                elif check.status in (MISSING, ERROR):
+                    # Worse than blind: no tap happened at all, so the app is
+                    # certainly still on the previous screen and every target
+                    # after this one would be looked for in the wrong place.
+                    lost_the_screen = f"{check.target} was never tapped"
             targets.append(check)
             if on_check is not None:
                 on_check(check)
@@ -184,6 +245,47 @@ def check_scenario(adb: AdbClientProtocol, adapter: Adapter, serial: str, scenar
     return ScenarioReport(scenario, targets, verifications)
 
 
+def _is_locked(adb: AdbClientProtocol, serial: str) -> bool:
+    """Whether the keyguard is up right now.
+
+    Only `True` counts. A build that does not print the line reads as `None`,
+    and "the dump did not say" must not be turned into "stop grading" -- that
+    would make preflight silently useless on a device it simply could not
+    interrogate.
+    """
+    from . import uiauto
+
+    return uiauto.window_state(adb, serial)[1] is True
+
+
+def _settled_nodes(adb: AdbClientProtocol, serial: str,
+                   attempts: int = 3) -> tuple[list, str | bool]:
+    """Dump until two consecutive reads agree on how many nodes there are.
+
+    A feed that is still filling in reports a smaller tree, and grading a
+    selector against a half-built screen is indistinguishable from grading it
+    against a stale one. Measured on a Redmi Pad 2: the YouTube home feed read
+    85 nodes eight seconds after launch and 176 once it had settled, and
+    `search_icon` missed on the first and matched on the second.
+
+    Costly deliberately -- this is a second `uiautomator dump`, 2.6s and up.
+    Preflight is allowed to be slow in a way a measured run is not: it takes
+    no metrics, so its own cost contaminates nothing, and its entire value is
+    that a finding can be believed.
+    """
+    previous = None
+    nodes: list = []
+    for _ in range(attempts):
+        try:
+            nodes = uiauto.parse_hierarchy(uiauto.dump_hierarchy(adb, serial))
+        except Exception as exc:
+            return [], str(exc)
+        if previous is not None and len(nodes) == previous:
+            return nodes, False
+        previous = len(nodes)
+    return nodes, False
+
+
 def _check_target(adb, adapter, serial, scenario, step, screen, profile=None) -> TargetCheck:
     target = step.kwargs["target"]
     if profile is not None and not profile.ui_is_introspectable:
@@ -200,11 +302,7 @@ def _check_target(adb, adapter, serial, scenario, step, screen, profile=None) ->
                    "selectors cannot be graded here -- deep links plus outcome "
                    "verification are the working strategy",
         )
-    try:
-        nodes = uiauto.parse_hierarchy(uiauto.dump_hierarchy(adb, serial))
-        dump_failed = False
-    except Exception as exc:
-        nodes, dump_failed = [], str(exc)
+    nodes, dump_failed = _settled_nodes(adb, serial)
 
     resolution = uiauto.resolve(target, nodes, screen)
 
@@ -221,6 +319,16 @@ def _check_target(adb, adapter, serial, scenario, step, screen, profile=None) ->
         return TargetCheck(scenario, step.at, target.name, ERROR, detail=str(exc))
 
     if resolution.strategy == "coordinates":
+        if target.coordinate_only and not dump_failed:
+            # Not a finding: the control is drawn by the app, so no selector
+            # was ever going to match it. Still recorded, because "this is
+            # still true on this device" is exactly what a second device is
+            # for -- `player_surface` sat in this class until YouTube
+            # 21.30.209 gave it a resource-id.
+            return TargetCheck(scenario, step.at, target.name, BY_DESIGN,
+                               strategy="coordinates",
+                               detail="drawn by the app; not in the accessibility tree "
+                                      "on any device measured so far")
         detail = (f"uiautomator dump failed ({dump_failed}); could not evaluate selectors"
                   if dump_failed else "no selector matched; fell through to the coordinate")
         return TargetCheck(scenario, step.at, target.name, FALLBACK, strategy="coordinates",
@@ -259,8 +367,19 @@ def summarise(reports: list[ScenarioReport]) -> dict:
             entry = by_target.setdefault(check.target, {
                 "target": check.target, "checked": 0, "matched": 0,
                 "statuses": set(), "scenarios": set(), "strategies": set(),
-                "detail": "", "observed": [],
+                "detail": "", "observed": [], "unreliable": 0,
             })
+            if check.status == UNRELIABLE:
+                # Deliberately not counted as checked: this target was never
+                # actually looked for on its own screen, and folding it into
+                # the denominator would turn "we could not ask" into evidence
+                # either way. It is surfaced separately so a report that
+                # graded almost nothing cannot be mistaken for a clean one.
+                entry["unreliable"] = entry.get("unreliable", 0) + 1
+                entry["scenarios"].add(check.scenario)
+                if not entry["detail"]:
+                    entry["detail"] = check.detail
+                continue
             entry["checked"] += 1
             entry["statuses"].add(check.status)
             entry["scenarios"].add(check.scenario)
@@ -273,7 +392,7 @@ def summarise(reports: list[ScenarioReport]) -> dict:
                 if not entry["observed"]:
                     entry["observed"] = check.observed
 
-    needs_attention, healthy, not_applicable = [], [], []
+    needs_attention, healthy, not_applicable, ungraded, by_design = [], [], [], [], []
     for entry in sorted(by_target.values(), key=lambda e: e["target"]):
         record = {
             "target": entry["target"],
@@ -282,6 +401,14 @@ def summarise(reports: list[ScenarioReport]) -> dict:
             "scenarios": sorted(entry["scenarios"]),
             "strategies": sorted(s for s in entry["strategies"] if s),
         }
+        if entry["unreliable"] and not entry["checked"]:
+            # Never reached on its own screen in any scenario. Not a finding
+            # and not a pass -- the run simply has nothing to say about it.
+            ungraded.append({**record, "detail": entry["detail"]})
+            continue
+        if entry["statuses"] == {BY_DESIGN}:
+            by_design.append({**record, "detail": entry["detail"]})
+            continue
         if entry["statuses"] == {NOT_APPLICABLE}:
             # Neither healthy nor broken. Counting these as findings made every
             # entry in a TV report a false one; counting them as healthy would
@@ -308,9 +435,15 @@ def summarise(reports: list[ScenarioReport]) -> dict:
         "targets_ok": len(healthy),
         "targets_needing_attention": len(needs_attention),
         "targets_not_applicable": len(not_applicable),
+        # A report that graded almost nothing must not read like a clean one,
+        # so this is a first-class number rather than an absence.
+        "targets_ungraded": len(ungraded),
+        "targets_by_design": len(by_design),
         "needs_attention": needs_attention,
         "healthy": healthy,
         "not_applicable": not_applicable,
+        "ungraded": ungraded,
+        "by_design": by_design,
         "failed_verifications": failed_verifications,
         "ok": not needs_attention and not failed_verifications,
     }
