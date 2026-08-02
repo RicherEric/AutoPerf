@@ -1,0 +1,52 @@
+# The whole suite, on every push.
+#
+# This is the payoff for a design decision the codebase already made: the
+# device layer has exactly one seam (`adb.shell`), so the core suite runs
+# without a phone attached. That is what makes CI possible at all here -- no
+# device farm, no emulator, no adb on the runner.
+#
+# Both platforms are run because the project makes platform-specific claims in
+# two places: Celery's `--pool=solo` (chosen for Windows) and the `spawn` start
+# method in DeviceSupervisor. Windows is where development happens; Linux is
+# the platform nobody runs by hand.
+name: tests
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Never cancel the other platform on one failure -- when the two
+      # disagree, seeing both results *is* the diagnosis.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          # requirements.txt is only `-e .[...]`; the real constraints live in
+          # pyproject.toml, so both have to key the cache.
+          cache-dependency-path: |
+            requirements.txt
+            pyproject.toml
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Run the suite
+        # Core (unittest) then webapp (Django). Needs no Redis: the Celery
+        # tests patch the app rather than talking to a broker.
+        run: python scripts/run-tests.py

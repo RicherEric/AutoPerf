@@ -34,7 +34,8 @@ GROUPS: dict[str, tuple[str, tuple[str, ...]]] = {
         "Our own logic. Nothing here knows a device exists, so a device or app "
         "change can never break it.",
         ("test_models", "test_analyzer", "test_storage", "test_scenarios_coords",
-         "test_scenarios_youtube", "test_screen_stream", "test_suite_groups"),
+         "test_scenarios_youtube", "test_screen_stream", "test_suite_groups",
+         "test_demo"),
     ),
     "parsing": (
         "Reading what a device says. The fixtures live here, so this is the "
@@ -55,9 +56,10 @@ GROUPS: dict[str, tuple[str, tuple[str, ...]]] = {
         ("test_adapters_elements",),
     ),
     "flow": (
-        "Whole flows against a fake device: runner, campaigns, preflight, CLI.",
+        "Whole flows against a fake device: runner, campaigns, preflight, CLI, "
+        "and how many workers get started to execute them.",
         ("test_core", "test_runner", "test_campaigns", "test_preflight", "test_cli",
-         "test_workers"),
+         "test_workers", "test_start_worker"),
     ),
 }
 

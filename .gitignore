@@ -11,3 +11,6 @@ webapp/frontend/node_modules/
 webapp/frontend/dist/
 webapp/recordings/
 .tmp/
+# Build cache for scripts/build-docs-html.py -- the generated HTML inlines it,
+# so the page is self-contained and this copy never needs to be committed.
+docs/vendor/
