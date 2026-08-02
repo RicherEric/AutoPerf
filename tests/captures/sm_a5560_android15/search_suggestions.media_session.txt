@@ -23,28 +23,29 @@ Record for full_user=0
   Media key listener: null
   Media key listener package: 
   OnMediaKeyEventDispatchedListener: added 0 listener(s)
-  OnMediaKeyEventSessionChangedListener: added 2 listener(s)
-    from com.samsung.android.app.routines
+  OnMediaKeyEventSessionChangedListener: added 3 listener(s)
+    from com.android.systemui
     from com.samsung.android.knox.app.networkfilter
+    from com.android.systemui
   Last MediaButtonReceiver: null
   High priority mediakey receiver: null
   Volume key long-press receiver: null
-  Media button session is com.google.android.youtube/YouTube playerlib/77 (userId=0)
+  Media button session is com.google.android.youtube/YouTube playerlib/128 (userId=0)
   Sessions Stack - have 1 sessions:
-    YouTube playerlib com.google.android.youtube/YouTube playerlib/77 (userId=0)
-      ownerPid=11282, ownerUid=10251, userId=0
+    YouTube playerlib com.google.android.youtube/YouTube playerlib/128 (userId=0)
+      ownerPid=22672, ownerUid=10251, userId=0
       package=com.google.android.youtube
-      launchIntent=PendingIntent{e936e17: PendingIntentRecord{d1b1204 com.google.android.youtube startActivity}}
+      launchIntent=null
       mediaButtonReceiver=null
       active=false
       flags=3
       rating type=2
       controllers: 4
-       com.android.bluetoothcom.android.server.media.MediaSessionRecord$ControllerStub$$ExternalSyntheticLambda0@71c13ed
-       com.android.bluetoothcom.android.server.media.MediaSessionRecord$ControllerStub$$ExternalSyntheticLambda0@b54e222
-       com.android.bluetoothcom.android.server.media.MediaSessionRecord$ControllerStub$$ExternalSyntheticLambda0@856d4b3
-       com.android.bluetoothcom.android.server.media.MediaSessionRecord$ControllerStub$$ExternalSyntheticLambda0@7394a70
-      state=PlaybackState {state=STOPPED(1), position=0, buffered position=0, speed=1.0, updated=70801739, actions=0, custom actions=[], active item id=-1, error=null}
+       com.android.bluetoothcom.android.server.media.MediaSessionRecord$ControllerStub$$ExternalSyntheticLambda0@f69525
+       com.android.bluetoothcom.android.server.media.MediaSessionRecord$ControllerStub$$ExternalSyntheticLambda0@a0cf6fa
+       com.android.bluetoothcom.android.server.media.MediaSessionRecord$ControllerStub$$ExternalSyntheticLambda0@a2184ab
+       com.android.bluetoothcom.android.server.media.MediaSessionRecord$ControllerStub$$ExternalSyntheticLambda0@df3c708
+      state=PlaybackState {state=STOPPED(1), position=0, buffered position=0, speed=1.0, updated=347870094, actions=8192, custom actions=[], active item id=-1, error=null}
       audioAttrs=AudioAttributes: usage=USAGE_MEDIA content=CONTENT_TYPE_UNKNOWN flags=0x800 tags= bundle=null
       volumeType=LOCAL, controlType=ABSOLUTE, max=0, current=0, volumeControlId=null
       metadata: size=0, description=null
@@ -52,12 +53,6 @@ Record for full_user=0
 isAppCastingOn:false
 isMultiSoundOn:false
 Events log: MediaSession events
-07-29 22:46:48:755 VolKeyEvt, pkg=com.google.android.youtube,opPkg=com.google.android.youtube,pid=27539,uid=10251,asSystem=true,code=KEYCODE_VOLUME_UP,act:ACTION_DOWN,stream=3,musicOnly=false
-07-29 22:46:48:804 VolKeyEvt, pkg=com.google.android.youtube,opPkg=com.google.android.youtube,pid=27539,uid=10251,asSystem=true,code=KEYCODE_VOLUME_UP,act:ACTION_DOWN,stream=3,musicOnly=false
-07-29 22:46:48:855 VolKeyEvt, pkg=com.google.android.youtube,opPkg=com.google.android.youtube,pid=27539,uid=10251,asSystem=true,code=KEYCODE_VOLUME_UP,act:ACTION_DOWN,stream=3,musicOnly=false
-07-29 22:46:48:905 VolKeyEvt, pkg=com.google.android.youtube,opPkg=com.google.android.youtube,pid=27539,uid=10251,asSystem=true,code=KEYCODE_VOLUME_UP,act:ACTION_DOWN,stream=3,musicOnly=false
-07-29 22:46:48:959 VolKeyEvt, pkg=com.google.android.youtube,opPkg=com.google.android.youtube,pid=27539,uid=10251,asSystem=true,code=KEYCODE_VOLUME_UP,act:ACTION_DOWN,stream=3,musicOnly=false
-07-29 22:46:49:010 VolKeyEvt, pkg=com.google.android.youtube,opPkg=com.google.android.youtube,pid=27539,uid=10251,asSystem=true,code=KEYCODE_VOLUME_UP,act:ACTION_DOWN,stream=3,musicOnly=false
 07-29 22:46:49:015 VolKeyEvt, pkg=com.google.android.youtube,opPkg=com.google.android.youtube,pid=27539,uid=10251,asSystem=true,code=KEYCODE_VOLUME_UP,act:ACTION_UP,stream=3,musicOnly=false
 07-29 22:46:49:439 VolKeyEvt, pkg=com.google.android.youtube,opPkg=com.google.android.youtube,pid=27539,uid=10251,asSystem=true,code=KEYCODE_VOLUME_UP,act:ACTION_DOWN,stream=3,musicOnly=false
 07-29 22:46:49:688 VolKeyEvt, pkg=com.google.android.youtube,opPkg=com.google.android.youtube,pid=27539,uid=10251,asSystem=true,code=KEYCODE_VOLUME_UP,act:ACTION_DOWN,stream=3,musicOnly=false
@@ -132,6 +127,12 @@ Events log: MediaSession events
 07-30 10:31:58:336 VolKeyEvt, pkg=com.sec.android.app.launcher,opPkg=com.sec.android.app.launcher,pid=2818,uid=10137,asSystem=true,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=false
 07-30 10:31:58:387 VolKeyEvt, pkg=com.sec.android.app.launcher,opPkg=com.sec.android.app.launcher,pid=2818,uid=10137,asSystem=true,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=false
 07-30 10:31:58:417 VolKeyEvt, pkg=com.sec.android.app.launcher,opPkg=com.sec.android.app.launcher,pid=2818,uid=10137,asSystem=true,code=KEYCODE_VOLUME_DOWN,act:ACTION_UP,stream=-2147483648,musicOnly=false
+07-30 17:41:07:922 VolKeyEvt, pkg=com.android.systemui,opPkg=com.android.systemui,pid=2118,uid=10050,asSystem=false,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=true
+07-30 17:41:08:020 VolKeyEvt, pkg=com.android.systemui,opPkg=com.android.systemui,pid=2118,uid=10050,asSystem=false,code=KEYCODE_VOLUME_DOWN,act:ACTION_UP,stream=-2147483648,musicOnly=true
+08-02 13:36:32:562 VolKeyEvt, pkg=com.android.systemui,opPkg=com.android.systemui,pid=2118,uid=10050,asSystem=true,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=false
+08-02 13:36:32:594 VolKeyEvt, pkg=com.android.systemui,opPkg=com.android.systemui,pid=2118,uid=10050,asSystem=true,code=KEYCODE_VOLUME_DOWN,act:ACTION_UP,stream=-2147483648,musicOnly=false
+08-02 13:36:33:212 VolKeyEvt, pkg=com.android.systemui,opPkg=com.android.systemui,pid=2118,uid=10050,asSystem=true,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=false
+08-02 13:36:33:232 VolKeyEvt, pkg=com.android.systemui,opPkg=com.android.systemui,pid=2118,uid=10050,asSystem=true,code=KEYCODE_VOLUME_DOWN,act:ACTION_UP,stream=-2147483648,musicOnly=false
 
 isSupportMediaDataPlatform:false
 
