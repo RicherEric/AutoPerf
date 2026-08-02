@@ -135,6 +135,15 @@ class Target:
     selectors: tuple[Selector, ...] = ()
     fallback: tuple[float, float] | None = None
     name: str = ""
+    # True for controls the app draws itself, which are therefore absent from
+    # the accessibility tree on every device and build measured so far. For
+    # those, reaching the coordinate is the intended path, not a decayed
+    # selector -- so the runner must not treat it as a reason to distrust the
+    # run. Every other target falling back means the table has gone stale
+    # against this device, and that *does* invalidate the numbers: the tap
+    # landed wherever a different screen used to put the control, and
+    # `input tap` reports success on empty space.
+    coordinate_only: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -319,22 +328,53 @@ def dump_hierarchy(adb: AdbClientProtocol, serial: str, timeout: float = 6.0) ->
 _FOCUS_RE = re.compile(r"(?:mCurrentFocus|mFocusedApp)=.*?(?:\s|\{)([A-Za-z0-9_.]+)/([A-Za-z0-9_.$]+)")
 
 
-def current_focus(adb: AdbClientProtocol, serial: str) -> tuple[str, str] | None:
-    """The package/activity currently in front, or None if it can't be read.
+# `dumpsys window` states the keyguard as `mDreamingLockscreen=true|false`.
+_LOCKSCREEN_RE = re.compile(r"mDreamingLockscreen=(true|false)")
 
-    Parsed from `dumpsys window`, which reports both `mCurrentFocus` (the
-    focused window) and `mFocusedApp` (the focused activity). Either is
-    enough to answer "is the app I launched actually on screen", the question
-    a scenario needs answered before it starts tapping.
+
+def window_state(adb: AdbClientProtocol,
+                 serial: str) -> tuple[tuple[str, str] | None, bool | None]:
+    """Focused app and lock state, from a single `dumpsys window`.
+
+    Both answers come off the same output because the read costs 113ms on a
+    Galaxy A55 and 240ms on a Redmi Pad 2, and asking twice for two fields of
+    one dump is exactly the kind of cost that is free against a fake device
+    and real against a phone.
+
+    They have to be read together for a second reason. `mFocusedApp` keeps
+    naming the app while the keyguard is up, so focus alone answers "is my app
+    the foreground task" when the question a measurement needs answered is "is
+    my app on the screen". Measured 2026-08-02 on a locked A55: YouTube was
+    still `mFocusedApp`, still had `PlaybackState == 3` from its background
+    audio, and both verifications passed while the screen showed the
+    lockscreen.
+
+    Lock state is tri-state on purpose: `None` means the dump did not say, and
+    an unreadable keyguard must not fail a run any more than an unreadable
+    focus does.
     """
     try:
         output = adb.shell(serial, "dumpsys window")
     except Exception:
-        return None
-    match = _FOCUS_RE.search(output)
-    if not match:
-        return None
-    return match.group(1), match.group(2)
+        return None, None
+    focus_match = _FOCUS_RE.search(output)
+    focus = (focus_match.group(1), focus_match.group(2)) if focus_match else None
+    lock_match = _LOCKSCREEN_RE.search(output)
+    locked = (lock_match.group(1) == "true") if lock_match else None
+    return focus, locked
+
+
+def current_focus(adb: AdbClientProtocol, serial: str) -> tuple[str, str] | None:
+    """The package/activity currently in front, or None if it can't be read.
+
+    Parsed from `dumpsys window`, which reports both `mCurrentFocus` (the
+    focused window) and `mFocusedApp` (the focused activity).
+
+    **This does not mean the app is visible.** See `window_state`, which reads
+    the keyguard from the same output -- callers deciding whether a screen is
+    worth measuring want that one.
+    """
+    return window_state(adb, serial)[0]
 
 
 # `dumpsys media_session` renders the inner state either as a bare number or,

@@ -1,3 +1,4 @@
+import json
 import tempfile
 import threading
 import time
@@ -8,6 +9,7 @@ from autoperf.adapters import HOME, Adapter, AndroidAdapter, ScenarioStep
 from autoperf.collectors import Collector, CpuCollector
 from autoperf.runner import DeviceBusyError, TestRunner
 from autoperf.storage import Storage
+from autoperf.uiauto import Target
 from tests.support import DeviceAdb
 
 
@@ -320,7 +322,15 @@ class VerificationRecordingTests(unittest.TestCase):
             self.assertFalse(quality["verified"])
             self.assertEqual(quality["verification_failures"], 1)
 
-    def test_a_coordinate_fallback_is_recorded_without_failing_the_run(self):
+    def test_an_unexpected_coordinate_fallback_invalidates_the_run(self):
+        """A blind tap still completes -- it just cannot be trusted.
+
+        `input tap` succeeds on empty space, so a target that should have
+        resolved but fell through to its coordinate produces a full set of
+        real-looking metrics for a screen the scenario may never have reached.
+        Measured on a Redmi Pad 2: 15 of 21 targets fell back and the run
+        still reported `verified: true` before this existed.
+        """
         class FallbackAdapter(AndroidAdapter):
             def tap_element(self, adb, serial, target, screen=None):
                 return {"target": "search_icon", "strategy": "coordinates", "x": 1, "y": 2}
@@ -328,16 +338,43 @@ class VerificationRecordingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             storage, run_id = self._run_with_step(
                 directory, FallbackAdapter(),
-                ScenarioStep(0.0, "tap_element", {"target": None}),
+                ScenarioStep(0.0, "tap_element", {"target": Target(name="search_icon")}),
             )
             kinds = [e["kind"] for e in self._events(storage, run_id)]
-            # A fallback still worked, so the action completed -- but the
-            # decay is on the record either way.
+            # The action completed -- the tap was sent -- but the run is no
+            # longer evidence of anything.
             self.assertIn("selector_fallback", kinds)
+            self.assertIn("selector_stale", kinds)
             self.assertIn("adapter_action", kinds)
+            quality = storage.run_quality(run_id)
+            self.assertFalse(quality["verified"])
+            self.assertEqual(quality["selector_fallbacks"], 1)
+            self.assertEqual(quality["stale_selectors"], 1)
+
+    def test_a_fallback_on_a_coordinate_only_target_leaves_the_run_verified(self):
+        """The player draws its own transport controls, so they are never in
+        the tree on any device measured so far. Reaching those by coordinate
+        is the intended path, not decay -- gating on it would mark every
+        fullscreen and quality scenario unverified forever, which would teach
+        people to ignore the flag.
+        """
+        class FallbackAdapter(AndroidAdapter):
+            def tap_element(self, adb, serial, target, screen=None):
+                return {"target": "fullscreen_enter", "strategy": "coordinates", "x": 1, "y": 2}
+
+        with tempfile.TemporaryDirectory() as directory:
+            storage, run_id = self._run_with_step(
+                directory, FallbackAdapter(),
+                ScenarioStep(0.0, "tap_element",
+                             {"target": Target(name="fullscreen_enter", coordinate_only=True)}),
+            )
+            kinds = [e["kind"] for e in self._events(storage, run_id)]
+            self.assertIn("selector_fallback", kinds)
+            self.assertNotIn("selector_stale", kinds)
             quality = storage.run_quality(run_id)
             self.assertTrue(quality["verified"])
             self.assertEqual(quality["selector_fallbacks"], 1)
+            self.assertEqual(quality["stale_selectors"], 0)
 
     def test_a_selector_hit_records_neither_a_failure_nor_a_fallback(self):
         class GoodAdapter(AndroidAdapter):
@@ -541,3 +578,56 @@ class AppVersionRecordingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FailedLookupCostTests(VerificationRecordingTests):
+    """A lookup that found nothing still cost the device its dumps.
+
+    `tap_element` reports `dumps`/`dump_seconds` in its return value, so
+    raising skipped them -- and a failed lookup is the expensive case, because
+    the retry loop only gives up after spending its whole budget. The effect
+    was backwards: the step that contaminated the measurement most recorded no
+    cost at all, while the one that succeeded on its first dump recorded one.
+    """
+
+    def test_a_failed_lookup_still_records_what_it_spent(self):
+        from autoperf.adapters import AndroidAdapter, ElementNotFound
+
+        class ExpensiveMissAdapter(AndroidAdapter):
+            def tap_element(self, adb, serial, target, screen=None):
+                raise ElementNotFound("no element matched search_icon",
+                                      {"dumps": 3, "dump_seconds": 8.1})
+
+        with tempfile.TemporaryDirectory() as directory:
+            storage, run_id = self._run_with_step(
+                directory, ExpensiveMissAdapter(),
+                ScenarioStep(0.0, "tap_element", {"target": Target(name="search_icon")}),
+            )
+            events = self._events(storage, run_id)
+            kinds = [e["kind"] for e in events]
+            self.assertIn("verification_failed", kinds)
+            self.assertIn("ui_introspection", kinds)
+            introspection = next(e for e in events if e["kind"] == "ui_introspection")
+            details = json.loads(introspection["details"])
+            self.assertEqual(details["dumps"], 3)
+            self.assertEqual(details["dump_seconds"], 8.1)
+            self.assertEqual(storage.run_quality(run_id)["ui_introspections"], 1)
+
+    def test_a_failure_that_cost_no_dumps_records_none(self):
+        """`verify_foreground` fails without dumping. Reporting a zero there
+        would put a cost line on every failed verification in the log.
+        """
+        from autoperf.adapters import AndroidAdapter, VerificationError
+
+        class RefusingAdapter(AndroidAdapter):
+            def verify_foreground(self, adb, serial, package):
+                raise VerificationError("wrong app in front")
+
+        with tempfile.TemporaryDirectory() as directory:
+            storage, run_id = self._run_with_step(
+                directory, RefusingAdapter(),
+                ScenarioStep(0.0, "verify_foreground", {"package": "com.example"}),
+            )
+            kinds = [e["kind"] for e in self._events(storage, run_id)]
+            self.assertIn("verification_failed", kinds)
+            self.assertNotIn("ui_introspection", kinds)

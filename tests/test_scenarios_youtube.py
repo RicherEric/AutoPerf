@@ -67,17 +67,39 @@ class YoutubeScenarioRegistryTests(unittest.TestCase):
         ]
         self.assertEqual(offenders, [])
 
-    def test_every_tap_element_target_keeps_a_coordinate_fallback(self):
-        # The selectors are unverified guesses until captured from a real
-        # device; without the fallback a wrong guess would break a scenario
-        # that previously worked.
+    def test_every_tap_element_target_is_reachable_some_way(self):
+        """A coordinate is now earned, not automatic.
+
+        The original rule was "every target keeps a coordinate", because the
+        selectors were unverified guesses and a wrong one would have broken a
+        scenario that previously worked. Ten of them stopped being guesses on
+        2026-08-02: they resolved by selector on a Galaxy A55 (YouTube
+        21.30.209, portrait phone) *and* a Redmi Pad 2 (20.38.37, landscape
+        tablet). Two devices, two builds, two form factors.
+
+        For those, the coordinate was no longer insurance -- it was the thing
+        that let a decayed selector keep tapping somewhere plausible and
+        report success, which is the failure mode this whole suite exists to
+        prevent. Without it, a miss raises and the run says so.
+
+        What must still hold: a target is reachable by *something*. Selectors
+        or a coordinate -- and for `coordinate_only` controls, which the app
+        draws itself and no selector has ever matched, the coordinate is the
+        only path there is, so it stays mandatory.
+        """
         for name in youtube.list_scenarios():
             for step in youtube.build(name, SCREEN):
-                if step.action == "tap_element":
-                    target = step.kwargs["target"]
-                    with self.subTest(scenario=name, target=target.name):
-                        self.assertTrue(target.selectors, "target has no selectors at all")
-                        self.assertIsNotNone(target.fallback)
+                if step.action != "tap_element":
+                    continue
+                target = step.kwargs["target"]
+                with self.subTest(scenario=name, target=target.name):
+                    self.assertTrue(target.selectors or target.fallback,
+                                    "target is unreachable: no selectors and no coordinate")
+                    if target.coordinate_only:
+                        self.assertIsNotNone(
+                            target.fallback,
+                            "a control the app draws itself has no selector to fall back on")
+                    if target.fallback:
                         self.assertTrue(all(0.0 <= f <= 1.0 for f in target.fallback))
 
     def test_the_search_flow_actually_types_something(self):

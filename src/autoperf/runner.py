@@ -67,16 +67,43 @@ class TestRunner:
           missed tap was recorded as a completed action and the run finished
           green having measured nothing.
         - `selector_fallback` -- the step worked, but only by falling through
-          to its hardcoded coordinate. That is exactly as reliable as the old
-          behaviour, so it is not a failure; it is the early warning that a
-          selector has decayed, and it is invisible unless recorded.
+          to its hardcoded coordinate. Recorded for every fallback, because
+          the rate itself is the health signal for the selector table.
+        - `selector_stale` -- a fallback on a target that is *supposed* to
+          resolve. This one invalidates the run, and the distinction is the
+          whole point: for the handful of controls the player draws itself
+          (`coordinate_only`), the coordinate is the intended path and always
+          was. For everything else, falling back means the table no longer
+          matches this device, so the tap landed where a different screen used
+          to put the control -- and `input tap` reports success on empty
+          space, which is exactly how a run measures a screen it never
+          reached while finishing green.
+
+          Measured on a Redmi Pad 2 (tablet, landscape, YouTube 20.38.37):
+          15 of 21 targets fell back, and before this event existed the run
+          still came back `verified: true`. On the Galaxy A55 the same table
+          fell back 8 times, 5 of them `coordinate_only`.
         - `adapter_error` -- everything else, unchanged.
         """
         details = {"action": step.action, **_step_details(step)}
         try:
             outcome = future.result()
         except VerificationError as exc:
+            # A failed lookup is usually the most expensive one -- the retry
+            # loop only gives up after spending its whole budget -- so the
+            # dumps it paid for have to be recorded here too. Reporting cost
+            # only on the success path made the runs that contaminated their
+            # own measurement most look like the cheapest ones.
+            cost = getattr(exc, "cost", None) or {}
+            details.update(cost)
             writer.put(TestEvent(run_id, "verification_failed", str(exc), details=details))
+            if cost.get("dumps"):
+                writer.put(TestEvent(
+                    run_id, "ui_introspection",
+                    f"{cost['dumps']} UI dump(s) over {cost.get('dump_seconds', 0)}s "
+                    f"before giving up on {_step_details(step).get('target') or step.action}",
+                    details=details,
+                ))
             return
         except Exception as exc:
             writer.put(TestEvent(run_id, "adapter_error", str(exc), details=details))
@@ -84,11 +111,21 @@ class TestRunner:
         if isinstance(outcome, dict):
             details.update(outcome)
             if outcome.get("strategy") == "coordinates":
+                target = step.kwargs.get("target")
+                expected = bool(getattr(target, "coordinate_only", False))
+                label = outcome.get("target") or step.action
                 writer.put(TestEvent(
                     run_id, "selector_fallback",
-                    f"{outcome.get('target') or step.action} resolved by coordinates, not by selector",
-                    details=details,
+                    f"{label} resolved by coordinates, not by selector",
+                    details={**details, "expected": expected},
                 ))
+                if not expected:
+                    writer.put(TestEvent(
+                        run_id, "selector_stale",
+                        f"{label} should resolve by selector on this device but "
+                        f"fell through to its coordinate -- the tap was blind",
+                        details=details,
+                    ))
             if outcome.get("dumps"):
                 # The instrumentation's own cost, recorded because it competes
                 # with what is being measured: `uiautomator dump` takes seconds

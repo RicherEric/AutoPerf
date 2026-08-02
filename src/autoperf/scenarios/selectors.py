@@ -62,7 +62,6 @@ SEARCH_ICON = Target(
         _id("menu_item_1"),
         _id("search_button"),
     ),
-    fallback=(0.937, 0.067),
     name="search_icon",
 )
 
@@ -72,7 +71,6 @@ SEARCH_BAR = Target(
         Selector(class_name="EditText"),
         *_desc("Search YouTube", "搜尋 YouTube"),
     ),
-    fallback=(0.5, 0.08),
     name="search_bar",
 )
 
@@ -82,13 +80,11 @@ SEARCH_BAR = Target(
 # on the Create button, and subscriptions_tab's landed between two tabs.
 SHORTS_TAB = Target(
     selectors=(*_desc("Shorts"), _id("pivot_shorts")),
-    fallback=(0.30, 0.913),
     name="shorts_tab",
 )
 
 SUBSCRIPTIONS_TAB = Target(
     selectors=(*_desc("Subscriptions", "訂閱內容", "訂閱"), _id("pivot_subscriptions")),
-    fallback=(0.70, 0.913),
     name="subscriptions_tab",
 )
 
@@ -102,7 +98,6 @@ LIBRARY_TAB = Target(
         *_desc("個人中心", "You", "Library", "媒體庫"),
         _id("pivot_library"),
     ),
-    fallback=(0.90, 0.913),
     name="library_tab",
 )
 
@@ -127,15 +122,19 @@ def _feed_item(index: int, fallback: tuple[float, float], name: str) -> Target:
     )
 
 
-FIRST_SUGGESTION = Target(
-    selectors=(_id("suggestion_text"), Selector(class_name="TextView", clickable=True, index=0)),
-    fallback=(0.5, 0.2),
-    name="first_suggestion",
-)
+# `FIRST_SUGGESTION` used to live here. It belonged to the search flow that
+# tapped where a suggestion *should* be without ever typing -- the defect that
+# made seven scenarios never reach a video while the suite stayed green. The
+# flow now types and presses ENTER, so nothing referenced this target any more:
+# no scenario used it, no capture covered it, and preflight could not report it
+# as stale because it was never checked. A target nothing exercises cannot go
+# visibly wrong, which makes it worse than absent -- it only inflated the count
+# the docs quote. Removed 2026-08-02; the measurement that condemned it
+# (0 matches in 7 attempts) is in docs/UI_AUTOMATOR.md.
 
-RESULT_THUMBNAIL = _feed_item(0, (0.5, 0.35), "result_thumbnail")
+RESULT_THUMBNAIL = _feed_item(0, None, "result_thumbnail")
 HOME_FEED_VIDEO = _feed_item(0, (0.5, 0.45), "home_feed_video")
-SUBSCRIPTION_VIDEO = _feed_item(0, (0.5, 0.45), "subscription_video")
+SUBSCRIPTION_VIDEO = _feed_item(0, None, "subscription_video")
 
 # `third_video` is the least reliable entry in this table, and the evidence says
 # why. On a Galaxy A55 it matched the captured home feed but fell through to its
@@ -144,7 +143,7 @@ SUBSCRIPTION_VIDEO = _feed_item(0, (0.5, 0.45), "subscription_video")
 # and on how far the feed has loaded. Left as it is deliberately -- the
 # coordinate is the honest answer for "a row that is not there yet", and
 # hard-coding a scroll into a target would hide the reason from preflight.
-SECOND_VIDEO = _feed_item(1, (0.5, 0.45), "second_video")
+SECOND_VIDEO = _feed_item(1, None, "second_video")
 THIRD_VIDEO = _feed_item(2, (0.5, 0.6), "third_video")
 DOWNLOADS_ROW = Target(
     # Captured label: "已下載的內容". Two things about it are only learnable
@@ -163,7 +162,6 @@ DOWNLOADS_ROW = Target(
                *_desc("觀看記錄", "Watch history"),
                *_desc("稍後觀看", "Watch later"),
                _id("downloads_entry")),
-    fallback=(0.5, 0.3),
     name="downloads_row",
 )
 
@@ -205,7 +203,6 @@ LIKE_BUTTON = Target(
 
 SHORTS_LIKE_BUTTON = Target(
     selectors=(*_desc("喜歡這部影片", "like this video"), _id("reel_like_button")),
-    fallback=(0.9, 0.55),
     name="shorts_like_button",
 )
 
@@ -237,12 +234,14 @@ QUALITY_ROW = Target(
                _id("quality_menu_item")),
     fallback=(0.5, 0.55),
     name="quality_row",
+    coordinate_only=True,
 )
 
 QUALITY_OPTION = Target(
     selectors=(Selector(class_name="TextView", clickable=True, index=1),),
     fallback=(0.5, 0.4),
     name="quality_option",
+    coordinate_only=True,
 )
 
 # The player's overlay controls -- fullscreen, quality, the scrubber -- are
@@ -255,18 +254,21 @@ FULLSCREEN_ENTER = Target(
     selectors=(*_desc("Enter fullscreen", "全螢幕"), _id("fullscreen_button")),
     fallback=(0.93, 0.58),
     name="fullscreen_enter",
+    coordinate_only=True,
 )
 
 FULLSCREEN_EXIT = Target(
     selectors=(*_desc("Exit fullscreen", "結束全螢幕", "退出全螢幕"), _id("fullscreen_button")),
     fallback=(0.93, 0.9),
     name="fullscreen_exit",
+    coordinate_only=True,
 )
 
 PIP_CARET = Target(
     selectors=(*_desc("Collapse", "Minimize", "收合", "縮小"), _id("player_collapse_button")),
     fallback=(0.06, 0.42),
     name="pip_caret",
+    coordinate_only=True,
 )
 
 

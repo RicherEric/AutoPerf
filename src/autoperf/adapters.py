@@ -229,7 +229,25 @@ class VerificationError(AssertionError):
 
 
 class ElementNotFound(VerificationError):
-    pass
+    """Carries the cost of the lookup that failed.
+
+    A failed lookup is not a cheap one -- it is usually the *most* expensive
+    kind, because the retry loop only gives up after spending its whole
+    budget. Those dumps ran, took seconds, and burned CPU on the device whose
+    CPU is being sampled at that moment.
+
+    Without this the cost vanished at exactly the wrong time: `tap_element`
+    reports `dumps`/`dump_seconds` in its return value, and raising skips the
+    return. So a step that dumped three times and found nothing recorded no
+    `ui_introspection` event, while a step that dumped once and succeeded
+    recorded one -- the run that contaminated its own measurement most was the
+    one that looked cheapest. `dumps` exists precisely because cost is the one
+    thing a fake device cannot make you feel (see `DeviceAdb.dumps`).
+    """
+
+    def __init__(self, message: str, cost: dict | None = None):
+        super().__init__(message)
+        self.cost = dict(cost or {})
 
 
 # Mixed into both adapters below. Kept separate from Adapter itself so the
@@ -309,18 +327,36 @@ class ElementActionsMixin:
         resolution, _ = self._resolve(adb, serial, target, screen, cost)
         if resolution is None:
             raise ElementNotFound(
-                f"no element matched {target.name or 'target'} and no coordinate fallback was given"
+                f"no element matched {target.name or 'target'} and no coordinate fallback was given",
+                cost,
             )
         x, y = resolution.point
         self.tap(adb, serial, x, y)
         return {"target": target.name, "strategy": resolution.strategy, "x": x, "y": y, **cost}
 
     def verify_foreground(self, adb: AdbClientProtocol, serial: str, package: str) -> dict:
-        """Assert `package` is actually the app in front."""
+        """Assert `package` is actually the app in front, and on screen.
+
+        The keyguard half is not redundant. `mFocusedApp` goes on naming the
+        app while the device is locked, so this check passed on a locked phone
+        -- and so did `verify_playing`, because the audio really was still
+        playing. Both strengths agreeing on a screen nobody could see is how a
+        run gets marked verified while measuring a lockscreen.
+
+        That is not hypothetical: on 2026-08-02 a Redmi Pad 2 with a 60-second
+        screen timeout locked partway through a preflight session, and every
+        target graded after that point was graded against SystemUI's 18
+        lockscreen nodes. It read as "the selector table has collapsed on
+        tablets" until the device was unlocked and 181 nodes came back.
+        """
         from . import uiauto
 
         package = self.mapped_package(package)
-        focus = uiauto.current_focus(adb, serial)
+        focus, locked = uiauto.window_state(adb, serial)
+        if locked:
+            raise VerificationError(
+                "device is locked -- the app may be the foreground task but "
+                "nothing on screen belongs to it")
         if focus is None:
             # Unreadable focus is not evidence of failure; saying so beats
             # failing a run because dumpsys was momentarily unavailable.

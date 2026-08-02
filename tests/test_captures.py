@@ -154,22 +154,42 @@ class SelectorTableAgainstRealScreensTests(unittest.TestCase):
         resolution = _resolve("home_feed", "home_feed_video")
         self.assertEqual(resolution.strategy, "structural")
 
-    def test_the_shorts_like_button_is_locatable_where_the_watch_one_is_not(self):
-        """A measured asymmetry worth keeping visible.
+    def test_both_like_controls_are_locatable_by_label(self):
+        """The asymmetry this test used to assert is gone -- and that is the point.
 
-        On a Shorts screen the like control is in the hierarchy and matches by
-        content-desc. On the watch page the player draws its own overlay, so the
-        same kind of control is not there to be found at all.
+        On 21.29.366 the Shorts like control matched by content-desc while the
+        watch-page one was not in the hierarchy at all, so the table carried a
+        coordinate for it. Re-capturing against 21.30.209 turned that assertion
+        red: the watch-page control now carries its own label. The app became
+        more introspectable, and the only reason we know is that the capture
+        was retaken -- a frozen capture would have kept agreeing with itself.
+
+        Findability is not the same question as `verify_element_state`, which
+        still must not be pointed at either control: `selected`/`checked` do
+        not move on a tap (see LIKE_BUTTON in scenarios/selectors.py).
         """
         self.assertEqual(_resolve("shorts", "shorts_like_button").strategy, "content_desc")
-        self.assertEqual(_resolve("watch_page_playing", "like_button").strategy, "coordinates")
+        self.assertEqual(_resolve("watch_page_playing", "like_button").strategy, "content_desc")
 
     def test_the_player_overlay_is_absent_from_a_real_watch_page(self):
-        # Documented as permanent: these targets rely on their coordinate and
-        # preflight reports them as falling back rather than pretending.
-        for name in ("player_surface", "fullscreen_enter", "quality_row", "pip_caret"):
+        # The transport controls the player draws for itself are still not in
+        # the tree, so these keep relying on their coordinate -- and preflight
+        # reports them as falling back rather than pretending.
+        for name in ("fullscreen_enter", "fullscreen_exit",
+                     "quality_row", "quality_option", "pip_caret"):
             with self.subTest(target=name):
                 self.assertEqual(_resolve("watch_page_playing", name).strategy, "coordinates")
+
+    def test_the_player_container_is_addressable_even_though_its_controls_are_not(self):
+        """`player_surface` sat in the list above until 21.30.209.
+
+        It is the container the player draws *into*, not one of the drawn
+        controls, and on this build it carries a resource-id. Split out so the
+        next capture has to answer for it separately: "the overlay is absent"
+        and "the surface is unaddressable" were being asserted as one claim,
+        and only the first of them is still true.
+        """
+        self.assertEqual(_resolve("watch_page_playing", "player_surface").strategy, "resource_id")
 
     def test_every_target_either_matches_somewhere_or_has_a_coordinate(self):
         """No target may be unreachable on every screen we have evidence for.

@@ -311,6 +311,32 @@ class VerificationActionTests(unittest.TestCase):
             DeviceAdb(focus_package=None), "S1", "com.google.android.youtube")
         self.assertIsNone(result["verified"])
 
+    def test_foreground_check_raises_when_the_device_is_locked(self):
+        """A locked device keeps naming the app as the focused task.
+
+        So this check passed on a locked phone, and so did verify_playing --
+        the audio really was still playing. Both strengths agreed about a
+        screen nobody could see. Measured on a Redmi Pad 2 whose 60-second
+        timeout fired mid-session: every target graded afterwards was graded
+        against SystemUI's lockscreen, which read as a collapsed selector
+        table until the device was woken and the tree came back.
+        """
+        from autoperf.adapters import AndroidAdapter, VerificationError
+
+        adb = DeviceAdb(locked=True)
+        with self.assertRaises(VerificationError):
+            AndroidAdapter().verify_foreground(adb, "S1", "com.google.android.youtube")
+
+    def test_an_unstated_lock_state_does_not_fail_the_run(self):
+        """Not every build prints the keyguard line, and "the dump did not say"
+        is not evidence of a locked screen -- same rule as an unreadable focus.
+        """
+        from autoperf.adapters import AndroidAdapter
+
+        result = AndroidAdapter().verify_foreground(
+            DeviceAdb(locked=None), "S1", "com.google.android.youtube")
+        self.assertTrue(result["verified"])
+
     def test_playback_check_passes_while_playing(self):
         from autoperf.adapters import AndroidAdapter
 

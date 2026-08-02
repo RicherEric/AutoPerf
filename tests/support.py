@@ -177,11 +177,13 @@ class DeviceAdb:
                  playback_state: int | None = PLAYING, playback_states: list[int | None] | None = None,
                  screen: tuple[int, int] = SCREEN, metrics: bool = False,
                  characteristics: str = "phone", dump_fails: bool | str = False,
+                 locked: bool | None = False,
                  dump_latency: float = 0.0,
                  replies: dict[str, str] | None = None, fail_first: dict[str, int] | None = None,
                  allow_unknown: bool = False):
         self.hierarchy = hierarchy
         self.focus_package = focus_package
+        self.locked = locked
         self.playback_state = playback_state
         self.playback_states = list(playback_states) if playback_states is not None else None
         self.screen = screen
@@ -259,9 +261,17 @@ class DeviceAdb:
         return f"Physical size: {self.screen[0]}x{self.screen[1]}\n"
 
     def _window(self):
+        # The keyguard line comes off this same output on a device, so a fake
+        # that omitted it could not express "locked" at all -- which is the
+        # state that silently passed both verifications until 2026-08-02.
+        # `locked=None` leaves the line out, standing for a device whose dump
+        # did not say.
+        keyguard = ("" if self.locked is None
+                    else f"    mDreamingLockscreen={'true' if self.locked else 'false'}\n")
         if self.focus_package is None:
-            return "nothing useful"
-        return f"  mCurrentFocus=Window{{a b {self.focus_package}/{self.focus_package}.Main}}"
+            return keyguard + "nothing useful"
+        return (keyguard +
+                f"  mCurrentFocus=Window{{a b {self.focus_package}/{self.focus_package}.Main}}")
 
     def _media_session(self):
         self.playback_reads += 1
