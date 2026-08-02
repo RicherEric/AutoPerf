@@ -2,9 +2,10 @@ import sqlite3
 import tempfile
 import time
 import unittest
+from contextlib import closing
 from pathlib import Path
 
-from autoperf.models import Device, MetricSample, RunStatus, TestEvent
+from autoperf.models import Device, MetricSample, RunOrigin, RunStatus, TestEvent
 from autoperf.storage import BatchWriter, Storage
 
 
@@ -559,3 +560,56 @@ class CampaignStorageTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RunOriginTests(unittest.TestCase):
+    """Who asked for a run -- a question the table could not answer at all.
+
+    A run started with `autoperf run` and one queued from the dashboard wrote
+    byte-identical rows, so "show me only what a person triggered by hand" had
+    no answer, and a pass rate mixed attended and unattended evidence with no
+    way to notice.
+    """
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.storage = Storage(Path(self.directory.name) / "t.db")
+        self.storage.initialize()
+
+    def test_origin_round_trips(self):
+        self.storage.create_run("r1", "S1", origin=RunOrigin.DASHBOARD)
+        self.assertEqual(self.storage.get_run("r1")["origin"], "dashboard")
+
+    def test_an_unstated_origin_is_recorded_as_unknown_not_guessed(self):
+        # Rows written before the column existed have no recoverable origin,
+        # so the default has to be a value that says so rather than one that
+        # invents provenance next to measured numbers.
+        self.storage.create_run("r1", "S1")
+        self.assertEqual(self.storage.get_run("r1")["origin"], "unknown")
+
+    def test_runs_can_be_listed_by_origin(self):
+        self.storage.create_run("r1", "S1", origin=RunOrigin.MANUAL)
+        self.storage.create_run("r2", "S1", origin=RunOrigin.CAMPAIGN)
+        self.storage.create_run("r3", "S1", origin=RunOrigin.MANUAL)
+        listed = {row["id"] for row in self.storage.list_runs(origin=RunOrigin.MANUAL)}
+        self.assertEqual(listed, {"r1", "r3"})
+
+    def test_origin_counts_are_a_facet_over_every_run(self):
+        self.storage.create_run("r1", "S1", origin=RunOrigin.MANUAL)
+        self.storage.create_run("r2", "S1", origin=RunOrigin.CAMPAIGN)
+        self.storage.create_run("r3", "S2", origin=RunOrigin.MANUAL)
+        self.assertEqual(self.storage.run_origin_counts(), {"manual": 2, "campaign": 1})
+        self.assertEqual(self.storage.run_origin_counts("S2"), {"manual": 1})
+
+    def test_the_column_is_added_to_a_database_that_predates_it(self):
+        """The migration has to work on a file that already holds runs."""
+        path = Path(self.directory.name) / "old.db"
+        with closing(sqlite3.connect(path)) as conn:
+            with conn:
+                conn.execute("CREATE TABLE test_runs (id TEXT PRIMARY KEY, "
+                             "device_serial TEXT NOT NULL, status TEXT NOT NULL)")
+                conn.execute("INSERT INTO test_runs VALUES ('old', 'S1', 'completed')")
+        storage = Storage(path)
+        storage.initialize()
+        self.assertEqual(storage.get_run("old")["origin"], "unknown")

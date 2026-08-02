@@ -8,7 +8,7 @@ from dataclasses import asdict
 from contextlib import closing
 from pathlib import Path
 
-from .models import Device, MetricSample, RunStatus, TestEvent, utc_now
+from .models import Device, MetricSample, RunOrigin, RunStatus, TestEvent, utc_now
 
 
 SCHEMA = """
@@ -16,7 +16,8 @@ CREATE TABLE IF NOT EXISTS devices (serial TEXT PRIMARY KEY, model TEXT, product
 CREATE TABLE IF NOT EXISTS test_runs (id TEXT PRIMARY KEY, device_serial TEXT NOT NULL, status TEXT NOT NULL,
   started_at TEXT, finished_at TEXT, checkpoint TEXT, error TEXT, youtube_scenario TEXT,
   cancel_requested INTEGER NOT NULL DEFAULT 0, campaign_id TEXT,
-  app_package TEXT, app_version_name TEXT, app_version_code INTEGER);
+  app_package TEXT, app_version_name TEXT, app_version_code INTEGER,
+  origin TEXT NOT NULL DEFAULT 'unknown');
 CREATE TABLE IF NOT EXISTS metric_samples (id INTEGER PRIMARY KEY, run_id TEXT NOT NULL, timestamp TEXT NOT NULL,
   collector TEXT NOT NULL, name TEXT NOT NULL, value REAL NOT NULL, unit TEXT NOT NULL, labels TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_metrics_run_time ON metric_samples(run_id, timestamp);
@@ -30,6 +31,11 @@ CREATE TABLE IF NOT EXISTS campaigns (id TEXT PRIMARY KEY, kind TEXT NOT NULL, d
   scenario TEXT, tier TEXT, duration REAL NOT NULL, iterations INTEGER NOT NULL DEFAULT 1,
   status TEXT NOT NULL, cancel_requested INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL,
   started_at TEXT, finished_at TEXT, error TEXT);
+CREATE TABLE IF NOT EXISTS preflight_reports (id TEXT PRIMARY KEY, device_serial TEXT NOT NULL,
+  scenario TEXT, status TEXT NOT NULL, created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT,
+  app_package TEXT, app_version_name TEXT, app_version_code INTEGER,
+  ok INTEGER, summary TEXT, error TEXT);
+CREATE INDEX IF NOT EXISTS idx_preflight_serial ON preflight_reports(device_serial, created_at);
 """
 # Deliberately NOT part of SCHEMA: this indexes test_runs.campaign_id, a
 # column older databases only gain in the migration block below, and
@@ -39,6 +45,17 @@ CREATE TABLE IF NOT EXISTS campaigns (id TEXT PRIMARY KEY, kind TEXT NOT NULL, d
 # column CREATE INDEX accepts), so this indexes campaign_id alone -- enough
 # for the campaign_id=? lookups; the ORDER BY rowid then reads in key order.
 CAMPAIGN_RUN_INDEX = "CREATE INDEX IF NOT EXISTS idx_runs_campaign ON test_runs(campaign_id)"
+
+
+def _decode_preflight(row: dict) -> dict:
+    row["ok"] = None if row["ok"] is None else bool(row["ok"])
+    try:
+        row["summary"] = json.loads(row["summary"]) if row["summary"] else None
+    except json.JSONDecodeError:
+        # Same rule as the event log: a report that cannot be decoded must
+        # still be visible as a report that happened, not vanish from the list.
+        row["summary"] = None
+    return row
 
 
 class Storage:
@@ -80,6 +97,15 @@ class Storage:
                                       ("app_version_code", "INTEGER")):
                     if name not in columns:
                         conn.execute(f"ALTER TABLE test_runs ADD COLUMN {name} {coltype}")
+                # What asked for this run. Rows written before the column
+                # existed keep `unknown` rather than being guessed at: a run
+                # from the CLI and one from the dashboard were byte-identical
+                # in this table, so there is nothing to back-fill from, and
+                # inventing an origin would put fabricated provenance next to
+                # measured numbers.
+                if "origin" not in columns:
+                    conn.execute(
+                        "ALTER TABLE test_runs ADD COLUMN origin TEXT NOT NULL DEFAULT 'unknown'")
                 device_columns = {row[1] for row in conn.execute("PRAGMA table_info(devices)")}
                 for name in ("nickname", "android_version", "battery_level", "connection", "extra_info"):
                     if name not in device_columns:
@@ -165,13 +191,21 @@ class Storage:
                 conn.execute("UPDATE devices SET nickname=? WHERE serial=?", (nickname, serial))
 
     def create_run(self, run_id: str, serial: str, youtube_scenario: str | None = None,
-                   campaign_id: str | None = None) -> None:
+                   campaign_id: str | None = None, origin: str = RunOrigin.UNKNOWN) -> None:
+        """`origin` is who asked, and it is not derivable after the fact.
+
+        A run started from the CLI and one queued from the dashboard produced
+        identical rows, so "show me only the runs a person triggered by hand"
+        could not be answered at all -- and neither could "is this trend built
+        from scheduled runs or from someone poking at it". `campaign_id` was
+        the closest thing available and it only separates one of the four.
+        """
         with closing(self.connect()) as conn:
             with conn:
                 conn.execute(
-                    "INSERT INTO test_runs(id, device_serial, status, youtube_scenario, campaign_id) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (run_id, serial, RunStatus.PENDING, youtube_scenario, campaign_id),
+                    "INSERT INTO test_runs(id, device_serial, status, youtube_scenario, "
+                    "campaign_id, origin) VALUES (?, ?, ?, ?, ?, ?)",
+                    (run_id, serial, RunStatus.PENDING, youtube_scenario, campaign_id, origin),
                 )
 
     def update_run(self, run_id: str, status: RunStatus, *, checkpoint: str | None = None, error: str | None = None) -> None:
@@ -190,7 +224,12 @@ class Storage:
         resuming a previously completed/interrupted run_id (see
         TestRunner.run()'s resume handling above) still works -- only a
         *different* run_id racing the same device is refused. Returns
-        whether this call was the one that made the claim."""
+        whether this call was the one that made the claim.
+
+        A running preflight holds the same device just as exclusively: it
+        launches apps, taps and dumps. Leaving it out of this claim would let
+        a measured run start while something else was driving the phone --
+        which pollutes exactly the numbers the run exists to produce."""
         now = utc_now()
         with closing(self.connect()) as conn:
             with conn:
@@ -199,10 +238,108 @@ class Storage:
                        WHERE id=? AND NOT EXISTS (
                          SELECT 1 FROM test_runs t2
                          WHERE t2.device_serial = (SELECT device_serial FROM test_runs WHERE id=?)
-                           AND t2.status=? AND t2.id != ?)""",
-                    (RunStatus.RUNNING, now, run_id, run_id, RunStatus.RUNNING, run_id),
+                           AND t2.status=? AND t2.id != ?)
+                       AND NOT EXISTS (
+                         SELECT 1 FROM preflight_reports p
+                         WHERE p.device_serial = (SELECT device_serial FROM test_runs WHERE id=?)
+                           AND p.status=?)""",
+                    (RunStatus.RUNNING, now, run_id, run_id, RunStatus.RUNNING, run_id,
+                     run_id, RunStatus.RUNNING),
                 )
                 return cur.rowcount == 1
+
+    # ---- preflight -------------------------------------------------------
+    # A preflight is not a run: it produces no samples, no baseline and no
+    # comparison, and it must never appear in the run list. It is kept here
+    # anyway because it competes for the same device and because "when was
+    # this selector table last confirmed against this app build" is a
+    # question only a durable record can answer.
+
+    def create_preflight(self, preflight_id: str, serial: str,
+                         scenario: str | None = None) -> None:
+        with closing(self.connect()) as conn:
+            with conn:
+                conn.execute(
+                    "INSERT INTO preflight_reports(id, device_serial, scenario, status, created_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (preflight_id, serial, scenario, RunStatus.PENDING, utc_now()),
+                )
+
+    def try_start_preflight(self, preflight_id: str) -> bool:
+        """The same claim as `try_start_run`, from the other side."""
+        now = utc_now()
+        with closing(self.connect()) as conn:
+            with conn:
+                cur = conn.execute(
+                    """UPDATE preflight_reports SET status=?, started_at=COALESCE(started_at, ?)
+                       WHERE id=? AND status=?
+                       AND NOT EXISTS (
+                         SELECT 1 FROM preflight_reports p2
+                         WHERE p2.device_serial = (SELECT device_serial FROM preflight_reports WHERE id=?)
+                           AND p2.status=? AND p2.id != ?)
+                       AND NOT EXISTS (
+                         SELECT 1 FROM test_runs t
+                         WHERE t.device_serial = (SELECT device_serial FROM preflight_reports WHERE id=?)
+                           AND t.status=?)""",
+                    (RunStatus.RUNNING, now, preflight_id, RunStatus.PENDING,
+                     preflight_id, RunStatus.RUNNING, preflight_id,
+                     preflight_id, RunStatus.RUNNING),
+                )
+                return cur.rowcount == 1
+
+    def finish_preflight(self, preflight_id: str, status: RunStatus, *,
+                         summary: dict | None = None, error: str | None = None,
+                         app_version: dict | None = None) -> None:
+        """Store the verdict. `summary` is preflight's own output, unmodified.
+
+        `ok` is lifted out of the summary into its own column so a list of
+        past preflights can be read without decoding every report -- and so
+        the answer to "was the selector table green on this build" stays a
+        query rather than an application-side loop.
+        """
+        version = app_version or {}
+        with closing(self.connect()) as conn:
+            with conn:
+                conn.execute(
+                    """UPDATE preflight_reports
+                       SET status=?, finished_at=?, ok=?, summary=?, error=?,
+                           app_package=COALESCE(?, app_package),
+                           app_version_name=COALESCE(?, app_version_name),
+                           app_version_code=COALESCE(?, app_version_code)
+                       WHERE id=?""",
+                    (status, utc_now(),
+                     None if summary is None else int(bool(summary.get("ok"))),
+                     None if summary is None else json.dumps(summary),
+                     error, version.get("package"), version.get("version_name"),
+                     version.get("version_code"), preflight_id),
+                )
+
+    def get_preflight(self, preflight_id: str) -> dict | None:
+        with closing(self.connect()) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute("SELECT * FROM preflight_reports WHERE id=?",
+                               (preflight_id,)).fetchone()
+        return None if row is None else _decode_preflight(dict(row))
+
+    def list_preflights(self, limit: int = 20, device_serial: str | None = None,
+                        with_summary: bool = False) -> list[dict]:
+        """Newest first. The summary is dropped unless asked for -- a full
+        report carries every observed element of every miss, which is the one
+        thing a list of them does not need."""
+        clause, params = "", []
+        if device_serial:
+            clause, params = "WHERE device_serial=?", [device_serial]
+        with closing(self.connect()) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                f"SELECT * FROM preflight_reports {clause} ORDER BY created_at DESC, rowid DESC LIMIT ?",
+                (*params, limit),
+            ).fetchall()
+        reports = [_decode_preflight(dict(row)) for row in rows]
+        if not with_summary:
+            for report in reports:
+                report.pop("summary", None)
+        return reports
 
     def set_run_app_version(self, run_id: str, version: dict | None) -> None:
         """Record which build of the app under test this run measured."""
@@ -236,6 +373,76 @@ class Storage:
         counts.update({kind: count for kind, count in rows})
         return counts
 
+    def list_run_events(self, run_id: str, kinds: tuple[str, ...] = (),
+                        limit: int = 500) -> list[dict]:
+        """The run's event log, oldest first, with `details` already decoded.
+
+        `count_run_events` answers "can these numbers be trusted"; this answers
+        "what actually happened". Both were needed and only the first existed,
+        which meant the evidence a run recorded -- which step fell through to a
+        coordinate, how many UI dumps it cost, which assertion failed -- was
+        written to the database and never readable again from anywhere but
+        SQLite itself.
+
+        Ordered by `id` rather than by `timestamp`: events written inside the
+        same batch can share a timestamp to the second, and the insertion order
+        is the true one.
+        """
+        clause, params = "run_id=?", [run_id]
+        if kinds:
+            clause += f" AND kind IN ({','.join('?' for _ in kinds)})"
+            params.extend(kinds)
+        with closing(self.connect()) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                f"SELECT * FROM test_events WHERE {clause} ORDER BY id ASC LIMIT ?",
+                (*params, limit),
+            ).fetchall()
+        events = []
+        for row in rows:
+            event = dict(row)
+            # Stored as JSON text; a malformed row must not take the whole log
+            # down, because the log is most valuable exactly when a run went
+            # wrong.
+            try:
+                event["details"] = json.loads(event["details"] or "{}")
+            except json.JSONDecodeError:
+                event["details"] = {}
+            events.append(event)
+        return events
+
+    def run_quality_many(self, run_ids: list[str]) -> dict[str, dict]:
+        """`run_quality` for many runs in one query.
+
+        The run list needs a verdict per row, and calling `run_quality` per row
+        would be one query per run on a page that shows a hundred. One GROUP BY
+        over the whole set costs the same as one of them.
+        """
+        verdict = {run_id: {"verification_failures": 0, "selector_fallbacks": 0,
+                            "stale_selectors": 0, "ui_introspections": 0,
+                            "verified": True}
+                   for run_id in run_ids}
+        if not run_ids:
+            return verdict
+        field = {"verification_failed": "verification_failures",
+                 "selector_fallback": "selector_fallbacks",
+                 "selector_stale": "stale_selectors",
+                 "ui_introspection": "ui_introspections"}
+        placeholders = ",".join("?" for _ in run_ids)
+        kinds = tuple(field)
+        with closing(self.connect()) as conn:
+            rows = conn.execute(
+                f"SELECT run_id, kind, COUNT(*) FROM test_events "
+                f"WHERE run_id IN ({placeholders}) AND kind IN ({','.join('?' for _ in kinds)}) "
+                "GROUP BY run_id, kind",
+                (*run_ids, *kinds),
+            ).fetchall()
+        for run_id, kind, count in rows:
+            verdict[run_id][field[kind]] = count
+            if kind in ("verification_failed", "selector_stale") and count:
+                verdict[run_id]["verified"] = False
+        return verdict
+
     def run_quality(self, run_id: str) -> dict:
         """Whether this run's numbers can be trusted.
 
@@ -246,16 +453,25 @@ class Storage:
         flowing and kept looking healthy.
 
         `verified` false means "these numbers measure something other than
-        what the scenario describes". `selector_fallbacks` is not a failure --
-        the step worked via its coordinate, exactly as it always did -- but it
-        is the early warning that a selector has gone stale.
+        what the scenario describes". Two things can make it false:
+
+        - `verification_failures` -- the scenario could not be carried out.
+        - `stale_selectors` -- a target that should have resolved fell through
+          to its coordinate, so the tap was blind. `selector_fallbacks` counts
+          *every* fallback including the handful that are expected (the
+          controls the player draws itself); only the unexpected ones
+          invalidate the run. Keeping both counts means "this table is
+          decaying" and "this run is untrustworthy" stay separate questions.
         """
         counts = self.count_run_events(
-            run_id, ("verification_failed", "selector_fallback", "ui_introspection"))
+            run_id, ("verification_failed", "selector_fallback",
+                     "selector_stale", "ui_introspection"))
         failures = counts.get("verification_failed", 0)
+        stale = counts.get("selector_stale", 0)
         return {
             "verification_failures": failures,
             "selector_fallbacks": counts.get("selector_fallback", 0),
+            "stale_selectors": stale,
             # How much of this run the tool spent reading the screen. Not a
             # failure and not a warning -- it is the cost of locating elements
             # by identity instead of by coordinate, and it lands on the same
@@ -263,7 +479,7 @@ class Storage:
             # many lookups and one with none is not comparing like with like,
             # and that was previously impossible to notice.
             "ui_introspections": counts.get("ui_introspection", 0),
-            "verified": failures == 0,
+            "verified": failures == 0 and stale == 0,
         }
 
     def request_cancel(self, run_id: str) -> None:
@@ -295,19 +511,41 @@ class Storage:
                 results.append(device)
             return results
 
-    def list_runs(self, limit: int = 100, device_serial: str | None = None) -> list[dict]:
+    def list_runs(self, limit: int = 100, device_serial: str | None = None,
+                  origin: str | None = None) -> list[dict]:
+        clauses, params = [], []
+        if device_serial:
+            clauses.append("device_serial=?")
+            params.append(device_serial)
+        if origin:
+            clauses.append("origin=?")
+            params.append(origin)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(limit)
         with closing(self.connect()) as conn:
             conn.row_factory = sqlite3.Row
-            if device_serial:
-                rows = conn.execute(
-                    "SELECT * FROM test_runs WHERE device_serial=? ORDER BY rowid DESC LIMIT ?",
-                    (device_serial, limit),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    "SELECT * FROM test_runs ORDER BY rowid DESC LIMIT ?", (limit,)
-                ).fetchall()
+            rows = conn.execute(
+                f"SELECT * FROM test_runs {where} ORDER BY rowid DESC LIMIT ?", params
+            ).fetchall()
             return [dict(row) for row in rows]
+
+    def run_origin_counts(self, device_serial: str | None = None) -> dict[str, int]:
+        """How many runs came from each source.
+
+        A facet rather than a filter result, because the useful question is
+        comparative: a pass rate computed over runs somebody triggered by hand
+        while watching the device is different evidence from one computed over
+        unattended campaign runs, and until this column existed the two were
+        averaged together with no way to notice.
+        """
+        sql = "SELECT origin, COUNT(*) FROM test_runs"
+        params: list = []
+        if device_serial:
+            sql += " WHERE device_serial=?"
+            params.append(device_serial)
+        sql += " GROUP BY origin"
+        with closing(self.connect()) as conn:
+            return {origin: count for origin, count in conn.execute(sql, params)}
 
     def list_running_runs(self, limit: int = 100) -> list[dict]:
         with closing(self.connect()) as conn:

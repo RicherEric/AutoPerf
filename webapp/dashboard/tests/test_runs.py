@@ -34,7 +34,8 @@ class RunApiTests(ApiTestCase):
             "/api/runs", data=json.dumps({"serial": "S1", "duration": 5}), content_type="application/json"
         )
         self.assertEqual(response.status_code, 202)
-        self.assertEqual(response.json(), {"run_id": "new-run-id", "status": "pending"})
+        self.assertEqual(response.json(),
+                         {"run_id": "new-run-id", "status": "pending", "blind_targets": []})
         mock_trigger.assert_called_once()
         self.assertEqual(mock_trigger.call_args.args[1:], ("S1", 5.0, None))
 

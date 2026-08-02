@@ -7,6 +7,7 @@ from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
+from autoperf import demo, preflight
 from autoperf.adb import AdbClient, AdbError
 from autoperf.adapters import (
     BACK, HOME, DPAD_CENTER, DPAD_DOWN, DPAD_LEFT, DPAD_RIGHT, DPAD_UP,
@@ -26,6 +27,7 @@ from .services import (
     list_campaigns,
     refresh_devices,
     trigger_campaign,
+    trigger_preflight,
     trigger_run,
     trigger_suite,
 )
@@ -180,7 +182,21 @@ def device_nickname(request, serial):
 @require_http_methods(["GET", "POST"])
 def runs(request):
     if request.method == "GET":
-        return JsonResponse(get_storage().list_runs(), safe=False)
+        storage = get_storage()
+        # `?origin=manual` narrows the list; the shape stays a plain array
+        # either way. The counts that let a UI build this filter live on
+        # /api/stats, where the other aggregates already are -- changing this
+        # endpoint's shape to carry them would break every existing caller for
+        # the sake of a number none of them asked for.
+        rows = storage.list_runs(origin=request.GET.get("origin") or None)
+        # Every row carries its own verdict. Without this the list cannot tell
+        # a clean run from one that measured a screen it never reached -- they
+        # both read "completed", which is the exact failure mode the
+        # verification layer exists to make visible.
+        quality = storage.run_quality_many([row["id"] for row in rows])
+        for row in rows:
+            row["quality"] = quality[row["id"]]
+        return JsonResponse(rows, safe=False)
 
     try:
         body = json.loads(request.body or b"{}")
@@ -196,8 +212,18 @@ def runs(request):
     if youtube_scenario and youtube_scenario not in youtube_scenarios.REGISTRY:
         return JsonResponse({"error": f"unknown youtube_scenario: {youtube_scenario!r}"}, status=400)
 
-    run_id = trigger_run(get_storage(), serial, duration, youtube_scenario)
-    return JsonResponse({"run_id": run_id, "status": "pending"}, status=202)
+    blind = body.get("blind_targets") or None
+    if blind is not None:
+        if not isinstance(blind, list) or not all(isinstance(name, str) for name in blind):
+            return JsonResponse({"error": "blind_targets must be a list of target names"}, status=400)
+        unknown = sorted(set(blind) - set(demo.known_target_names()))
+        if unknown:
+            return JsonResponse({"error": f"unknown target(s): {', '.join(unknown)}"}, status=400)
+        if not youtube_scenario:
+            return JsonResponse({"error": "blind_targets needs a youtube_scenario to apply to"}, status=400)
+
+    run_id = trigger_run(get_storage(), serial, duration, youtube_scenario, blind_targets=blind)
+    return JsonResponse({"run_id": run_id, "status": "pending", "blind_targets": blind or []}, status=202)
 
 
 @csrf_exempt
@@ -221,7 +247,33 @@ def run_detail(request, run_id):
         delete_recording(run_id)
         return JsonResponse({"deleted": run_id})
 
+    run["quality"] = storage.run_quality(run_id)
     return JsonResponse(run)
+
+
+# What a run recorded about itself. Kept separate from the run detail because
+# the log can be long and the header is polled while a run is live.
+EVENT_LIMIT = 500
+
+
+@require_http_methods(["GET"])
+def run_events(request, run_id):
+    storage = get_storage()
+    if storage.get_run(run_id) is None:
+        return JsonResponse({"error": "not found"}, status=404)
+
+    requested = request.GET.get("kinds", "")
+    kinds = tuple(k for k in (part.strip() for part in requested.split(",")) if k)
+    limit = max(1, min(int(request.GET.get("limit", EVENT_LIMIT)), 2000))
+    events = storage.list_run_events(run_id, kinds=kinds, limit=limit)
+    return JsonResponse({
+        "events": events,
+        "quality": storage.run_quality(run_id),
+        # So the client can say "showing 500 of N" rather than silently
+        # truncating -- a cut-off log that looks complete is the same class of
+        # lie this whole layer exists to prevent.
+        "truncated": len(events) == limit,
+    })
 
 
 @require_http_methods(["GET"])
@@ -307,6 +359,85 @@ def youtube_scenarios_list(request):
     if tier and tier not in youtube_scenarios.TIERS:
         return JsonResponse({"error": f"unknown tier: {tier!r}"}, status=400)
     return JsonResponse(youtube_scenarios.describe_scenarios(tier=tier), safe=False)
+
+
+@require_http_methods(["GET"])
+def selector_targets(request):
+    """Every UI target, so a client can offer one to blind. See autoperf.demo.
+
+    With `?scenario=`, the targets that one preset actually resolves. An empty
+    list is a real answer, not an error: the `play_*` deep-link presets resolve
+    none, which is exactly why they cost zero UI dumps.
+    """
+    scenario = request.GET.get("scenario") or None
+    if scenario is None:
+        return JsonResponse({"targets": demo.known_target_names()})
+    if scenario not in youtube_scenarios.REGISTRY:
+        return JsonResponse({"error": f"unknown youtube_scenario: {scenario!r}"}, status=400)
+    return JsonResponse({
+        "scenario": scenario,
+        "targets": sorted(preflight.targets_of(scenario)),
+    })
+
+
+# A preflight is a question about the selector table, not a measurement, so it
+# gets its own resource rather than a flag on a run: it produces no samples,
+# has no duration and can never be a baseline.
+PREFLIGHT_LIST_LIMIT = 20
+
+
+@csrf_exempt
+@require_http_methods(["GET", "POST"])
+def preflights(request):
+    storage = get_storage()
+    if request.method == "GET":
+        limit = max(1, min(int(request.GET.get("limit", PREFLIGHT_LIST_LIMIT)), 100))
+        return JsonResponse(
+            storage.list_preflights(limit=limit, device_serial=request.GET.get("device") or None),
+            safe=False,
+        )
+
+    try:
+        body = json.loads(request.body or b"{}")
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "invalid JSON body"}, status=400)
+
+    serial = body.get("serial")
+    if not serial:
+        return JsonResponse({"error": "serial is required"}, status=400)
+
+    scenario = body.get("youtube_scenario") or None
+    if scenario is not None:
+        if scenario not in youtube_scenarios.REGISTRY:
+            return JsonResponse({"error": f"unknown youtube_scenario: {scenario!r}"}, status=400)
+        if not preflight.targets_of(scenario):
+            # Refused rather than run. A preflight of a deep-link preset would
+            # come back green having graded nothing, and a green report that
+            # checked nothing is the exact shape of failure this tool exists
+            # to find.
+            return JsonResponse({
+                "error": f"{scenario} resolves no selectors, so there is nothing to preflight",
+                "targets": [],
+            }, status=400)
+
+    scenarios = [scenario] if scenario else preflight.covering_scenarios()
+    preflight_id = trigger_preflight(storage, serial, scenario)
+    return JsonResponse({
+        "preflight_id": preflight_id,
+        "status": "pending",
+        "youtube_scenario": scenario,
+        # So the caller can say how long this will take before it starts.
+        "scenarios": scenarios,
+        "targets": sorted({t for name in scenarios for t in preflight.targets_of(name)}),
+    }, status=202)
+
+
+@require_http_methods(["GET"])
+def preflight_detail(request, preflight_id):
+    report = get_storage().get_preflight(preflight_id)
+    if report is None:
+        return JsonResponse({"error": "not found"}, status=404)
+    return JsonResponse(report)
 
 
 @csrf_exempt

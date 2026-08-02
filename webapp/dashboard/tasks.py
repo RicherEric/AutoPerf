@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from celery import shared_task
 
+from autoperf import demo, preflight, uiauto
+from autoperf.models import RunOrigin, RunStatus
 from autoperf.profiles import select_profile
 from autoperf.adb import AdbClient
 from autoperf.runner import DeviceBusyError, TestRunner
@@ -14,7 +16,9 @@ DEVICE_BUSY_RETRY_COUNTDOWN = 2
 
 
 @shared_task(bind=True, name="dashboard.run_test", ignore_result=True, max_retries=None)
-def run_test_task(self, db_path: str, serial: str, duration: float, run_id: str, youtube_scenario: str | None = None) -> None:
+def run_test_task(self, db_path: str, serial: str, duration: float, run_id: str,
+                  youtube_scenario: str | None = None,
+                  blind_targets: list[str] | None = None) -> None:
     """Runs a test as a Celery task instead of a raw multiprocessing.Process.
 
     Celery's Windows-compatible `--pool=solo` executes each task directly in
@@ -35,7 +39,7 @@ def run_test_task(self, db_path: str, serial: str, duration: float, run_id: str,
     storage = Storage(db_path)
     storage.initialize()
     if storage.get_run(run_id) is None:
-        storage.create_run(run_id, serial, youtube_scenario)
+        storage.create_run(run_id, serial, youtube_scenario, origin=RunOrigin.DASHBOARD)
     adb = AdbClient()
     # One probe: the adapter that drives this device and the metrics worth
     # sampling on it are the same platform's answer.
@@ -46,6 +50,10 @@ def run_test_task(self, db_path: str, serial: str, duration: float, run_id: str,
         adapter = profile.adapter()
         screen = adapter.screen_size(adb, serial)
         scenario = youtube_scenarios.build(youtube_scenario, screen)
+        # Opt-in only, and only ever set by an explicit request: strips the
+        # named targets' selectors so they fall through to their coordinate,
+        # reproducing a decayed selector table on demand. See autoperf.demo.
+        scenario = demo.blind_targets(scenario, blind_targets)
     try:
         TestRunner(storage, adb, profile.collectors(), adapter=adapter, scenario=scenario).run(serial, duration, run_id)
         completed = storage.get_run(run_id)
@@ -57,3 +65,48 @@ def run_test_task(self, db_path: str, serial: str, duration: float, run_id: str,
             storage.set_baseline(serial, run_id)
     except DeviceBusyError as exc:
         raise self.retry(exc=exc, countdown=DEVICE_BUSY_RETRY_COUNTDOWN)
+
+
+@shared_task(bind=True, name="dashboard.run_preflight", ignore_result=True, max_retries=None)
+def run_preflight_task(self, db_path: str, serial: str, preflight_id: str,
+                       scenario: str | None = None) -> None:
+    """Grade the selector table against one device. Measures nothing.
+
+    Queued through the same worker as a run, and claiming the same device, for
+    one reason: preflight drives the phone. Its taps are real and its dumps are
+    the most expensive thing this project ever asks a device to do. Letting it
+    overlap a measured run would put the tool's own cost inside the numbers the
+    run reports -- the failure this codebase spends most of its design avoiding.
+
+    `scenario` scopes the check to the targets one preset actually uses.
+    Without it the whole covering set runs, which is 11 scenarios and 42 target
+    checks -- right for "is the table still good", far too slow to sit in front
+    of anything.
+    """
+    storage = Storage(db_path)
+    storage.initialize()
+    if storage.get_preflight(preflight_id) is None:
+        storage.create_preflight(preflight_id, serial, scenario)
+    if not storage.try_start_preflight(preflight_id):
+        raise self.retry(exc=DeviceBusyError(f"device {serial} is busy"),
+                         countdown=DEVICE_BUSY_RETRY_COUNTDOWN)
+
+    adb = AdbClient()
+    try:
+        profile = select_profile(adb, serial)
+        adapter = profile.adapter()
+        names = [scenario] if scenario else preflight.covering_scenarios()
+        summary = preflight.run_preflight(adb, adapter, serial,
+                                          scenarios=names, profile=profile)
+        version = None
+        for package in preflight.app_packages(names):
+            version = uiauto.package_version(adb, serial, package)
+            if version:
+                break
+        storage.finish_preflight(preflight_id, RunStatus.COMPLETED,
+                                 summary=summary, app_version=version)
+    except Exception as exc:
+        # A preflight that dies has to say so. Left 'running' it would hold the
+        # device lock against every later run on this serial.
+        storage.finish_preflight(preflight_id, RunStatus.FAILED, error=str(exc))
+        raise

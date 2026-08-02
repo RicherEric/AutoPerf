@@ -25,7 +25,7 @@ from .adapters import Adapter
 from .adb import AdbClientProtocol
 from .analyzer import compare, compute_trend, stats_from_aggregates
 from .profiles import select_profile
-from .models import RunStatus
+from .models import RunOrigin, RunStatus
 from .runner import TestRunner
 from .scenarios import youtube as youtube_scenarios
 from .storage import Storage
@@ -123,7 +123,8 @@ def create_campaign(storage: Storage, spec: CampaignSpec) -> dict:
     run_ids = []
     for scenario in spec.planned_scenarios():
         run_id = uuid.uuid4().hex
-        storage.create_run(run_id, spec.serial, scenario, campaign_id=campaign_id)
+        storage.create_run(run_id, spec.serial, scenario, campaign_id=campaign_id,
+                           origin=RunOrigin.CAMPAIGN)
         run_ids.append(run_id)
     return {"campaign_id": campaign_id, "run_ids": run_ids, "count": len(run_ids)}
 

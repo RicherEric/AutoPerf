@@ -19,14 +19,14 @@ class EnqueueApiTests(ApiTestCase):
         run_id = trigger_run(self.storage, "S1", 30)
         self.assertEqual(self.storage.get_run(run_id)["status"], "pending")
         mock_task.apply_async.assert_called_once_with(
-            args=[self.storage.path, "S1", 30, run_id, None], task_id=run_id
+            args=[self.storage.path, "S1", 30, run_id, None, None], task_id=run_id
         )
 
     @patch("dashboard.services.run_test_task")
     def test_trigger_run_passes_youtube_scenario_through(self, mock_task):
         run_id = trigger_run(self.storage, "S1", 30, "cold_start")
         mock_task.apply_async.assert_called_once_with(
-            args=[self.storage.path, "S1", 30, run_id, "cold_start"], task_id=run_id
+            args=[self.storage.path, "S1", 30, run_id, "cold_start", None], task_id=run_id
         )
 
     @patch("dashboard.services.celery_app")

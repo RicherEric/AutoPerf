@@ -9,12 +9,12 @@ from django.conf import settings
 
 from autoperf import campaigns
 from autoperf.analyzer import compare, stats_from_aggregates
-from autoperf.models import RunStatus, utc_now
+from autoperf.models import RunOrigin, RunStatus, utc_now
 from autoperf.scenarios import youtube as youtube_scenarios
 from autoperf.storage import Storage
 from config.celery import app as celery_app
 
-from .tasks import run_test_task
+from .tasks import run_preflight_task, run_test_task
 
 # The regression threshold analyzer.compare() is called with throughout the
 # dashboard. Defined here at module top because several functions below take
@@ -204,7 +204,8 @@ def get_queue_status(storage: Storage, timeout: float = 1.0) -> dict:
     }
 
 
-def trigger_run(storage: Storage, serial: str, duration: float, youtube_scenario: str | None = None) -> str:
+def trigger_run(storage: Storage, serial: str, duration: float, youtube_scenario: str | None = None,
+                blind_targets: list[str] | None = None) -> str:
     """Enqueue a test run on the Celery worker and return immediately.
 
     Task execution itself must still land on the main thread of a fresh
@@ -224,9 +225,28 @@ def trigger_run(storage: Storage, serial: str, duration: float, youtube_scenario
     mapping -- see cancel_run below.
     """
     run_id = uuid.uuid4().hex
-    storage.create_run(run_id, serial, youtube_scenario)
-    run_test_task.apply_async(args=[storage.path, serial, duration, run_id, youtube_scenario], task_id=run_id)
+    storage.create_run(run_id, serial, youtube_scenario, origin=RunOrigin.DASHBOARD)
+    run_test_task.apply_async(
+        args=[storage.path, serial, duration, run_id, youtube_scenario, blind_targets],
+        task_id=run_id,
+    )
     return run_id
+
+
+def trigger_preflight(storage: Storage, serial: str, scenario: str | None = None) -> str:
+    """Enqueue a selector check on the same worker that executes runs.
+
+    Same queue rather than a side channel, because the constraint is physical:
+    one device can only be driven by one thing at a time. Sharing the queue is
+    what makes "wait your turn" the default instead of something every caller
+    has to remember.
+    """
+    preflight_id = uuid.uuid4().hex
+    storage.create_preflight(preflight_id, serial, scenario)
+    run_preflight_task.apply_async(
+        args=[storage.path, serial, preflight_id, scenario], task_id=preflight_id,
+    )
+    return preflight_id
 
 
 def trigger_suite(storage: Storage, serial: str, tier: str, duration: float) -> list[str]:
@@ -476,5 +496,13 @@ def get_dashboard_stats(
         "threshold_pct": threshold_pct,
         "by_scenario": scenario_stats,
         "trend": trend_by_metric,
+        # What triggered the runs behind these numbers. A pass rate averaged
+        # over a scheduled campaign and a handful someone kicked off while
+        # watching the phone is two different claims added together, and until
+        # `origin` existed there was no way to see that had happened -- a CLI
+        # run and a dashboard run wrote identical rows. Counted over all runs
+        # for this device, not just the recent window, so the filter a UI
+        # builds from it offers every value that actually exists.
+        "by_origin": storage.run_origin_counts(device_serial),
         "runs": list(reversed(verdicts)),  # most-recent-first for a "recent verdicts" table
     }

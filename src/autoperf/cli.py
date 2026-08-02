@@ -11,6 +11,7 @@ from .adapters import ScenarioStep
 from .adb import AdbClient
 from .profiles import select_profile
 from .analyzer import app_version_delta, compare, stats_from_aggregates
+from .models import RunOrigin, RunStatus
 from .runner import TestRunner
 from .scenarios import youtube as youtube_scenarios
 from .storage import Storage
@@ -152,13 +153,21 @@ def _progress_reporter(total: int):
     return report
 
 
-def _run_preflight(adb: AdbClient, serial: str, *, scenarios=None, allow_fallback=False) -> tuple[int, dict]:
+def _run_preflight(adb: AdbClient, serial: str, *, scenarios=None, allow_fallback=False,
+                   storage: Storage | None = None) -> tuple[int, dict]:
     """Check the selectors on one device and print a work list.
 
     Returns (exit_code, summary). A coordinate fallback counts as a finding by
     default: the target still got tapped, but it was located the fragile way,
     which is precisely what this command exists to detect before an hour of
     measurement is spent on top of it.
+
+    `storage` makes the result durable. Without it a preflight run from a
+    terminal existed only in that terminal's scrollback, while one triggered
+    from the dashboard was stored -- so the same check produced history or
+    produced nothing depending on which button was pressed, and the most
+    useful reports (the ones someone ran by hand while investigating) were
+    exactly the ones that vanished.
     """
     from . import preflight as preflight_core
     from .profiles import select_profile
@@ -185,7 +194,35 @@ def _run_preflight(adb: AdbClient, serial: str, *, scenarios=None, allow_fallbac
         blocking = [entry for entry in summary["needs_attention"]
                     if entry["status"] != [preflight_core.FALLBACK]]
         summary["ok"] = not blocking and not summary["failed_verifications"]
+
+    if storage is not None:
+        preflight_id = uuid.uuid4().hex
+        scenario = names[0] if len(names) == 1 else None
+        storage.create_preflight(preflight_id, serial, scenario)
+        storage.try_start_preflight(preflight_id)
+        storage.finish_preflight(
+            preflight_id, RunStatus.COMPLETED, summary=summary,
+            app_version=_preflight_app_version(adb, serial, names),
+        )
+        summary["preflight_id"] = preflight_id
     return (0 if summary["ok"] else 1), summary
+
+
+def _preflight_app_version(adb: AdbClient, serial: str, names: list[str]) -> dict | None:
+    """Which build the selectors were graded against.
+
+    A green report is only green for one build -- YouTube 21.29.366 to
+    21.30.209 moved two targets in and one out -- so a stored report without
+    its version is a verdict with no subject.
+    """
+    from . import preflight as preflight_core
+    from . import uiauto
+
+    for package in preflight_core.app_packages(names):
+        version = uiauto.package_version(adb, serial, package)
+        if version:
+            return version
+    return None
 
 
 def _campaign_command(args, storage: Storage, adb: AdbClient) -> int:
@@ -310,7 +347,8 @@ def main(argv: list[str] | None = None) -> int:
                 # TestRunner.run() sees an existing row for this run_id and
                 # skips its own create_run(), preserving the field.
                 run_id = uuid.uuid4().hex
-                storage.create_run(run_id, args.serial, youtube_scenario=args.youtube_scenario)
+                storage.create_run(run_id, args.serial, youtube_scenario=args.youtube_scenario,
+                                   origin=RunOrigin.MANUAL)
         elif args.app:
             adapter = profile.adapter()
             scenario = [ScenarioStep(0.0, "launch_app", {"package": args.app})]
@@ -388,7 +426,8 @@ def main(argv: list[str] | None = None) -> int:
         else:
             scenarios = args.scenarios  # None -> minimal covering set
         code, summary = _run_preflight(
-            adb, args.serial, scenarios=scenarios, allow_fallback=args.allow_fallback
+            adb, args.serial, scenarios=scenarios, allow_fallback=args.allow_fallback,
+            storage=storage,
         )
         print(json.dumps(summary, indent=2))
         if summary["needs_attention"]:
@@ -451,7 +490,8 @@ def main(argv: list[str] | None = None) -> int:
         for name in youtube_scenarios.list_scenarios(tier=args.tier):
             scenario = youtube_scenarios.build(name, screen)
             run_id = uuid.uuid4().hex
-            storage.create_run(run_id, args.serial, youtube_scenario=name)
+            storage.create_run(run_id, args.serial, youtube_scenario=name,
+                               origin=RunOrigin.SUITE)
             TestRunner(storage, adb, profile.collectors(), adapter=adapter, scenario=scenario).run(
                 args.serial, args.duration, run_id
             )

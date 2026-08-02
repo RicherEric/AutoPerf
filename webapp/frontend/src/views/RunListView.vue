@@ -1,15 +1,19 @@
 <script setup>
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import {
   cancelRun,
   connectDevice,
   deleteRun,
+  getPreflight,
+  getScenarioTargets,
   listDevices,
+  listPreflights,
   listRuns,
   listYoutubeScenarios,
   refreshDevices,
   setDeviceNickname,
+  triggerPreflight,
   triggerRun,
   triggerSuite,
 } from '../api.js'
@@ -25,6 +29,18 @@ const STATUS_TONE = {
   pending: 'neutral',
   failed: 'danger',
   interrupted: 'danger',
+}
+
+// What triggered a run. All neutral except `unknown`, which is deliberately
+// not: those are rows written before the column existed, and reading a trend
+// without knowing whether it mixes attended and scheduled runs is the thing
+// this column was added to stop. Fading them out would hide exactly that.
+const ORIGIN_TONE = {
+  manual: 'neutral',
+  dashboard: 'neutral',
+  campaign: 'neutral',
+  suite: 'neutral',
+  unknown: 'warning',
 }
 
 // Shallow to deep, mirroring smoke-test -> full regression-suite conventions:
@@ -49,6 +65,11 @@ const connectAddress = ref('')
 const connecting = ref(false)
 const selectedIds = ref(new Set())
 const bulkDeleting = ref(false)
+// Which targets the selected scenario would have graded. null while unknown,
+// [] when the scenario resolves none -- those two must not read the same.
+const scenarioTargets = ref(null)
+const preflightReport = ref(null)
+const startingPreflight = ref(false)
 
 let pollHandle = null
 
@@ -159,6 +180,64 @@ async function onRunSuite(tier) {
   }
 }
 
+const preflightPossible = computed(() =>
+  Boolean(selectedSerial.value) && (!selectedScenario.value || (scenarioTargets.value ?? []).length > 0)
+)
+
+const preflightBusy = computed(() =>
+  ['pending', 'running'].includes(preflightReport.value?.status),
+)
+
+const preflightAttention = computed(() =>
+  preflightReport.value?.summary?.needs_attention ?? [],
+)
+
+async function loadScenarioTargets() {
+  if (!selectedScenario.value) {
+    scenarioTargets.value = null
+    return
+  }
+  try {
+    const { targets } = await getScenarioTargets(selectedScenario.value)
+    scenarioTargets.value = targets
+  } catch {
+    // A failed lookup must not disable the button on a false premise; the
+    // server refuses an unpreflightable scenario anyway.
+    scenarioTargets.value = null
+  }
+}
+
+async function refreshPreflight() {
+  if (!selectedSerial.value) {
+    preflightReport.value = null
+    return
+  }
+  const [row] = await listPreflights(selectedSerial.value, 1)
+  if (!row) {
+    preflightReport.value = null
+    return
+  }
+  // The list omits the summary, so the detail is fetched -- but only when
+  // something actually changed, since this runs on the same 3s poll as the
+  // run list.
+  const current = preflightReport.value
+  if (current?.id === row.id && current?.status === row.status) return
+  preflightReport.value = await getPreflight(row.id)
+}
+
+async function onStartPreflight() {
+  error.value = ''
+  startingPreflight.value = true
+  try {
+    await triggerPreflight(selectedSerial.value, selectedScenario.value)
+    await refreshPreflight()
+  } catch (err) {
+    error.value = err.message
+  } finally {
+    startingPreflight.value = false
+  }
+}
+
 async function onBulkDelete() {
   const ids = [...selectedIds.value]
   if (!ids.length) return
@@ -217,13 +296,21 @@ async function onSetNickname(serial, nickname) {
   }
 }
 
+watch(selectedScenario, loadScenarioTargets)
+watch(selectedSerial, refreshPreflight)
+
 onMounted(async () => {
   await Promise.all([
     loadDevices(),
     loadRuns(),
     listYoutubeScenarios().then((entries) => (youtubeScenarios.value = entries)),
   ])
-  pollHandle = setInterval(loadRuns, 3000)
+  await refreshPreflight()
+  pollHandle = setInterval(() => {
+    loadRuns()
+    // Only while it could still change: a finished report is not re-fetched.
+    if (preflightBusy.value || !preflightReport.value) refreshPreflight()
+  }, 3000)
 })
 
 onUnmounted(() => {
@@ -354,6 +441,82 @@ onUnmounted(() => {
     </div>
   </Card>
 
+  <Card :title="t('runs.preflight.title')">
+    <p class="hint">{{ t('runs.preflight.hint') }}</p>
+    <div class="preflight-row">
+      <button @click="onStartPreflight" :disabled="startingPreflight || preflightBusy || !preflightPossible">
+        {{ startingPreflight ? t('runs.preflight.starting') : t('runs.preflight.button') }}
+      </button>
+      <span v-if="selectedScenario && (scenarioTargets ?? []).length" class="hint">
+        {{ t('runs.preflight.scopedHint', { scenario: selectedScenario, count: scenarioTargets.length }) }}
+      </span>
+      <span v-else-if="selectedScenario && scenarioTargets" class="hint warn">
+        {{ t('runs.preflight.noTargetsHint', { scenario: selectedScenario }) }}
+      </span>
+      <span v-else class="hint">{{ t('runs.preflight.fullHint') }}</span>
+    </div>
+
+    <p v-if="!preflightReport" class="hint">{{ t('runs.preflight.noReport') }}</p>
+    <div v-else class="preflight-report">
+      <div class="preflight-verdict">
+        <StatusBadge
+          :label="preflightReport.status"
+          :tone="STATUS_TONE[preflightReport.status] ?? 'neutral'"
+        />
+        <StatusBadge
+          v-if="preflightReport.ok === true"
+          :label="t('runs.preflight.resultOk')"
+          tone="success"
+        />
+        <StatusBadge
+          v-else-if="preflightReport.ok === false"
+          :label="t('runs.preflight.resultAttention', { count: preflightAttention.length })"
+          tone="danger"
+        />
+        <span v-if="preflightReport.summary" class="hint">
+          {{ t('runs.preflight.checkedSummary', {
+            checked: preflightReport.summary.targets_checked,
+            scenarios: (preflightReport.summary.scenarios_checked ?? []).join(', '),
+          }) }}
+        </span>
+        <span v-if="preflightReport.app_version_name" class="hint">
+          {{ t('runs.preflight.appVersion') }}: {{ preflightReport.app_version_name }}
+        </span>
+      </div>
+
+      <p v-if="preflightReport.error" class="error">
+        {{ t('runs.preflight.failedLabel') }}: {{ preflightReport.error }}
+      </p>
+
+      <!-- Aggregated per target, because the fix is per target: one decayed
+           selector shows up in several scenarios but is corrected in one place. -->
+      <table v-if="preflightAttention.length">
+        <thead>
+          <tr>
+            <th>{{ t('runs.preflight.colTarget') }}</th>
+            <th>{{ t('runs.preflight.colStatus') }}</th>
+            <th>{{ t('runs.preflight.colObserved') }}</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="item in preflightAttention" :key="item.target">
+            <td><code>{{ item.target }}</code></td>
+            <td>{{ (item.status ?? []).join(', ') }}</td>
+            <td class="observed">
+              <!-- The report lists what was actually on screen so the right
+                   selector is read off it rather than guessed at again. -->
+              <code v-for="node in (item.observed_on_screen ?? []).slice(0, 6)"
+                    :key="node.resource_id + node.text + node.content_desc">
+                {{ node.content_desc || node.text || node.resource_id }}
+              </code>
+              <span v-if="!(item.observed_on_screen ?? []).length">—</span>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </Card>
+
   <Card :title="t('runs.runsTitle')">
     <div class="bulk-bar">
       <button @click="onBulkDelete" :disabled="!selectedIds.size || bulkDeleting">
@@ -366,6 +529,7 @@ onUnmounted(() => {
           <th><input type="checkbox" :checked="allDeletableSelected" @change="toggleSelectAll" /></th>
           <th>{{ t('runs.colId') }}</th>
           <th>{{ t('runs.colDevice') }}</th>
+          <th>{{ t('runs.colOrigin') }}</th>
           <th>{{ t('runs.colStatus') }}</th>
           <th>{{ t('runs.colStarted') }}</th>
           <th>{{ t('runs.colFinished') }}</th>
@@ -384,6 +548,12 @@ onUnmounted(() => {
           </td>
           <td><router-link :to="`/runs/${run.id}`">{{ run.id.slice(0, 8) }}</router-link></td>
           <td>{{ run.device_serial }}</td>
+          <td>
+            <StatusBadge
+              :label="t(`runs.origin.${run.origin || 'unknown'}`)"
+              :tone="ORIGIN_TONE[run.origin] ?? 'neutral'"
+            />
+          </td>
           <td><StatusBadge :label="run.status" :tone="STATUS_TONE[run.status] ?? 'neutral'" /></td>
           <td>{{ formatTimestamp(run.started_at) }}</td>
           <td>{{ formatTimestamp(run.finished_at) }}</td>
@@ -453,5 +623,26 @@ onUnmounted(() => {
 .nickname-input {
   width: 100%;
   max-width: 160px;
+}
+.preflight-row {
+  display: flex;
+  gap: var(--space-3);
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: var(--space-3);
+}
+.preflight-verdict {
+  display: flex;
+  gap: var(--space-3);
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: var(--space-3);
+}
+.preflight-report .observed code {
+  margin-right: var(--space-2);
+  white-space: nowrap;
+}
+.hint.warn {
+  color: var(--color-warning, #8a6410);
 }
 </style>

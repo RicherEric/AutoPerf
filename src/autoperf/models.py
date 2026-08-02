@@ -18,6 +18,27 @@ class RunStatus(StrEnum):
     INTERRUPTED = "interrupted"
 
 
+class RunOrigin(StrEnum):
+    """What asked for a run.
+
+    Kept apart from `campaign_id` because they answer different questions.
+    `campaign_id` says which batch a run belongs to; this says who started it,
+    and a reader comparing two trends needs that: a series built from runs
+    someone triggered by hand while watching is not the same evidence as one
+    a scheduler produced unattended, even when every number matches.
+
+    `UNKNOWN` is for rows written before the column existed. It is a real
+    value rather than NULL so that "we never recorded this" is visible in a
+    facet count instead of vanishing from it.
+    """
+
+    MANUAL = "manual"          # a person at a terminal: `autoperf run`
+    DASHBOARD = "dashboard"    # queued from the web UI
+    CAMPAIGN = "campaign"      # one iteration of a repeat/soak campaign
+    SUITE = "suite"            # part of a scenario suite run
+    UNKNOWN = "unknown"
+
+
 @dataclass(frozen=True, slots=True)
 class Device:
     serial: str

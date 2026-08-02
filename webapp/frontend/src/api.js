@@ -79,6 +79,32 @@ export function triggerSuite(serial, tier, duration) {
   })
 }
 
+// Preflight grades the selector table against a device without measuring
+// anything. It holds the device for as long as it runs, which is why it is
+// enqueued rather than performed inline.
+export function triggerPreflight(serial, youtubeScenario = '') {
+  return request('/preflights', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ serial, youtube_scenario: youtubeScenario || null }),
+  })
+}
+
+export function listPreflights(deviceSerial = '', limit = 5) {
+  const device = deviceSerial ? `&device=${encodeURIComponent(deviceSerial)}` : ''
+  return request(`/preflights?limit=${limit}${device}`)
+}
+
+export function getPreflight(preflightId) {
+  return request(`/preflights/${encodeURIComponent(preflightId)}`)
+}
+
+// Which targets one scenario resolves. An empty list means preflight has
+// nothing to grade there -- the deep-link presets are all like that.
+export function getScenarioTargets(youtubeScenario) {
+  return request(`/selector-targets?scenario=${encodeURIComponent(youtubeScenario)}`)
+}
+
 export function getQueueStatus() {
   return request('/queue')
 }
