@@ -626,6 +626,10 @@ def get_dashboard_stats(
         "unverified": unverified,
         "pass_rate": (passed / evaluated) if evaluated else None,
         "threshold_pct": threshold_pct,
+        # How many baselines exist, which is a different question from how
+        # many runs lacked one -- and the one people actually ask when they
+        # want to know whether baselines are being set at all.
+        "baselines": storage.count_baselines(device_serial),
         "by_scenario": scenario_stats,
         "trend": trend_by_metric,
         # Why the trend is empty, when it is -- so the page can say so instead

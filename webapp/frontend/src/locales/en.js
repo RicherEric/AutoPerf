@@ -48,6 +48,17 @@ export default {
     noBaseline: 'No baseline yet',
     passRateTitle: 'Pass rate per scenario',
     criteriaHint: 'Pass/fail criteria: compared against this device\'s baseline for the same scenario, if any metric (CPU / memory / battery / temperature) moves more than {threshold}% on average, the run is marked fail (in either direction — see "Recent verdicts" below). Baselines are set per device + scenario separately, since different scenarios naturally use different amounts of resources and can\'t be compared to each other. A scenario with no baseline set yet shows "no baseline" and isn\'t counted toward the pass rate.',
+    baselines: 'Baselines set',
+    baselinesNote: 'one per device × scenario, set automatically by the first run that completes',
+    noBaselineLine: '{count} run(s) had no baseline to compare against -- that device+scenario '
+      + 'has never completed before, so they count as neither pass nor fail. '
+      + 'One successful run fills it in.',
+    noBaselineNote: 'nothing to compare against yet',
+    unverifiedNote: 'never reached the screen · excluded from the pass rate',
+    unverifiedWhere: '{count} unverified, mostly {scenario} ({n}). '
+      + 'Unverified means the scenario never reached the screen it was measuring -- '
+      + 'the numbers are real but describe something else, so it counts as neither '
+      + 'pass nor fail. What needs fixing is that scenario, not the performance.',
     noCompletedRuns: 'No completed runs yet.',
     recentVerdictsTitle: 'Recent verdicts',
     colRun: 'Run',

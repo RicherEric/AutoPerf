@@ -48,6 +48,15 @@ export default {
     noBaseline: '尚無 Baseline',
     passRateTitle: '每個腳本的通過率',
     criteriaHint: '判定標準:與該裝置「同一個腳本」的 baseline 相比,任一項 metric(CPU/記憶體/電量/溫度)的平均值變動超過 {threshold}%,這個 run 就判定為 fail(不分變高或變低,見下方「近期判定明細」)。Baseline 是依裝置 + 腳本分開設定的——不同腳本負載本來就不一樣,不會互相比較。還沒針對某個腳本設定過 baseline 的話,那個腳本的 run 會顯示「無 baseline」,不計入通過率。',
+    baselines: '已建立基準線',
+    baselinesNote: '每個「裝置 × 場景」一個,由該組合第一筆成功的執行自動設定',
+    noBaselineLine: '有 {count} 筆執行找不到可比的基準線 —— 那個「裝置 × 場景」還沒跑成功過,'
+      + '所以它們不算通過也不算失敗。再跑一次成功就會自動補上。',
+    noBaselineNote: '沒有比較對象,不算通過也不算失敗',
+    unverifiedNote: '沒到達要測的畫面 · 不計入通過率',
+    unverifiedWhere: '{count} 筆未驗證,最多的是 {scenario}({n} 筆)。'
+      + '「未驗證」的意思是腳本沒能到達它要測的那個畫面 —— 數字有量到,但量的不是目標,'
+      + '所以它既不算通過也不算失敗。要修的是那個腳本的定位或等待,不是效能。',
     noCompletedRuns: '還沒有任何完成的 run。',
     recentVerdictsTitle: '近期判定明細',
     colRun: 'Run',

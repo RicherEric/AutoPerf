@@ -53,6 +53,13 @@ function trendXDomain(name) {
   return [Math.min(...times), Math.max(...times)]
 }
 
+// Which scenario is producing them. "17 unverified" is not actionable;
+// "8 of them are search_and_play" is where to look.
+const topUnverified = computed(() => {
+  const rows = (stats.value?.by_scenario ?? []).filter((r) => r.unverified > 0)
+  return rows.sort((a, b) => b.unverified - a.unverified)[0] ?? null
+})
+
 const overallPassRatePct = computed(() =>
   stats.value?.pass_rate === null || stats.value?.pass_rate === undefined
     ? '—'
@@ -108,15 +115,36 @@ onUnmounted(() => {
         <span class="value">{{ stats.total_runs }}</span>
         <span class="label">{{ t('stats.totalRuns') }}</span>
       </div>
+      <!-- The count people actually look for. The old tile showed how many
+           runs had *no* baseline, which is zero in the healthy case and reads
+           as "no baselines exist". -->
       <div class="stat-tile">
-        <span class="value">{{ stats.no_baseline }}</span>
-        <span class="label">{{ t('stats.noBaseline') }}</span>
+        <span class="value">{{ stats.baselines }}</span>
+        <span class="label">{{ t('stats.baselines') }}</span>
+        <span class="note">{{ t('stats.baselinesNote') }}</span>
       </div>
+      <!-- A bare count says nothing: 17 out of what, and is that bad? Shown
+           as a fraction, with what it means and what it excludes. -->
       <div class="stat-tile" :class="{ 'stat-warn': stats.unverified > 0 }">
-        <span class="value">{{ stats.unverified }}</span>
+        <span class="value">
+          {{ stats.unverified }}<span class="of">/ {{ stats.total_runs }}</span>
+        </span>
         <span class="label">{{ t('stats.unverified') }}</span>
+        <span class="note">{{ t('stats.unverifiedNote') }}</span>
       </div>
     </div>
+    <!-- Where they came from, because the answer is always one or two
+         scenarios and that is the thing worth acting on. -->
+    <p v-if="stats && stats.no_baseline > 0" class="unverified-line">
+      {{ t('stats.noBaselineLine', { count: stats.no_baseline }) }}
+    </p>
+    <p v-if="stats && stats.unverified > 0" class="unverified-line">
+      {{ t('stats.unverifiedWhere', {
+        count: stats.unverified,
+        scenario: topUnverified?.scenario ?? '—',
+        n: topUnverified?.unverified ?? 0,
+      }) }}
+    </p>
   </Card>
 
   <Card :title="t('stats.passRateTitle')">
@@ -183,6 +211,23 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+.stat-tile .note {
+  display: block;
+  color: var(--color-text-muted);
+  font-size: 0.72em;
+  line-height: 1.3;
+  margin-top: 0.2em;
+}
+.stat-tile .of {
+  font-size: 0.5em;
+  color: var(--color-text-muted);
+  margin-left: 0.2em;
+}
+.unverified-line {
+  margin-top: var(--space-3);
+  font-size: 0.88em;
+  color: var(--color-text-muted);
+}
 .device-filter {
   margin-bottom: var(--space-4);
 }

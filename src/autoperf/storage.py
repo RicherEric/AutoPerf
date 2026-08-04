@@ -757,6 +757,22 @@ class Storage:
                 "AND device_serial NOT IN "
                 "(SELECT device_serial FROM test_runs WHERE status='running')", (cutoff,))]
 
+    def count_baselines(self, device_serial: str | None = None) -> int:
+        """How many baselines exist -- one per (device, scenario) that has run.
+
+        Not the same question as "how many runs had no baseline to compare
+        against", which is what the stats page's no_baseline bucket counts.
+        Zero of the second is the healthy state; zero of the first means
+        nothing has ever completed.
+        """
+        sql = "SELECT count(*) FROM baselines"
+        params: tuple = ()
+        if device_serial:
+            sql += " WHERE device_serial=?"
+            params = (device_serial,)
+        with closing(self.connect()) as conn:
+            return conn.execute(sql, params).fetchone()[0]
+
     def count_queued_runs(self) -> int:
         """How many runs are waiting to start, straight from the table.
 
