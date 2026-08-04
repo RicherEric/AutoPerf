@@ -190,7 +190,8 @@ class TestRunner:
 
         self.storage.set_run_app_version(run_id, uiauto.package_version(self.adb, serial, package))
 
-    def run(self, serial: str, duration: float, run_id: str | None = None) -> str:
+    def run(self, serial: str, duration: float, run_id: str | None = None,
+            require_existing: bool = False) -> str:
         if self.scenario and self.adapter is None:
             raise ValueError("scenario requires an adapter")
         for step in self.scenario or []:
@@ -199,6 +200,21 @@ class TestRunner:
         run_id = run_id or uuid.uuid4().hex
         existing = self.storage.get_run(run_id)
         if existing is None:
+            if require_existing:
+                # The caller pre-created this row, so its absence means it was
+                # *deleted*, and creating it again resurrects work somebody
+                # asked to be gone. Only a caller that pre-creates can tell
+                # the difference: to everyone else a missing row is simply a
+                # run that has not started yet.
+                #
+                # Not hypothetical. Deleting a campaign deletes its runs, but
+                # its tasks are already sitting in Celery; each one arrived
+                # here, found no row and made a new one -- without the
+                # campaign_id, so a deleted campaign came back as hundreds of
+                # orphan runs that no page could show and no cancel could
+                # reach, still driving the devices. Observed 2026-08-03: four
+                # campaigns deleted, ~600 runs resurrected.
+                return run_id
             self.storage.create_run(run_id, serial)
         elif existing["device_serial"] != serial:
             raise ValueError("Run belongs to another device")
@@ -225,8 +241,21 @@ class TestRunner:
             nonlocal stop
             stop = True
 
+        # Ctrl+C is a courtesy, not the cancellation mechanism -- so failing
+        # to install the handler must not fail the run. Only the main thread
+        # may install one, and Celery's `--pool=solo` no longer executes tasks
+        # there: every task raised ValueError here *after* try_start_run had
+        # already flipped the row to `running`, so each failure also left that
+        # row stale, and a stale row makes its device permanently busy. Two
+        # devices sat idle all night behind two rows that said they were
+        # running. Cancellation from a worker comes from Storage's
+        # cancel_requested flag, which is checked in the loop below and does
+        # not involve signals at all.
         previous = signal.getsignal(signal.SIGINT)
-        signal.signal(signal.SIGINT, request_stop)
+        try:
+            signal.signal(signal.SIGINT, request_stop)
+        except ValueError:
+            previous = None
         started = time.monotonic()
         last_cancel_check = started
         last_heartbeat = started
@@ -369,5 +398,6 @@ class TestRunner:
             raise
         finally:
             executor.shutdown(wait=True, cancel_futures=True)
-            signal.signal(signal.SIGINT, previous)
+            if previous is not None:      # None when we could not install one
+                signal.signal(signal.SIGINT, previous)
         return run_id

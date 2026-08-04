@@ -57,6 +57,43 @@ class AnnexBSplitterTests(unittest.TestCase):
         splitter = AnnexBSplitter()
         self.assertEqual(splitter.feed(b"\x00\x00\x00\x01" + SPS[:2]), [])
 
+    def test_flush_emits_the_nal_that_no_following_start_code_terminated(self):
+        # A device sitting on a static screen produces one frame and then
+        # nothing, so the IDR is never bounded and the preview stays black.
+        splitter = AnnexBSplitter()
+        self.assertEqual([n[0] for n in splitter.feed(annexb(SPS, PPS, IDR))], [7, 8])
+        self.assertEqual(splitter.flush(), [(5, IDR)])
+
+    def test_flush_is_empty_when_nothing_is_held(self):
+        splitter = AnnexBSplitter()
+        self.assertEqual(splitter.flush(), [])
+
+    def test_flush_does_not_re_emit_what_it_already_gave_out(self):
+        splitter = AnnexBSplitter()
+        splitter.feed(annexb(SPS, PPS, IDR))
+        splitter.flush()
+        self.assertEqual(splitter.flush(), [])
+
+    def test_flushing_a_frame_leaves_the_next_one_intact(self):
+        # After a flush the buffer is empty, so bytes that were the tail of
+        # the flushed NAL have no start code and are skipped -- the stream
+        # resynchronises on the next one rather than corrupting it.
+        splitter = AnnexBSplitter()
+        splitter.feed(annexb(SPS, PPS, IDR))
+        splitter.flush()
+        nals = splitter.feed(b"\xab\xab" + annexb(DELTA) + b"\x00\x00\x00\x01")
+        self.assertEqual(nals, [(1, DELTA)])
+
+    def test_flushed_idr_still_pairs_with_its_parameter_sets(self):
+        # The whole point: what the browser needs is a *key* access unit, and
+        # SPS/PPS were emitted normally while only the IDR was held back.
+        splitter, assembler = AnnexBSplitter(), AccessUnitAssembler()
+        units = [assembler.feed(t, p) for t, p in splitter.feed(annexb(SPS, PPS, IDR))]
+        self.assertEqual(units, [None, None])
+        (is_key, framed), = [assembler.feed(t, p) for t, p in splitter.flush()]
+        self.assertTrue(is_key)
+        self.assertEqual(framed, annexb(SPS, PPS, IDR))
+
 
 class AccessUnitAssemblerTests(unittest.TestCase):
     def test_sps_and_pps_are_buffered_until_idr_arrives(self):

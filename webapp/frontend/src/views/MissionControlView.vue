@@ -1,7 +1,7 @@
 <script setup>
 import { onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { getQueueStatus, listDevices, listSamples } from '../api.js'
+import { getRunningRuns, listDevices, listSamples } from '../api.js'
 import Card from '../components/Card.vue'
 import LiveScreenPanel from '../components/LiveScreenPanel.vue'
 import MiniSparkline from '../components/MiniSparkline.vue'
@@ -23,7 +23,7 @@ function deviceLabel(serial) {
 }
 
 async function poll() {
-  const [status, devices] = await Promise.all([getQueueStatus(), listDevices()])
+  const [status, devices] = await Promise.all([getRunningRuns(), listDevices()])
   runningRuns.value = status.running_runs
   for (const d of devices) {
     devicesBySerial[d.serial] = d

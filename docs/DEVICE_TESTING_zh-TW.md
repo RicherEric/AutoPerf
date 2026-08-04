@@ -2,7 +2,7 @@
 
 > 量測基準：Galaxy A55（SM-A5560）／Android 15／YouTube **21.30.209**
 > 第二台：Redmi Pad 2（2603ARP14G）／Android 16／YouTube **20.38.37**／橫向平板 —— 見 **§十二**
-> 測試規模：403 core + 146 webapp = 549
+> 測試規模：417 core + 149 webapp = 566
 > CI：GitHub Actions，每次 push 在 Ubuntu 與 Windows 各跑一次全套 —— **runner 上沒有手機**（見 **§十一**）
 
 ---
@@ -34,9 +34,9 @@
 
 ## 二、分層架構
 
-整個裝置層只有**一個出口**：`adb.shell(serial, command, timeout)`。這是這個 codebase 最好的一個決定 —— 403 個測試能在沒有裝置的情況下跑完，全靠它。
+整個裝置層只有**一個出口**：`adb.shell(serial, command, timeout)`。這是這個 codebase 最好的一個決定 —— 417 個測試能在沒有裝置的情況下跑完，全靠它。
 
-CI 是這個決定的直接回報：GitHub Actions 每次 push 在 Ubuntu 與 Windows 各跑一次完整的 549 個測試，**runner 上沒有 adb、沒有模擬器、沒有手機**。跑兩個平台是因為這個專案在兩個地方講了平台專屬的話 —— Celery 的 `--pool=solo`（為 Windows 選的）與 `DeviceSupervisor` 的 `spawn`。
+CI 是這個決定的直接回報：GitHub Actions 每次 push 在 Ubuntu 與 Windows 各跑一次完整的 566 個測試，**runner 上沒有 adb、沒有模擬器、沒有手機**。跑兩個平台是因為這個專案在兩個地方講了平台專屬的話 —— Celery 的 `--pool=solo`（為 Windows 選的）與 `DeviceSupervisor` 的 `spawn`。
 
 ```mermaid
 flowchart TB
@@ -163,10 +163,10 @@ flowchart LR
     UPDATE(["YouTube 改版了"]) --> P["parsing · 70"]
     UPDATE --> E["elements · 44"]
     DEV(["Android 版本變了"]) --> P
-    OURS(["我們自己改邏輯"]) --> L["logic · 124"]
-    OURS --> F["flow · 121"]
+    OURS(["我們自己改邏輯"]) --> L["logic · 131"]
+    OURS --> F["flow · 128"]
     CMD(["指令形狀變了"]) --> C["commands · 44"]
-    API(["API / Celery / 串流變了"]) --> W["webapp · 146"]
+    API(["API / Celery / 串流變了"]) --> W["webapp · 149"]
 
     style P fill:#f3e3dd,stroke:#9c3b22,stroke-width:2px
     style E fill:#f3e3dd,stroke:#9c3b22,stroke-width:2px
@@ -175,12 +175,12 @@ flowchart LR
 
 | 群組 | 什麼時候會壞 | 測試數 |
 |---|---|--:|
-| `logic` | 我們自己的邏輯改了。**這裡不知道「裝置」是什麼** | 124 |
+| `logic` | 我們自己的邏輯改了。**這裡不知道「裝置」是什麼** | 131 |
 | `parsing` | 裝置吐的東西跟 fixture 假設的不一樣 ← 擷取的畫面都在這 | 70 |
 | `commands` | 送出去的指令形狀改了 | 44 |
 | `elements` | selector 解析或 `verify_*` 動作改了 | 44 |
-| `flow` | 整條流程對假裝置跑不通 | 121 |
-| `webapp` | API / Celery / 串流 | 146 |
+| `flow` | 整條流程對假裝置跑不通 | 128 |
+| `webapp` | API / Celery / 串流 | 149 |
 
 只有 `parsing` 與 `elements` 會被 YouTube 改版打到。**整個套件近三分之一（`logic`）跟任何裝置都無關** —— 出事時值得先知道這件事。
 
@@ -192,7 +192,7 @@ python scripts/run-tests.py parsing    # 只跑會過期的那一片
 
 **地圖不會爛掉**：測試模組不在任何組 → 「跑全部」會靜默跳過它 → `test_suite_groups.py` 失敗。在兩組 → 跑兩次卻讀成兩種風險 → 也失敗。
 
-> 全部 549 條的逐條清單 —— 每一條的**測試目的**與**測試方法**（用了哪個替身、有沒有 patch、打不打 HTTP）—— 在 HTML 版的「**測試項目**」分頁，而且**先分成「裝置測項」與「非裝置測項」兩塊**：實際判定下來是 **368 / 181**。判定的問題是「沒有裝置這個概念，這個測試還有沒有意義」，依據是測試本體真的碰到什麼（adb 替身、adapter、畫面結構、selector），每一列都附上那個依據，所以這個分類可以被反駁。
+> 全部 566 條的逐條清單 —— 每一條的**測試目的**與**測試方法**（用了哪個替身、有沒有 patch、打不打 HTTP）—— 在 HTML 版的「**測試項目**」分頁，而且**先分成「裝置測項」與「非裝置測項」兩塊**：實際判定下來是 **378 / 188**。判定的問題是「沒有裝置這個概念，這個測試還有沒有意義」，依據是測試本體真的碰到什麼（adb 替身、adapter、畫面結構、selector），每一列都附上那個依據，所以這個分類可以被反駁。
 >
 > 那份清單是每次建置時從測試本身讀出來的（`scripts/collect-tests.py`），不是手寫的：手寫的清單會過期，而過期又看起來完整的清單，正是這一整套東西在防的謊。
 
@@ -486,7 +486,7 @@ self.assertIs(uiauto.is_playing(CapturedAdb("watch_page_playing"), "S1", YOUTUBE
 
 - **只有一台裝置。** capture 全部來自 A55／Android 15。換第二支手機一定會有幾條被推翻，而那個矛盾是目前沒人擁有的資訊。**這是清單上最重要的一條** —— 見下方「下一章」。
   > **一個 app build 這半條已經先被推翻了**（2026-08-02）。同一台 A55 上 YouTube 從 21.29.366 更新到 21.30.209，就足以讓兩條原本寫著「永久」「測不了」的限制作廢（見下面兩條）。**換裝置會推翻什麼還不知道，但換版本推翻了什麼，現在知道了 —— 而且花的時間是三天，不是換一台硬體。**
-- **CI 上跑的，是那 549 個不需要真機的。** 每次 push 都會在 Ubuntu 與 Windows 各跑一次全套（**§二**）—— 但 **runner 上沒有手機**，所以 CI 能證明的僅止於「我們自己的邏輯沒被改壞」。缺的是硬體，不是程式碼。`preflight` 是正確的想法 —— 一個真的走一遍並評分 selector 表的流程。它現在可以從 dashboard 按一顆按鈕觸發，也可以只檢查某一個 scenario 用到的元素（scoped preflight：`search_and_play` 是 3 個，不是整個涵蓋組的 21 個），而且跟量測 run 搶同一把裝置鎖 —— 因為它自己也在點、也在 dump，跟 run 重疊就是把工具的成本混進被量測的數字裡。
+- **CI 上跑的，是那 566 個不需要真機的。** 每次 push 都會在 Ubuntu 與 Windows 各跑一次全套（**§二**）—— 但 **runner 上沒有手機**，所以 CI 能證明的僅止於「我們自己的邏輯沒被改壞」。缺的是硬體，不是程式碼。`preflight` 是正確的想法 —— 一個真的走一遍並評分 selector 表的流程。它現在可以從 dashboard 按一顆按鈕觸發，也可以只檢查某一個 scenario 用到的元素（scoped preflight：`search_and_play` 是 3 個，不是整個涵蓋組的 21 個），而且跟量測 run 搶同一把裝置鎖 —— 因為它自己也在點、也在 dump，跟 run 重疊就是把工具的成本混進被量測的數字裡。
 
 **但它仍然不是一道關卡。** 一顆按鈕跟一個指令的差別只是成本，不是性質：兩者都要有人記得去按。真正的關卡是「這次 scenario 需要的 target 掉了座標 → run 直接被擋下或當場標成 unverified」，而那還沒有做。**§一** 第二筆帳因此仍只結清了一半。
 - **讚按鈕的狀態測不了 —— 但「找不到」那半條已經作廢。**

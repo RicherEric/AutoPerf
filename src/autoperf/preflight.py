@@ -27,9 +27,29 @@ import time
 from dataclasses import dataclass, field
 
 from . import uiauto
-from .adapters import Adapter, VerificationError
+from .adapters import HOME, Adapter, VerificationError
 from .adb import AdbClientProtocol
 from .scenarios import youtube as youtube_scenarios
+
+
+# Preflight waits far longer for a screen dump than a measured run does.
+#
+# A run's dump costs it real time inside a step's budget, so uiauto's 6s
+# default is the right trade there: cut off, fall back to a coordinate, carry
+# on. Preflight measures nothing and answers exactly one question -- "can this
+# selector still be found" -- so being cut off does not degrade its answer, it
+# *destroys* it: a timeout is reported as "could not evaluate", which reads on
+# the page like a decayed selector and is nothing of the sort.
+#
+# The number comes from this project's own measurements (DEVICE_TESTING §6):
+# a dump is 2.6-2.8s on a settled screen and 11.4-12.5s while the screen keeps
+# changing -- and the second case is the normal one on a watch page, not the
+# rare one. At 6s every target that only exists during playback timed out:
+# comments_row, fullscreen_enter, like_button, overflow_menu, pip_caret,
+# player_surface, plus three more left ungraded because their parent had to be
+# tapped blind. Nine findings, one cause, and no selector at fault.
+DUMP_TIMEOUT = 15.0
+
 
 # How each target resolved, worst last -- the ordering is used to decide a
 # scenario's overall outcome.
@@ -166,7 +186,8 @@ def covering_scenarios(names: list[str] | None = None) -> list[str]:
 def _observe(adb: AdbClientProtocol, serial: str) -> list[dict]:
     """What is on screen right now, for a report the reader can act on."""
     try:
-        nodes = uiauto.parse_hierarchy(uiauto.dump_hierarchy(adb, serial))
+        nodes = uiauto.parse_hierarchy(
+            uiauto.dump_hierarchy(adb, serial, timeout=DUMP_TIMEOUT))
     except Exception:
         return []
     return uiauto.describe_clickables(nodes, limit=OBSERVED_LIMIT)
@@ -277,7 +298,8 @@ def _settled_nodes(adb: AdbClientProtocol, serial: str,
     nodes: list = []
     for _ in range(attempts):
         try:
-            nodes = uiauto.parse_hierarchy(uiauto.dump_hierarchy(adb, serial))
+            nodes = uiauto.parse_hierarchy(
+            uiauto.dump_hierarchy(adb, serial, timeout=DUMP_TIMEOUT))
         except Exception as exc:
             return [], str(exc)
         if previous is not None and len(nodes) == previous:
@@ -500,10 +522,43 @@ def _reset(adb: AdbClientProtocol, adapter: Adapter, serial: str, scenario: str,
     sleep(1.0)
 
 
+def _leave_device_quiet(adb: AdbClientProtocol, adapter: Adapter, serial: str,
+                        scenarios: list[str]) -> None:
+    """Force-stop what preflight drove and go back to the home screen.
+
+    A run does this on every exit path (TestRunner._stop_driven_app) and
+    preflight did not, so it handed the device back wherever the last scenario
+    left it -- typically YouTube on a watch page with a video still playing.
+    That is not only untidy: the video keeps playing (Home alone does not stop
+    a media app, which is why this force-stops), the device keeps warming, and
+    the next thing to be measured starts from a screen it did not choose.
+
+    Runs on the cancelled and failed paths too, because that is exactly when
+    a device is most likely to be left in the middle of something.
+    """
+    for package in app_packages(scenarios):
+        try:
+            adapter.stop_app(adb, serial, package)
+        except Exception:
+            pass
+    try:
+        adapter.key_event(adb, serial, HOME)
+    except Exception:
+        pass
+
+
 def run_preflight(adb: AdbClientProtocol, adapter: Adapter, serial: str, *,
                   scenarios: list[str] | None = None, sleep=None,
-                  on_scenario=None, on_check=None, profile=None) -> dict:
+                  on_scenario=None, on_check=None, profile=None,
+                  should_stop=None) -> dict:
     """Check one device, then stop. Returns the summary; writes nothing.
+
+    `should_stop` is asked between scenarios, which is the only place it can
+    honestly be asked: a scenario is a sequence of taps that leaves the phone
+    somewhere, and abandoning it halfway would leave the next thing to run
+    starting from a screen nobody chose. Between them the device is back at a
+    known state, so stopping there is free. The partial summary is returned
+    rather than discarded -- the targets already graded were really graded.
 
     `profile` decides whether the selector questions can be asked at all. It
     is optional so existing callers keep working, but a caller that has one
@@ -515,15 +570,27 @@ def run_preflight(adb: AdbClientProtocol, adapter: Adapter, serial: str, *,
     names = scenarios or covering_scenarios()
     screen = adapter.screen_size(adb, serial)
     reports = []
-    for name in names:
-        if on_scenario is not None:
-            on_scenario(name)
-        _reset(adb, adapter, serial, name, sleep)
-        reports.append(check_scenario(adb, adapter, serial, name, screen=screen,
-                                      sleep=sleep, on_check=on_check, profile=profile))
+    stopped_early = False
+    try:
+        for name in names:
+            if should_stop is not None and should_stop():
+                stopped_early = True
+                break
+            if on_scenario is not None:
+                on_scenario(name)
+            _reset(adb, adapter, serial, name, sleep)
+            reports.append(check_scenario(adb, adapter, serial, name, screen=screen,
+                                          sleep=sleep, on_check=on_check, profile=profile))
+    finally:
+        _leave_device_quiet(adb, adapter, serial, names)
     summary = summarise(reports)
     summary["serial"] = serial
     summary["screen"] = list(screen)
+    # Said plainly, because a report that covered 2 of 11 scenarios and one
+    # that covered all 11 look identical once the numbers are aggregated --
+    # and "no problems found" means something very different in each.
+    summary["stopped_early"] = stopped_early
+    summary["scenarios_planned"] = len(names)
     if profile is not None:
         summary["profile"] = profile.describe()
     return summary

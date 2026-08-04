@@ -1,4 +1,5 @@
 import sqlite3
+import datetime
 import tempfile
 import time
 import unittest
@@ -258,6 +259,34 @@ class StorageTests(unittest.TestCase):
             finally:
                 conn.close()
             self.assertEqual(count, 0)
+
+    def test_delete_run_also_clears_a_baseline_pointing_at_it(self):
+        # Without this the baselines row survives its run, and `compare`
+        # then fails reading a baseline whose run no longer exists.
+        with tempfile.TemporaryDirectory() as directory:
+            storage = Storage(Path(directory) / "db.sqlite")
+            storage.initialize()
+            storage.create_run("run1", "device")
+            storage.update_run("run1", "completed")
+            storage.set_baseline("device", "run1")
+
+            storage.delete_run("run1")
+
+            self.assertIsNone(storage.get_baseline("device"))
+
+    def test_delete_run_leaves_another_devices_baseline_alone(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = Storage(Path(directory) / "db.sqlite")
+            storage.initialize()
+            for run_id, serial in (("run1", "device-a"), ("run2", "device-b")):
+                storage.create_run(run_id, serial)
+                storage.update_run(run_id, "completed")
+                storage.set_baseline(serial, run_id)
+
+            storage.delete_run("run1")
+
+            self.assertIsNone(storage.get_baseline("device-a"))
+            self.assertEqual(storage.get_baseline("device-b")["run_id"], "run2")
 
     def test_delete_run_is_a_noop_for_missing_run(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -531,7 +560,10 @@ class CampaignStorageTests(unittest.TestCase):
             self.assertEqual(campaign["failed_count"], 1)
             self.assertEqual([r["id"] for r in storage.list_campaign_runs("c1")], ["r0", "r1", "r2"])
 
-    def test_cancel_flags_only_unfinished_runs(self):
+    def test_cancel_drops_queued_runs_and_keeps_everything_that_ran(self):
+        # A queued child holds no samples and no device, so cancelling
+        # removes it. Leaving it as a flagged `pending` row was what forced
+        # people to delete the campaign -- losing the completed runs too.
         with tempfile.TemporaryDirectory() as directory:
             storage = Storage(Path(directory) / "db.sqlite")
             storage.initialize()
@@ -541,8 +573,20 @@ class CampaignStorageTests(unittest.TestCase):
             storage.create_run("queued", "devA", campaign_id="c1")
 
             self.assertEqual(storage.cancel_campaign_runs("c1"), 1)
-            self.assertEqual(storage.get_run("queued")["cancel_requested"], 1)
-            self.assertEqual(storage.get_run("done")["cancel_requested"], 0)
+            self.assertIsNone(storage.get_run("queued"))
+            self.assertEqual(storage.get_run("done")["status"], "completed")
+
+    def test_cancel_flags_a_running_run_instead_of_deleting_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = Storage(Path(directory) / "db.sqlite")
+            storage.initialize()
+            storage.create_campaign("c1", "repeat", "devA", 30.0, scenario="cold_start", iterations=2)
+            storage.create_run("live", "devA", campaign_id="c1")
+            storage.update_run("live", RunStatus.RUNNING)
+
+            self.assertEqual(storage.cancel_campaign_runs("c1"), 1)
+            self.assertEqual(storage.get_run("live")["cancel_requested"], 1)
+            self.assertEqual(storage.get_run("live")["status"], "running")
 
     def test_delete_campaign_removes_its_runs_and_returns_their_ids(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -613,3 +657,55 @@ class RunOriginTests(unittest.TestCase):
         storage = Storage(path)
         storage.initialize()
         self.assertEqual(storage.get_run("old")["origin"], "unknown")
+
+
+class AbandonedRunTests(unittest.TestCase):
+    """A `running` row whose worker died must not hold its device forever."""
+
+    def _storage(self, directory):
+        storage = Storage(Path(directory) / "db.sqlite")
+        storage.initialize()
+        return storage
+
+    def test_a_run_with_no_recent_heartbeat_stops_blocking_its_device(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = self._storage(directory)
+            storage.create_run("abandoned", "S1")
+            storage.update_run("abandoned", "running")
+            stale = (datetime.datetime.now(datetime.timezone.utc)
+                     - datetime.timedelta(seconds=storage.ABANDONED_RUN_SECONDS + 60)).isoformat()
+            with closing(storage.connect()) as conn:
+                with conn:
+                    conn.execute("UPDATE test_runs SET heartbeat_at=? WHERE id=?", (stale, "abandoned"))
+            storage.create_run("next", "S1")
+
+            self.assertTrue(storage.try_start_run("next"))
+            self.assertEqual(storage.get_run("abandoned")["status"], "interrupted")
+
+    def test_a_run_that_is_still_beating_keeps_its_device(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = self._storage(directory)
+            storage.create_run("alive", "S1")
+            storage.update_run("alive", "running")     # stamps heartbeat_at now
+            storage.create_run("next", "S1")
+
+            self.assertFalse(storage.try_start_run("next"))
+            self.assertEqual(storage.get_run("alive")["status"], "running")
+
+    def test_reclaiming_one_device_does_not_touch_another(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = self._storage(directory)
+            for run_id, serial in (("stale-a", "S1"), ("alive-b", "S2")):
+                storage.create_run(run_id, serial)
+                storage.update_run(run_id, "running")
+            stale = (datetime.datetime.now(datetime.timezone.utc)
+                     - datetime.timedelta(seconds=storage.ABANDONED_RUN_SECONDS + 60)).isoformat()
+            with closing(storage.connect()) as conn:
+                with conn:
+                    conn.execute("UPDATE test_runs SET heartbeat_at=? WHERE id=?", (stale, "stale-a"))
+            storage.create_run("next-a", "S1")
+
+            storage.try_start_run("next-a")
+
+            self.assertEqual(storage.get_run("stale-a")["status"], "interrupted")
+            self.assertEqual(storage.get_run("alive-b")["status"], "running")

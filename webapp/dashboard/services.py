@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import statistics
 import threading
@@ -22,6 +23,16 @@ from .tasks import run_preflight_task, run_test_task
 # from the core so the CLI and the dashboard cannot drift into judging the
 # same run by two different criteria.
 DEFAULT_REGRESSION_THRESHOLD_PCT = campaigns.DEFAULT_REGRESSION_THRESHOLD_PCT
+
+# What a run costs beyond its sampling `duration`: launching the app, waiting
+# for it to reach the foreground, verifying, force-stopping it, plus a UI dump
+# for the scenarios that locate elements by identity. Used to space a
+# campaign's child tasks (see start_campaign). Being wrong here is not
+# expensive in either direction -- too small and tasks queue behind a busy
+# device exactly as before, too large and the device idles briefly between
+# runs -- so it is deliberately a round number rather than a measurement
+# pretending to be exact.
+PER_RUN_OVERHEAD_SECONDS = 20
 
 
 def get_storage() -> Storage:
@@ -116,6 +127,13 @@ def refresh_devices(storage: Storage, adb) -> list[dict]:
         sdk_version = _getprop_value(props, "ro.build.version.sdk")
         build_id = _getprop_value(props, "ro.build.display.id")
         cpu_abi = _getprop_value(props, "ro.product.cpu.abi")
+        # The one identity that does not change with how the device is
+        # attached. An adb serial does: the same phone is `R5CXC006TZD` over
+        # USB and `192.168.0.106:39235` over WiFi, so it registers twice and
+        # reads as two devices -- which would have "both" run at once, against
+        # one physical phone, each unaware of the other. `ro.serialno` is what
+        # makes those two rows recognisable as one thing.
+        hardware_serial = _getprop_value(props, "ro.serialno")
 
         battery_level = None
         battery_output = _shell_or_none(adb, device.serial, "dumpsys battery")
@@ -139,6 +157,7 @@ def refresh_devices(storage: Storage, adb) -> list[dict]:
             "sdk_version": sdk_version,
             "build_id": build_id,
             "cpu_abi": cpu_abi,
+            "hardware_serial": hardware_serial,
             "chrome_version": chrome_version,
             "wifi_ip": wifi_ip,
             "user_agent": user_agent,
@@ -148,6 +167,73 @@ def refresh_devices(storage: Storage, adb) -> list[dict]:
             connection=connection, device_name=device_name, extra_info=extra_info,
         )
     return storage.list_devices()
+
+
+def dispatch_pending(storage: Storage, serial: str) -> str | None:
+    """Hands one waiting run to Celery for this device, if it is free.
+
+    Exactly one, and only when nothing of that device's is running. The
+    dashboard used to enqueue a campaign's whole plan up front -- 500 tasks
+    per device -- and that had three consequences that took a night to
+    understand. Every worker that picked up a task for a busy device raised
+    DeviceBusyError and retried it, so the workers spent their time refusing
+    work while a second device never got started; a retried task went to the
+    back, so a tier ran out of order; and because the queue and the rows were
+    two copies of one intention, purging the queue left hundreds of rows
+    pending with nothing able to run them.
+
+    One task in flight per device removes all three: there is nothing to
+    refuse, order is row order, and the queue holds so little that losing it
+    costs one run rather than a campaign.
+    """
+    if storage.device_has_inflight_run(serial):
+        return None
+    run = storage.next_pending_run(serial)
+    if run is None:
+        return None
+    # Marked before it is queued, not after: if the mark failed we would
+    # rather skip a dispatch (the stall check picks it up again) than queue
+    # the same run twice.
+    storage.mark_run_queued(run["id"])
+    run_test_task.apply_async(
+        args=[storage.path, serial, run["duration"] or 60.0, run["id"],
+              run["youtube_scenario"], json.loads(run["blind_targets"] or "null")],
+        task_id=run["id"],
+    )
+    return run["id"]
+
+
+def dispatch_stalled(storage: Storage) -> list[str]:
+    """Restarts dispatch wherever it stopped. Cheap enough to poll.
+
+    A chain only continues while something is alive to continue it: kill a
+    worker mid-run and the next run is never handed out, and the campaign sits
+    there looking queued forever. This asks the database the same question
+    from outside -- which devices have work waiting and nothing running -- and
+    is called from the endpoints the UI already polls, so the system repairs
+    itself while somebody is looking at it.
+    """
+    return [run_id for serial in storage.devices_with_pending_runs()
+            if (run_id := dispatch_pending(storage, serial))]
+
+
+def get_running_runs_only(storage: Storage) -> dict:
+    """The one part of the queue view that Celery is not needed for.
+
+    `get_queue_status` costs three inspect() broadcasts, and a busy
+    `--pool=solo` worker cannot answer any of them until it finishes its
+    task: measured at 3.2 seconds per call while runs were in progress. A
+    page that polls it every few seconds to answer "is anything running"
+    therefore spends its whole life waiting for the answer it already had --
+    Storage knows, in about a millisecond, and without the solo pool's blind
+    spot. Mission Control asks this instead.
+    """
+    # Repairs dispatch wherever it stopped -- a killed worker breaks the
+    # chain, and nothing else would ever restart it. Safe to call this often
+    # because a run already handed to the queue is not handed out again until
+    # REDISPATCH_AFTER_SECONDS has passed (Storage.next_pending_run).
+    dispatch_stalled(storage)
+    return {"running_runs": storage.list_running_runs()}
 
 
 def get_queue_status(storage: Storage, timeout: float = 1.0) -> dict:
@@ -201,6 +287,12 @@ def get_queue_status(storage: Storage, timeout: float = 1.0) -> dict:
         "worker_online": bool(names),
         "workers": workers,
         "running_runs": storage.list_running_runs(),
+        # Counted from the database, not from Celery. A busy solo worker
+        # answers no inspect() broadcast, so `reserved` reads as zero while
+        # hundreds of tasks are in fact held -- a queue page that says
+        # "nothing queued" next to a run list full of pending runs is the
+        # page contradicting itself. This number cannot have that blind spot.
+        "queued_runs": storage.count_queued_runs(),
     }
 
 
@@ -225,11 +317,11 @@ def trigger_run(storage: Storage, serial: str, duration: float, youtube_scenario
     mapping -- see cancel_run below.
     """
     run_id = uuid.uuid4().hex
-    storage.create_run(run_id, serial, youtube_scenario, origin=RunOrigin.DASHBOARD)
-    run_test_task.apply_async(
-        args=[storage.path, serial, duration, run_id, youtube_scenario, blind_targets],
-        task_id=run_id,
-    )
+    storage.create_run(run_id, serial, youtube_scenario, origin=RunOrigin.DASHBOARD,
+                       duration=duration, blind_targets=blind_targets)
+    # Through the dispatcher, so a run asked for while the device is busy
+    # waits its turn in the table rather than bouncing off DeviceBusyError.
+    dispatch_pending(storage, serial)
     return run_id
 
 
@@ -282,9 +374,20 @@ def trigger_campaign(storage: Storage, kind: str, serial: str, duration: float, 
 
     Pre-enqueueing instead reuses machinery that already works: runs against
     the same device are serialised by Storage.try_start_run() (with
-    run_test_task retrying on DeviceBusyError), queued work survives a worker
-    restart because Redis still holds it, and a campaign competes fairly with
-    other devices' runs instead of blocking them.
+    run_test_task retrying on DeviceBusyError), and queued work survives a
+    worker restart because Redis still holds it.
+
+    Child runs are enqueued with a growing `countdown` rather than all at
+    once, and that is not throttling -- it is what makes two devices actually
+    run at the same time. One Celery queue is FIFO: a 500-run campaign
+    submitted first puts 500 tasks ahead of the second device's first one, and
+    every worker that picks one up finds that device busy, retries it, and
+    picks up the next task for the same device. Measured on two phones: the
+    second device had not started a single run after 90 seconds, with three
+    workers idle-spinning on rejections. Spacing each run by roughly how long
+    a run takes means a device's Nth task only becomes *due* around when that
+    device is free, so the ready queue holds at most a few tasks per device
+    and the workers spend their time running rather than rejecting.
 
     Consequently no component "owns" campaign progress here, so its status is
     derived from its child runs on read -- see campaigns.derived_status. The
@@ -296,12 +399,19 @@ def trigger_campaign(storage: Storage, kind: str, serial: str, duration: float, 
         scenario=scenario, tier=tier, iterations=iterations,
     )
     created = campaigns.create_campaign(storage, spec)
-    for run_id in created["run_ids"]:
-        run = storage.get_run(run_id)
-        run_test_task.apply_async(
-            args=[storage.path, serial, duration, run_id, run["youtube_scenario"]],
-            task_id=run_id,
-        )
+    # The plan lives in the table; Celery is handed one run at a time.
+    #
+    # Enqueueing all of it up front was tried twice and failed differently
+    # each time. Without spacing, one queue is FIFO: 500 tasks for the first
+    # device sit ahead of the second device's first, every worker that takes
+    # one finds that device busy and retries it to the back, so a tier ran
+    # shuffled and the second device never started at all. With spacing, each
+    # task's start time is fixed when the campaign is created, and reality
+    # drifts away from it: runs slower than their slot pile up and collide,
+    # runs faster leave the devices idle -- measured at 18 queued and nothing
+    # running. Handing out one and chaining the next from the finishing task
+    # has neither problem, because the schedule is whatever actually happens.
+    dispatch_pending(storage, serial)
     storage.update_campaign(created["campaign_id"], RunStatus.RUNNING)
     return created
 
@@ -391,7 +501,13 @@ def get_dashboard_stats(
     an already-limited all-devices list) so a busy device's own history
     isn't crowded out of `recent_limit` by everyone else's runs.
     """
-    runs = storage.list_runs(limit=recent_limit, device_serial=device_serial)
+    # `recent_limit` counts runs that have something to say, not rows. A
+    # campaign pre-creates its whole plan, so 500 queued children per device
+    # sit at the top of the table: taking the newest 50 rows returned 50
+    # pending ones, every bucket empty, and a stats page that showed nothing
+    # at all while the devices were visibly working.
+    runs = storage.list_runs(limit=recent_limit, device_serial=device_serial,
+                             include_queued=False)
     completed = [r for r in runs if r["status"] == "completed"]
 
     baseline_cache: dict[tuple[str, str], dict | None] = {}
@@ -399,10 +515,26 @@ def get_dashboard_stats(
     verdicts = []
     trend_by_metric: dict[str, list[dict]] = {}
 
-    for run in reversed(completed):  # chronological order for trend charts
+    # Chronological by when the run actually *ran*, not by row order. A
+    # campaign pre-creates its children in one go, so their row order says
+    # when they were planned, not when they executed -- plotted against it a
+    # trend line doubles back on itself, which is how the chart looked.
+    completed.sort(key=lambda run: run["started_at"] or "")
+
+    for run in completed:
         run_stats = stats_from_aggregates(storage.aggregate_samples(run["id"]))
-        for name, stat in run_stats.items():
-            trend_by_metric.setdefault(name, []).append({"timestamp": run["started_at"], "value": stat.mean})
+        # Only when the page is scoped to one phone. Two devices' means in one
+        # line is not a trend: an A55 at 80% battery and a tablet at 100% draw
+        # a line that jumps between them every point, and the same for memory,
+        # where the two are simply different machines. The merged view still
+        # answers pass-rate questions honestly; it just cannot answer this one.
+        if device_serial:
+            for name, stat in run_stats.items():
+                trend_by_metric.setdefault(name, []).append({
+                    "timestamp": run["started_at"],
+                    "value": stat.mean,
+                    "scenario": run["youtube_scenario"],
+                })
 
         device = run["device_serial"]
         scenario = run["youtube_scenario"] or ""
@@ -496,6 +628,9 @@ def get_dashboard_stats(
         "threshold_pct": threshold_pct,
         "by_scenario": scenario_stats,
         "trend": trend_by_metric,
+        # Why the trend is empty, when it is -- so the page can say so instead
+        # of rendering an empty box that reads as "no data".
+        "trend_scope": "device" if device_serial else "all_devices",
         # What triggered the runs behind these numbers. A pass rate averaged
         # over a scheduled campaign and a handful someone kicked off while
         # watching the phone is two different claims added together, and until

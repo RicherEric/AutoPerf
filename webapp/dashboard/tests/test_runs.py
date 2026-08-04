@@ -24,6 +24,32 @@ class RunApiTests(ApiTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual([r["id"] for r in response.json()], ["run1"])
 
+    def test_runs_get_filters_by_device(self):
+        self.storage.create_run("run1", "S1")
+        self.storage.create_run("run2", "S2")
+
+        response = self.client.get("/api/runs?device=S2")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([r["id"] for r in response.json()], ["run2"])
+
+    def test_runs_get_without_device_still_lists_every_device(self):
+        self.storage.create_run("run1", "S1")
+        self.storage.create_run("run2", "S2")
+
+        response = self.client.get("/api/runs")
+
+        self.assertEqual({r["id"] for r in response.json()}, {"run1", "run2"})
+
+    def test_runs_get_filters_by_device_and_origin_together(self):
+        self.storage.create_run("run1", "S1", origin="manual")
+        self.storage.create_run("run2", "S1", origin="campaign")
+        self.storage.create_run("run3", "S2", origin="manual")
+
+        response = self.client.get("/api/runs?device=S1&origin=manual")
+
+        self.assertEqual([r["id"] for r in response.json()], ["run1"])
+
     def test_runs_post_without_serial_returns_400(self):
         response = self.client.post("/api/runs", data=json.dumps({}), content_type="application/json")
         self.assertEqual(response.status_code, 400)
@@ -114,13 +140,17 @@ class RunApiTests(ApiTestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIsNotNone(self.storage.get_run("run1"))
 
-    def test_run_detail_delete_rejects_current_baseline(self):
+    def test_run_detail_delete_clears_the_baseline_it_was(self):
+        # This used to be rejected with "set a different baseline first",
+        # which was unsatisfiable: a run auto-becomes its device+scenario's
+        # baseline, so the first run of every pair could never be deleted.
         self.storage.create_run("run1", "S1")
         self.storage.update_run("run1", "completed")
         self.storage.set_baseline("S1", "run1")
         response = self.client.delete("/api/runs/run1")
-        self.assertEqual(response.status_code, 400)
-        self.assertIsNotNone(self.storage.get_run("run1"))
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(self.storage.get_run("run1"))
+        self.assertIsNone(self.storage.get_baseline("S1"))
 
     def test_run_samples_filters_by_since_id_and_decodes_labels(self):
         writer = BatchWriter(self.storage)

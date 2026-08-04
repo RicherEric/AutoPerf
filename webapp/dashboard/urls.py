@@ -3,6 +3,7 @@ from django.urls import path
 from . import views
 
 urlpatterns = [
+    path("demo", views.demo_plan, name="demo_plan"),
     path("devices", views.devices, name="devices"),
     path("devices/refresh", views.devices_refresh, name="devices_refresh"),
     path("devices/<str:serial>/control", views.device_control, name="device_control"),
@@ -24,6 +25,7 @@ urlpatterns = [
     path("selector-targets", views.selector_targets, name="selector_targets"),
     path("preflights", views.preflights, name="preflights"),
     path("preflights/<str:preflight_id>", views.preflight_detail, name="preflight_detail"),
+    path("preflights/<str:preflight_id>/cancel", views.preflight_cancel, name="preflight_cancel"),
     path("campaigns", views.campaigns, name="campaigns"),
     path("campaigns/<str:campaign_id>", views.campaign_detail, name="campaign_detail"),
     path("campaigns/<str:campaign_id>/cancel", views.campaign_cancel, name="campaign_cancel"),

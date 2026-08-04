@@ -21,6 +21,90 @@ class DeviceApiTests(ApiTestCase):
         self.assertEqual(serials, {"S1"})
 
     @patch("dashboard.views.AdbClient")
+    def test_devices_connected_excludes_a_device_that_is_not_attached(self, mock_adb_client):
+        # The stored list keeps a device forever, because its runs still name
+        # it. "Start on every device" needs the other question answered.
+        self.storage.register_device(Device("HERE", "device", "Pixel", "pixel"))
+        self.storage.register_device(Device("GONE", "device", "Galaxy", "galaxy"))
+        mock_adb_client.return_value.devices.return_value = [Device("HERE", "device", "Pixel", "pixel")]
+
+        response = self.client.get("/api/devices?connected=1")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([d["serial"] for d in response.json()], ["HERE"])
+
+    @patch("dashboard.views.AdbClient")
+    def test_devices_connected_ignores_a_device_adb_lists_as_unauthorized(self, mock_adb_client):
+        self.storage.register_device(Device("S1", "device", "Pixel", "pixel"))
+        mock_adb_client.return_value.devices.return_value = [Device("S1", "unauthorized", "", "")]
+
+        response = self.client.get("/api/devices?connected=1")
+
+        self.assertEqual(response.json(), [])
+
+    @patch("dashboard.views.AdbClient")
+    def test_devices_connected_collapses_one_phone_reached_by_usb_and_wifi(self, mock_adb_client):
+        # Same phone, two adb serials. try_start_run excludes by serial, so
+        # left as two rows they would both be driven at once.
+        self.storage.register_device(
+            Device("R5CX", "device", "Galaxy", "galaxy"),
+            connection="usb", extra_info={"hardware_serial": "R5CX"})
+        self.storage.register_device(
+            Device("192.168.0.106:39235", "device", "Galaxy", "galaxy"),
+            connection="wifi", extra_info={"hardware_serial": "R5CX"})
+        mock_adb_client.return_value.devices.return_value = [
+            Device("R5CX", "device", "Galaxy", "galaxy"),
+            Device("192.168.0.106:39235", "device", "Galaxy", "galaxy"),
+        ]
+
+        response = self.client.get("/api/devices?connected=1")
+
+        self.assertEqual([d["serial"] for d in response.json()], ["R5CX"])
+
+    @patch("dashboard.views.AdbClient")
+    def test_devices_connected_keeps_wifi_when_that_is_the_only_way_in(self, mock_adb_client):
+        self.storage.register_device(
+            Device("192.168.0.106:39235", "device", "Galaxy", "galaxy"),
+            connection="wifi", extra_info={"hardware_serial": "R5CX"})
+        mock_adb_client.return_value.devices.return_value = [
+            Device("192.168.0.106:39235", "device", "Galaxy", "galaxy")]
+
+        response = self.client.get("/api/devices?connected=1")
+
+        self.assertEqual([d["serial"] for d in response.json()], ["192.168.0.106:39235"])
+
+    @patch("dashboard.views.AdbClient")
+    def test_devices_connected_keeps_two_devices_that_share_no_hardware_serial(self, mock_adb_client):
+        for serial in ("S1", "S2"):
+            self.storage.register_device(Device(serial, "device", "Pixel", "pixel"), connection="usb")
+        mock_adb_client.return_value.devices.return_value = [
+            Device("S1", "device", "Pixel", "pixel"), Device("S2", "device", "Pixel", "pixel")]
+
+        response = self.client.get("/api/devices?connected=1")
+
+        self.assertEqual({d["serial"] for d in response.json()}, {"S1", "S2"})
+
+    def test_devices_without_the_flag_still_lists_everything_stored(self):
+        self.storage.register_device(Device("HERE", "device", "Pixel", "pixel"))
+        self.storage.register_device(Device("GONE", "device", "Galaxy", "galaxy"))
+
+        response = self.client.get("/api/devices")
+
+        self.assertEqual({d["serial"] for d in response.json()}, {"HERE", "GONE"})
+
+    @patch("dashboard.views.AdbClient")
+    def test_devices_connected_reports_an_adb_failure_rather_than_an_empty_list(self, mock_adb_client):
+        # An empty list would read as "nothing is plugged in", which is the
+        # same answer a broken adb gives and a completely different fact.
+        self.storage.register_device(Device("S1", "device", "Pixel", "pixel"))
+        mock_adb_client.return_value.devices.side_effect = AdbError("adb not found")
+
+        response = self.client.get("/api/devices?connected=1")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("adb not found", response.json()["error"])
+
+    @patch("dashboard.views.AdbClient")
     def test_devices_refresh_registers_and_returns_devices(self, mock_adb_client):
         mock_adb_client.return_value.devices.return_value = [Device("S2", "device", "Galaxy", "galaxy")]
         mock_adb_client.return_value.shell.side_effect = RuntimeError("device offline")

@@ -22,6 +22,7 @@ from .services import (
     get_campaign_detail,
     get_dashboard_stats,
     get_queue_status,
+    get_running_runs_only,
     get_recording_info,
     get_storage,
     list_campaigns,
@@ -34,8 +35,65 @@ from .services import (
 
 
 @require_http_methods(["GET"])
+def demo_plan(request):
+    """The demo's own definition, served so the page and the CLI agree.
+
+    Both `scripts/demo.py` and the Demo page drive the same three minutes.
+    Reading the plan from one place is what stops the browser showing a talk
+    track the terminal is not following -- see autoperf.demo.
+    """
+    return JsonResponse({
+        "prewarm": list(demo.DEMO_PREWARM),
+        "integration": list(demo.DEMO_INTEGRATION),
+        "integration_seconds": demo.DEMO_INTEGRATION_SECONDS,
+    })
+
+
+@require_http_methods(["GET"])
 def devices(request):
-    return JsonResponse(get_storage().list_devices(), safe=False)
+    """Every device this database remembers; `?connected=1` for the ones here now.
+
+    The stored list is deliberately not the attached list -- history belongs to
+    a device whether or not it is plugged in today, and a run detail page has
+    to be able to name the phone it ran on months later. But anything about to
+    *drive* a device needs the other question answered, and it can only be
+    answered by asking adb: `last_seen` is a timestamp, not a heartbeat, and a
+    device that left is indistinguishable from one that is simply idle.
+
+    Without this, "start on every device" would queue a night of work onto
+    phones that went home a week ago.
+    """
+    rows = get_storage().list_devices()
+    if request.GET.get("connected"):
+        try:
+            attached = {d.serial for d in AdbClient().devices() if d.state == "device"}
+        except AdbError as exc:
+            return JsonResponse({"error": str(exc)}, status=400)
+        rows = _one_row_per_physical_device(
+            [row for row in rows if row["serial"] in attached])
+    return JsonResponse(rows, safe=False)
+
+
+def _one_row_per_physical_device(rows: list[dict]) -> list[dict]:
+    """Collapses the same phone reached two ways into one, USB winning.
+
+    A device attached over USB *and* over adb-over-WiFi is two adb serials and
+    therefore two rows, but one phone -- and `Storage.try_start_run` excludes
+    by serial, so the lock that stops two runs sharing a device does not fire
+    between them. "Start on every device" would put two runs on one phone,
+    each measuring a screen the other was also driving.
+
+    USB wins because it is the connection that does not depend on the network
+    being willing, which is what a demo runs on.
+    """
+    best: dict[str, dict] = {}
+    for row in rows:
+        key = row.get("hardware_serial") or row["serial"]
+        current = best.get(key)
+        if current is None or (row.get("connection") == "usb"
+                               and current.get("connection") != "usb"):
+            best[key] = row
+    return list(best.values())
 
 
 @csrf_exempt
@@ -183,12 +241,24 @@ def device_nickname(request, serial):
 def runs(request):
     if request.method == "GET":
         storage = get_storage()
-        # `?origin=manual` narrows the list; the shape stays a plain array
-        # either way. The counts that let a UI build this filter live on
+        # `?origin=manual` and `?device=<serial>` narrow the list; the shape
+        # stays a plain array either way, and omitting both still means every
+        # run. `device` is spelled the same here as on /api/stats,
+        # /api/campaigns and /api/preflights -- one name for one concept, so a
+        # caller filtering two of them does not have to remember which is
+        # which. The counts that let a UI build these filters live on
         # /api/stats, where the other aggregates already are -- changing this
         # endpoint's shape to carry them would break every existing caller for
         # the sake of a number none of them asked for.
-        rows = storage.list_runs(origin=request.GET.get("origin") or None)
+        # A campaign's queued children are hidden unless asked for: 500 rows
+        # per device that have not happened yet would otherwise be the entire
+        # visible history, and the runs that did happen would be off the end
+        # of the limit. `?queued=1` brings them back.
+        rows = storage.list_runs(
+            device_serial=request.GET.get("device") or None,
+            origin=request.GET.get("origin") or None,
+            include_queued=bool(request.GET.get("queued")),
+        )
         # Every row carries its own verdict. Without this the list cannot tell
         # a clean run from one that measured a screen it never reached -- they
         # both read "completed", which is the exact failure mode the
@@ -235,14 +305,20 @@ def run_detail(request, run_id):
         return JsonResponse({"error": "not found"}, status=404)
 
     if request.method == "DELETE":
-        if run["status"] in ("pending", "running"):
-            return JsonResponse({"error": f"run is still {run['status']} -- cannot delete an in-progress run"}, status=400)
-        baseline_row = storage.get_baseline(run["device_serial"], run["youtube_scenario"])
-        if baseline_row is not None and baseline_row["run_id"] == run_id:
-            return JsonResponse(
-                {"error": "this run is the current baseline for its device -- set a different baseline first"},
-                status=400,
-            )
+        # Only a *running* run is refused, because deleting one would leave a
+        # BatchWriter writing samples for a row that no longer exists. A
+        # pending run holds nothing and touches no device -- and refusing it
+        # made a queued campaign undeletable from the UI, which is precisely
+        # when someone wants to clear it. Its Celery task, when it fires,
+        # finds no row and stops (TestRunner's require_existing).
+        if run["status"] == "running":
+            return JsonResponse({"error": "run is still running -- cancel it first"}, status=400)
+        # A baseline run is deletable, and deleting it clears the baseline
+        # (Storage.delete_run cascades). Refusing instead was a deadlock: a
+        # completed run auto-becomes its device+scenario's baseline when that
+        # pair has none, so the first run of every pair was undeletable and
+        # the advice the error gave -- set a different baseline first -- had
+        # no second run to point at.
         storage.delete_run(run_id)
         delete_recording(run_id)
         return JsonResponse({"deleted": run_id})
@@ -432,6 +508,24 @@ def preflights(request):
     }, status=202)
 
 
+@csrf_exempt
+@require_http_methods(["POST"])
+def preflight_cancel(request, preflight_id):
+    """Asks a preflight to stop. It stops at the next scenario boundary.
+
+    Not instant, and deliberately so -- see preflight.run_preflight's
+    `should_stop`. What is instant is that it will not start another scenario,
+    so the device comes back within one scenario's worth of taps instead of
+    after the whole covering set.
+    """
+    storage = get_storage()
+    if storage.get_preflight(preflight_id) is None:
+        return JsonResponse({"error": "not found"}, status=404)
+    if not storage.request_preflight_cancel(preflight_id):
+        return JsonResponse({"error": "this preflight has already finished"}, status=400)
+    return JsonResponse({"preflight_id": preflight_id, "cancel_requested": True})
+
+
 @require_http_methods(["GET"])
 def preflight_detail(request, preflight_id):
     report = get_storage().get_preflight(preflight_id)
@@ -521,6 +615,12 @@ def campaign_cancel(request, campaign_id):
 
 @require_http_methods(["GET"])
 def queue_status(request):
+    # `?running=1` answers only "what is on a device right now", from the
+    # database, without the three Celery broadcasts a busy solo worker cannot
+    # reply to. Mission Control polls that; the Task Queue page, which is
+    # about Celery itself, still asks the full question.
+    if request.GET.get("running"):
+        return JsonResponse(get_running_runs_only(get_storage()))
     return JsonResponse(get_queue_status(get_storage()))
 
 

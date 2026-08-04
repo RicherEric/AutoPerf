@@ -400,7 +400,10 @@ def main() -> None:
         verify(python, frontend_ready)
 
     step("Installation complete")
-    print("Start each service in its own terminal:")
+    print("Start everything, in one terminal:")
+    print(f"  {python} scripts/StartServices.py")
+    print()
+    print("Or start each service in its own terminal:")
     print(f"  {python} webapp/manage.py runserver 8000")
     print(f"  {python} scripts/start-worker.py")
     print("  cd webapp/frontend && npm run dev")

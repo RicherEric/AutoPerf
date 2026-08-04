@@ -631,3 +631,50 @@ class FailedLookupCostTests(VerificationRecordingTests):
             kinds = [e["kind"] for e in self._events(storage, run_id)]
             self.assertIn("verification_failed", kinds)
             self.assertNotIn("ui_introspection", kinds)
+
+
+class DeletedRunTests(unittest.TestCase):
+    """A run whose row was deleted must not be recreated by its own task.
+
+    Deleting a campaign deletes its runs, but its Celery tasks are already
+    queued. Without this, each one recreated the row it could not find --
+    campaign_id and all context lost -- and drove the device anyway.
+    """
+
+    def _storage(self, directory):
+        storage = Storage(Path(directory) / "db.sqlite")
+        storage.initialize()
+        return storage
+
+    def test_require_existing_skips_a_run_whose_row_was_deleted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = self._storage(directory)
+            adb = DeviceAdb(metrics=True)
+            runner = TestRunner(storage, adb, [CpuCollector()])
+
+            returned = runner.run("S1", 0.05, "deleted-run", require_existing=True)
+
+            self.assertEqual(returned, "deleted-run")
+            self.assertIsNone(storage.get_run("deleted-run"))
+
+    def test_require_existing_still_runs_when_the_row_is_there(self):
+        with tempfile.TemporaryDirectory() as directory:
+            storage = self._storage(directory)
+            storage.create_run("kept-run", "S1")
+            adb = DeviceAdb(metrics=True)
+            runner = TestRunner(storage, adb, [CpuCollector()])
+
+            runner.run("S1", 0.05, "kept-run", require_existing=True)
+
+            self.assertEqual(storage.get_run("kept-run")["status"], "completed")
+
+    def test_without_the_flag_a_named_run_is_still_created(self):
+        # The CLI names a run before its row exists; that must keep working.
+        with tempfile.TemporaryDirectory() as directory:
+            storage = self._storage(directory)
+            adb = DeviceAdb(metrics=True)
+            runner = TestRunner(storage, adb, [CpuCollector()])
+
+            runner.run("S1", 0.05, "fresh-run")
+
+            self.assertEqual(storage.get_run("fresh-run")["status"], "completed")

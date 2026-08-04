@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime
 import json
 import queue
 import sqlite3
@@ -34,7 +35,7 @@ CREATE TABLE IF NOT EXISTS campaigns (id TEXT PRIMARY KEY, kind TEXT NOT NULL, d
 CREATE TABLE IF NOT EXISTS preflight_reports (id TEXT PRIMARY KEY, device_serial TEXT NOT NULL,
   scenario TEXT, status TEXT NOT NULL, created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT,
   app_package TEXT, app_version_name TEXT, app_version_code INTEGER,
-  ok INTEGER, summary TEXT, error TEXT);
+  ok INTEGER, summary TEXT, error TEXT, cancel_requested INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS idx_preflight_serial ON preflight_reports(device_serial, created_at);
 """
 # Deliberately NOT part of SCHEMA: this indexes test_runs.campaign_id, a
@@ -85,6 +86,32 @@ class Storage:
                 # standalone runs). Must precede CAMPAIGN_RUN_INDEX below.
                 if "campaign_id" not in columns:
                     conn.execute("ALTER TABLE test_runs ADD COLUMN campaign_id TEXT")
+                # When this run last showed a sign of life. `checkpoint` says
+                # how far it got but not when, so a row that stopped moving is
+                # indistinguishable from one that is moving slowly -- and a
+                # `running` row whose worker died blocks its device for good.
+                if "heartbeat_at" not in columns:
+                    conn.execute("ALTER TABLE test_runs ADD COLUMN heartbeat_at TEXT")
+                # What this run was asked to do, kept on the row so the row is
+                # enough to start it. These used to live only inside the queued
+                # Celery task, which made a pending row and its task two copies
+                # of one intention: lose the task (a purge, a broker restart)
+                # and the row stayed `pending` forever with nothing able to
+                # rebuild it. Storing them here is what lets a dispatcher pick
+                # up work from the database instead of trusting the queue.
+                if "duration" not in columns:
+                    conn.execute("ALTER TABLE test_runs ADD COLUMN duration REAL")
+                if "blind_targets" not in columns:
+                    conn.execute("ALTER TABLE test_runs ADD COLUMN blind_targets TEXT")
+                # When this run was last handed to the queue. Without it,
+                # "has a task already been made for this row" is unanswerable
+                # from the database, and a dispatcher that runs on every UI
+                # poll re-queues the same row every few seconds -- 1305 copies
+                # of two runs, measured. It is a timestamp rather than a flag
+                # so a task that was lost (purge, worker killed) becomes
+                # eligible again on its own.
+                if "queued_at" not in columns:
+                    conn.execute("ALTER TABLE test_runs ADD COLUMN queued_at TEXT")
                 conn.execute(CAMPAIGN_RUN_INDEX)
                 # Which build of the app a run actually measured. Given its
                 # own columns rather than folded into a JSON blob because
@@ -106,6 +133,11 @@ class Storage:
                 if "origin" not in columns:
                     conn.execute(
                         "ALTER TABLE test_runs ADD COLUMN origin TEXT NOT NULL DEFAULT 'unknown'")
+                preflight_columns = {row[1] for row in conn.execute(
+                    "PRAGMA table_info(preflight_reports)")}
+                if preflight_columns and "cancel_requested" not in preflight_columns:
+                    conn.execute("ALTER TABLE preflight_reports "
+                                 "ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0")
                 device_columns = {row[1] for row in conn.execute("PRAGMA table_info(devices)")}
                 for name in ("nickname", "android_version", "battery_level", "connection", "extra_info"):
                     if name not in device_columns:
@@ -191,7 +223,9 @@ class Storage:
                 conn.execute("UPDATE devices SET nickname=? WHERE serial=?", (nickname, serial))
 
     def create_run(self, run_id: str, serial: str, youtube_scenario: str | None = None,
-                   campaign_id: str | None = None, origin: str = RunOrigin.UNKNOWN) -> None:
+                   campaign_id: str | None = None, origin: str = RunOrigin.UNKNOWN,
+                   duration: float | None = None,
+                   blind_targets: list[str] | None = None) -> None:
         """`origin` is who asked, and it is not derivable after the fact.
 
         A run started from the CLI and one queued from the dashboard produced
@@ -204,16 +238,70 @@ class Storage:
             with conn:
                 conn.execute(
                     "INSERT INTO test_runs(id, device_serial, status, youtube_scenario, "
-                    "campaign_id, origin) VALUES (?, ?, ?, ?, ?, ?)",
-                    (run_id, serial, RunStatus.PENDING, youtube_scenario, campaign_id, origin),
+                    "campaign_id, origin, duration, blind_targets) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (run_id, serial, RunStatus.PENDING, youtube_scenario, campaign_id, origin,
+                     duration, json.dumps(blind_targets) if blind_targets else None),
                 )
 
     def update_run(self, run_id: str, status: RunStatus, *, checkpoint: str | None = None, error: str | None = None) -> None:
         now = utc_now()
         with closing(self.connect()) as conn:
             with conn:
-                conn.execute("UPDATE test_runs SET status=?, started_at=CASE WHEN ?='running' THEN COALESCE(started_at, ?) ELSE started_at END, finished_at=CASE WHEN ? IN ('completed','failed','interrupted') THEN ? ELSE finished_at END, checkpoint=COALESCE(?,checkpoint), error=? WHERE id=?",
-                             (status, status, now, status, now, checkpoint, error, run_id))
+                # heartbeat_at is stamped on every update, which is what makes
+                # "still alive" observable from outside the process: the
+                # runner's periodic checkpoint doubles as the heartbeat, so no
+                # separate write and no extra work in the sampling loop.
+                conn.execute("UPDATE test_runs SET status=?, started_at=CASE WHEN ?='running' THEN COALESCE(started_at, ?) ELSE started_at END, finished_at=CASE WHEN ? IN ('completed','failed','interrupted') THEN ? ELSE finished_at END, checkpoint=COALESCE(?,checkpoint), heartbeat_at=?, error=? WHERE id=?",
+                             (status, status, now, status, now, checkpoint, now, error, run_id))
+
+    # How long a `running` row may go without a heartbeat before it is treated
+    # as abandoned. TestRunner writes one every `heartbeat_interval` (1s), so
+    # this is orders of magnitude above the normal gap -- large enough that a
+    # merely slow run is never stolen, small enough that a restart costs one
+    # minute of device time rather than a night of it.
+    ABANDONED_RUN_SECONDS = 120
+
+    # A preflight walks up to 11 scenarios and dumps the screen for each, which
+    # on a slow device is minutes. This ceiling is well past the worst honest
+    # case rather than close to it: releasing one that is merely slow would let
+    # a second thing drive the same phone.
+    ABANDONED_PREFLIGHT_SECONDS = 900
+
+    def _release_abandoned_preflights(self) -> None:
+        """The same reclaim, for the other thing that claims a device.
+
+        A preflight has no heartbeat -- it is one long walk through the
+        scenarios -- so it is judged by how long it has been running against a
+        deliberately generous ceiling. Without this, a preflight whose worker
+        was killed holds its device against every later run *and* every later
+        preflight, permanently and silently: the page just says `running`.
+        """
+        cutoff = (datetime.datetime.now(datetime.timezone.utc)
+                  - datetime.timedelta(seconds=self.ABANDONED_PREFLIGHT_SECONDS)).isoformat()
+        with closing(self.connect()) as conn:
+            with conn:
+                conn.execute(
+                    """UPDATE preflight_reports
+                          SET status=?, finished_at=?,
+                              error='abandoned: ran past its ceiling, its worker is gone'
+                        WHERE status=? AND started_at IS NOT NULL AND started_at < ?""",
+                    (RunStatus.FAILED, utc_now(), RunStatus.RUNNING, cutoff),
+                )
+
+    def _release_abandoned_runs(self) -> None:
+        cutoff = (datetime.datetime.now(datetime.timezone.utc)
+                  - datetime.timedelta(seconds=self.ABANDONED_RUN_SECONDS)).isoformat()
+        with closing(self.connect()) as conn:
+            with conn:
+                conn.execute(
+                    """UPDATE test_runs
+                          SET status=?, finished_at=?,
+                              error='abandoned: no heartbeat, its worker is gone'
+                        WHERE status=?
+                          AND COALESCE(heartbeat_at, started_at) < ?""",
+                    (RunStatus.INTERRUPTED, utc_now(), RunStatus.RUNNING, cutoff),
+                )
 
     def try_start_run(self, run_id: str) -> bool:
         """Atomically claims 'running' for run_id iff no *other* run for the
@@ -229,7 +317,18 @@ class Storage:
         A running preflight holds the same device just as exclusively: it
         launches apps, taps and dumps. Leaving it out of this claim would let
         a measured run start while something else was driving the phone --
-        which pollutes exactly the numbers the run exists to produce."""
+        which pollutes exactly the numbers the run exists to produce.
+
+        Rows that say `running` but have stopped reporting are cleared first.
+        A run writes a heartbeat every second; a worker that is killed (a
+        restart, a crash) never gets to write a final status, so its row stays
+        `running` forever and this claim then refuses every later run on that
+        device -- silently, because the row looks like work in progress. Two
+        phones sat idle for five hours behind two such rows while the dashboard
+        showed them as running. Nothing else can notice this: the process that
+        would have cleaned up is the one that died."""
+        self._release_abandoned_runs()
+        self._release_abandoned_preflights()
         now = utc_now()
         with closing(self.connect()) as conn:
             with conn:
@@ -265,8 +364,26 @@ class Storage:
                     (preflight_id, serial, scenario, RunStatus.PENDING, utc_now()),
                 )
 
+    def request_preflight_cancel(self, preflight_id: str) -> bool:
+        """Asks a running preflight to stop at its next scenario boundary."""
+        with closing(self.connect()) as conn:
+            with conn:
+                cur = conn.execute(
+                    "UPDATE preflight_reports SET cancel_requested=1 "
+                    "WHERE id=? AND status IN ('pending','running')", (preflight_id,))
+                return cur.rowcount == 1
+
+    def preflight_cancel_requested(self, preflight_id: str) -> bool:
+        with closing(self.connect()) as conn:
+            row = conn.execute(
+                "SELECT cancel_requested FROM preflight_reports WHERE id=?",
+                (preflight_id,)).fetchone()
+            return bool(row and row[0])
+
     def try_start_preflight(self, preflight_id: str) -> bool:
         """The same claim as `try_start_run`, from the other side."""
+        self._release_abandoned_runs()
+        self._release_abandoned_preflights()
         now = utc_now()
         with closing(self.connect()) as conn:
             with conn:
@@ -488,10 +605,26 @@ class Storage:
                 conn.execute("UPDATE test_runs SET cancel_requested=1 WHERE id=?", (run_id,))
 
     def delete_run(self, run_id: str) -> None:
+        """Deletes a run and everything keyed to it, baseline included.
+
+        The baseline row goes too, and that is the whole point. The API used
+        to refuse to delete a run that was a baseline, telling the caller to
+        "set a different baseline first" -- which is impossible in the case
+        that actually occurs: a completed run auto-becomes the baseline for
+        its device+scenario when that pair has none (dashboard.tasks), so the
+        *first* run of every pair is a baseline, and until a second run of the
+        same pair exists there is no different baseline to set. Every such run
+        was undeletable, permanently, with no way out from the UI.
+
+        Cascading here rather than leaving the row is what keeps the guard
+        unnecessary: a baselines row pointing at a run that no longer exists
+        would make `compare` fail against a run it cannot read.
+        """
         with closing(self.connect()) as conn:
             with conn:
                 conn.execute("DELETE FROM metric_samples WHERE run_id=?", (run_id,))
                 conn.execute("DELETE FROM test_events WHERE run_id=?", (run_id,))
+                conn.execute("DELETE FROM baselines WHERE run_id=?", (run_id,))
                 conn.execute("DELETE FROM test_runs WHERE id=?", (run_id,))
 
     def get_run(self, run_id: str) -> dict | None:
@@ -512,7 +645,16 @@ class Storage:
             return results
 
     def list_runs(self, limit: int = 100, device_serial: str | None = None,
-                  origin: str | None = None) -> list[dict]:
+                  origin: str | None = None, include_queued: bool = True) -> list[dict]:
+        """Recent runs, newest first.
+
+        `include_queued=False` drops a campaign's not-yet-started children.
+        They are rows only because the dashboard pre-creates the whole plan up
+        front, which is a dispatch decision -- an overnight campaign is 500 of
+        them per device, so the run history becomes a list of things that have
+        not happened, and the handful that did scroll off the end of it. The
+        campaign page is where a plan belongs; this list is for what ran.
+        """
         clauses, params = [], []
         if device_serial:
             clauses.append("device_serial=?")
@@ -520,6 +662,8 @@ class Storage:
         if origin:
             clauses.append("origin=?")
             params.append(origin)
+        if not include_queued:
+            clauses.append("NOT (status='pending' AND campaign_id IS NOT NULL)")
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         params.append(limit)
         with closing(self.connect()) as conn:
@@ -547,7 +691,94 @@ class Storage:
         with closing(self.connect()) as conn:
             return {origin: count for origin, count in conn.execute(sql, params)}
 
+    # How long a dispatched-but-not-started run is left alone before it is
+    # considered lost and handed out again. Long enough that a worker starting
+    # up, or a queue with a couple of items ahead of it, is never mistaken for
+    # a failure; short enough that a purge costs a minute, not a night.
+    REDISPATCH_AFTER_SECONDS = 90
+
+    def device_has_inflight_run(self, device_serial: str) -> bool:
+        """Is something already on its way to this device?
+
+        Running counts, and so does a run handed to the queue that has not
+        started yet -- otherwise a poll a second after dispatch sees "nothing
+        running" and hands out the next one too, and the queue fills with runs
+        competing for a device that can only take one.
+        """
+        cutoff = (datetime.datetime.now(datetime.timezone.utc)
+                  - datetime.timedelta(seconds=self.REDISPATCH_AFTER_SECONDS)).isoformat()
+        with closing(self.connect()) as conn:
+            row = conn.execute(
+                "SELECT 1 FROM test_runs WHERE device_serial=? AND ("
+                "  status='running'"
+                "  OR (status='pending' AND cancel_requested=0 AND queued_at >= ?)"
+                ") LIMIT 1", (device_serial, cutoff)).fetchone()
+            return row is not None
+
+    def mark_run_queued(self, run_id: str) -> None:
+        with closing(self.connect()) as conn:
+            with conn:
+                conn.execute("UPDATE test_runs SET queued_at=? WHERE id=?", (utc_now(), run_id))
+
+    def next_pending_run(self, device_serial: str) -> dict | None:
+        """The oldest run waiting on this device, or None.
+
+        Order is row order, which for a campaign is the order it planned --
+        iteration-major across a tier. Handing out exactly one at a time is
+        what makes that order the order things actually run in: with the whole
+        plan queued at once, any run that found the device busy was pushed to
+        the back of the queue by its own retry, and a tier came out shuffled.
+        """
+        with closing(self.connect()) as conn:
+            conn.row_factory = sqlite3.Row
+            cutoff = (datetime.datetime.now(datetime.timezone.utc)
+                      - datetime.timedelta(seconds=self.REDISPATCH_AFTER_SECONDS)).isoformat()
+            row = conn.execute(
+                "SELECT * FROM test_runs WHERE device_serial=? AND status='pending' "
+                "AND cancel_requested=0 AND (queued_at IS NULL OR queued_at < ?) "
+                "ORDER BY rowid ASC LIMIT 1",
+                (device_serial, cutoff),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def devices_with_pending_runs(self) -> list[str]:
+        """Devices that have work waiting and nothing of their own running.
+
+        The self-healing half: a device in this list is one where dispatch
+        stopped -- a worker was killed mid-chain, a broker was purged -- and
+        nothing would ever start it again on its own.
+        """
+        with closing(self.connect()) as conn:
+            cutoff = (datetime.datetime.now(datetime.timezone.utc)
+                      - datetime.timedelta(seconds=self.REDISPATCH_AFTER_SECONDS)).isoformat()
+            return [row[0] for row in conn.execute(
+                "SELECT DISTINCT device_serial FROM test_runs WHERE status='pending' "
+                "AND cancel_requested=0 AND (queued_at IS NULL OR queued_at < ?) "
+                "AND device_serial NOT IN "
+                "(SELECT device_serial FROM test_runs WHERE status='running')", (cutoff,))]
+
+    def count_queued_runs(self) -> int:
+        """How many runs are waiting to start, straight from the table.
+
+        Celery's own view of its queue is unreliable here (a `--pool=solo`
+        worker cannot answer while it works), so this is the number a queue
+        page can state without qualification.
+        """
+        with closing(self.connect()) as conn:
+            return conn.execute(
+                "SELECT count(*) FROM test_runs WHERE status='pending'").fetchone()[0]
+
     def list_running_runs(self, limit: int = 100) -> list[dict]:
+        """What is on a device right now -- abandoned rows released first.
+
+        Reclaiming only when another run competes for the device was not
+        enough: if nothing else is trying to start, a row whose worker died
+        keeps saying `running` indefinitely, and every page repeating that is
+        repeating something untrue. Asking "what is running" is exactly the
+        moment to check, and it is one UPDATE against an indexed status.
+        """
+        self._release_abandoned_runs()
+        self._release_abandoned_preflights()
         with closing(self.connect()) as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
@@ -602,7 +833,21 @@ class Storage:
                 conn.execute("UPDATE campaigns SET cancel_requested=1 WHERE id=?", (campaign_id,))
 
     def cancel_campaign_runs(self, campaign_id: str) -> int:
-        """Flags every not-yet-finished run of a campaign as cancelled.
+        """Stops a campaign: queued children are removed, running ones flagged.
+
+        Cancelling used to only set the flag, which left every queued child
+        sitting in the list as `pending` -- for an overnight campaign, several
+        hundred rows that would never become anything, because their tasks
+        only convert them when they fire and the ones that mattered were hours
+        away. The only way to clear them from the UI was to delete the
+        campaign, and deleting a campaign takes its *completed* runs with it.
+        So "stop this and tidy up" cost you the measurements you had already
+        collected -- which is the one thing cancelling must never do.
+
+        A queued child holds nothing: no samples, no events, no device. It is
+        deleted outright, and its task stops on arrival when it finds no row
+        (TestRunner's require_existing). Anything that ran is left exactly as
+        it is.
 
         This is the whole cancellation mechanism for a campaign, and it is
         deliberately one UPDATE rather than a loop of Celery revokes. A
@@ -617,12 +862,18 @@ class Storage:
         """
         with closing(self.connect()) as conn:
             with conn:
+                queued = [row[0] for row in conn.execute(
+                    "SELECT id FROM test_runs WHERE campaign_id=? AND status='pending'",
+                    (campaign_id,))]
                 cur = conn.execute(
                     "UPDATE test_runs SET cancel_requested=1 "
-                    "WHERE campaign_id=? AND status IN ('pending','running')",
+                    "WHERE campaign_id=? AND status='running'",
                     (campaign_id,),
                 )
-                return cur.rowcount
+                stopped = cur.rowcount
+        for run_id in queued:
+            self.delete_run(run_id)
+        return stopped + len(queued)
 
     def get_campaign(self, campaign_id: str) -> dict | None:
         with closing(self.connect()) as conn:

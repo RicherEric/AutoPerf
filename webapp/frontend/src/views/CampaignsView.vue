@@ -6,7 +6,7 @@ import {
   deleteCampaign,
   getCampaign,
   listCampaigns,
-  listDevices,
+  listConnectedDevices,
   listYoutubeScenarios,
   triggerCampaign,
 } from '../api.js'
@@ -45,6 +45,27 @@ const form = ref({
 })
 
 let pollHandle = null
+
+// The one-button plan. A long run is the case where you have already decided
+// what you want -- data, unattended, from whatever is plugged in -- so asking
+// which device and which scenario is asking a question whose answer is always
+// "all of them, the usual ones". Repeat over the smoke tier rather than a soak
+// because a soak is one long run: cancel it and you keep nothing, whereas
+// every completed iteration here is already a comparable sample.
+//
+// Sized for a night, and deliberately sized to *overrun* one. Finishing early
+// wastes the rest of the night; finishing late costs nothing, because a
+// campaign is cancellable and every iteration that completed is already
+// saved. So the failure modes are not symmetric, and the number leans long.
+const QUICK = { tier: 'smoke', iterations: 100, duration: 60 }
+
+// `duration` is sampling time only. Around it each run also launches the app,
+// waits for it to reach the foreground, verifies, then force-stops it -- and
+// the scenarios that locate elements by identity pay for a UI dump on top.
+// An allowance rather than a measurement, but leaving it out is what makes an
+// estimate quietly optimistic, which for an overnight plan is the direction
+// that matters.
+const PER_RUN_OVERHEAD_SECONDS = 20
 
 const tiers = computed(() => [...new Set(scenarios.value.map((s) => s.tier))])
 
@@ -125,6 +146,58 @@ watch(selectedId, async (id) => {
   if (id) await refresh()
 })
 
+const quickRunsPerDevice = computed(() =>
+  (scenariosByTier.value[QUICK.tier]?.length ?? 0) * QUICK.iterations)
+
+const quickPlan = computed(() => ({
+  devices: devices.value.length,
+  runs: quickRunsPerDevice.value * devices.value.length,
+  time: formatDuration(
+    quickRunsPerDevice.value * (QUICK.duration + PER_RUN_OVERHEAD_SECONDS)),
+}))
+
+async function startQuick() {
+  busy.value = true
+  notice.value = ''
+  error.value = ''
+  try {
+    // One campaign per device, because that is the shape the API and the
+    // same-device run lock already have. They run interleaved, not queued
+    // behind each other: Storage.try_start_run only excludes two jobs on the
+    // *same* serial.
+    const started = []
+    const failed = []
+    for (const device of devices.value) {
+      try {
+        const result = await triggerCampaign({
+          kind: 'repeat',
+          serial: device.serial,
+          tier: QUICK.tier,
+          iterations: QUICK.iterations,
+          duration: QUICK.duration,
+        })
+        started.push(result)
+      } catch (err) {
+        failed.push(`${deviceLabel(device.serial)}: ${err.message}`)
+      }
+    }
+    if (started.length) {
+      notice.value = t('campaigns.quickStarted', {
+        devices: started.length,
+        count: started.reduce((total, r) => total + r.count, 0),
+      })
+      selectedId.value = started[0].campaign_id
+    }
+    // Partial success is reported as partial: a device that did not start is
+    // a device that will have no data, and finding that out hours later is
+    // the whole failure mode this page exists to avoid.
+    if (failed.length) error.value = failed.join(' / ')
+    await refresh()
+  } finally {
+    busy.value = false
+  }
+}
+
 async function submit() {
   busy.value = true
   notice.value = ''
@@ -185,7 +258,7 @@ async function remove(campaignId) {
 
 onMounted(async () => {
   try {
-    ;[devices.value, scenarios.value] = await Promise.all([listDevices(), listYoutubeScenarios()])
+    ;[devices.value, scenarios.value] = await Promise.all([listConnectedDevices(), listYoutubeScenarios()])
     if (devices.value.length) form.value.serial = devices.value[0].serial
   } catch (err) {
     error.value = err.message
@@ -204,7 +277,23 @@ onUnmounted(() => clearInterval(pollHandle))
     <p v-if="notice" class="notice">{{ notice }}</p>
   </Card>
 
+  <Card :title="t('campaigns.quickTitle')">
+    <button class="quick-start" :disabled="busy || !devices.length" @click="startQuick">
+      {{ busy ? t('campaigns.starting') : t('campaigns.quickButton') }}
+    </button>
+    <p v-if="devices.length" class="plan">
+      {{ t('campaigns.quickPlan', {
+        devices: quickPlan.devices, tier: QUICK.tier,
+        iterations: QUICK.iterations, count: quickPlan.runs, time: quickPlan.time,
+      }) }}
+    </p>
+    <p v-else class="hint">{{ t('campaigns.quickNoDevices') }}</p>
+    <p class="hint">{{ t('campaigns.quickHint') }}</p>
+  </Card>
+
   <Card :title="t('campaigns.createTitle')">
+    <details>
+      <summary class="advanced-summary">{{ t('campaigns.advancedSummary') }}</summary>
     <div class="form-grid">
       <label>
         {{ t('campaigns.kindLabel') }}
@@ -279,6 +368,7 @@ onUnmounted(() => clearInterval(pollHandle))
     <button :disabled="busy || !form.serial" @click="submit">
       {{ busy ? t('campaigns.starting') : t('campaigns.startButton') }}
     </button>
+    </details>
   </Card>
 
   <Card :title="t('campaigns.listTitle')">
@@ -415,6 +505,17 @@ onUnmounted(() => clearInterval(pollHandle))
   font-size: 0.85em;
   font-weight: 600;
   margin: var(--space-2) 0 var(--space-3);
+}
+.quick-start {
+  font-size: 1.05em;
+  font-weight: 600;
+  padding: var(--space-3) var(--space-4);
+}
+.advanced-summary {
+  cursor: pointer;
+  color: var(--color-text-muted);
+  font-size: 0.85em;
+  margin-bottom: var(--space-3);
 }
 .hint {
   color: var(--color-text-muted);

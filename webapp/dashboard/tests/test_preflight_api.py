@@ -222,3 +222,24 @@ class PreflightTaskTests(ApiTestCase):
         self.assertEqual(report["status"], "failed")
         self.assertIn("device went away", report["error"])
         self.assertIsNone(report["ok"])
+
+    def test_cancel_asks_a_running_preflight_to_stop(self):
+        self.storage.create_preflight("pf1", "S1", "cold_start")
+        self.storage.try_start_preflight("pf1")
+
+        response = self.client.post("/api/preflights/pf1/cancel")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(self.storage.preflight_cancel_requested("pf1"))
+
+    def test_cancel_is_404_for_an_unknown_preflight(self):
+        self.assertEqual(self.client.post("/api/preflights/nope/cancel").status_code, 404)
+
+    def test_cancel_is_rejected_once_it_has_finished(self):
+        # Nothing to stop, and saying "cancelled" would imply it was.
+        self.storage.create_preflight("pf1", "S1", "cold_start")
+        self.storage.finish_preflight("pf1", "completed", summary={"ok": True})
+
+        response = self.client.post("/api/preflights/pf1/cancel")
+
+        self.assertEqual(response.status_code, 400)

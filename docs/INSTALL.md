@@ -103,6 +103,11 @@ wsl --install -d Ubuntu  # first time only; restart if Windows requests it
 wsl -d Ubuntu -u root -- sh -lc "apt-get update && apt-get install -y redis-server && (systemctl enable --now redis-server || service redis-server start)"
 # Or let the installer perform these steps:
 .\scripts\setup.ps1 -InstallDeps -RedisBackend wsl
+
+# Everything at once (broker, API, worker, live screen, frontend), one terminal:
+.\venv\Scripts\python.exe scripts\StartServices.py
+
+# -- or the same thing by hand, one terminal each --
 .\venv\Scripts\python.exe webapp\manage.py runserver 8000
 # (new terminal)
 .\venv\Scripts\python.exe scripts\start-worker.py
@@ -111,6 +116,16 @@ cd webapp\frontend
 npm install
 npm run dev
 ```
+
+`StartServices.py` health-checks each service before starting the next, and
+handles one Windows-specific trap by itself: Ubuntu's `redis-server` binds
+`127.0.0.1` **inside the WSL distro**, and WSL 2's `localhostForwarding` does
+not reliably bridge a loopback-only listener -- so `redis-cli ping` answers
+PONG inside WSL while Windows gets `WinError 10061` on the same port, and
+Celery retries forever against a broker that is demonstrably running. The
+script tests reachability from Windows rather than from inside WSL, and when
+that fails it starts a second Redis bound to `0.0.0.0` on port 6380 and points
+both Django and the worker at it via `AUTOPERF_CELERY_BROKER_URL`.
 
 ## Manual steps (macOS, bash/zsh)
 
@@ -127,6 +142,10 @@ brew services start redis
 # -- or --
 docker run -d --name autoperf-redis -p 6379:6379 redis:7-alpine
 
+# Everything at once (broker, API, worker, live screen, frontend), one terminal:
+./venv/bin/python scripts/StartServices.py
+
+# -- or the same thing by hand, one terminal each --
 ./venv/bin/python webapp/manage.py runserver 8000
 # (new terminal)
 ./venv/bin/python scripts/start-worker.py
@@ -186,6 +205,10 @@ adb devices
 sudo apt install -y redis-server nodejs npm
 sudo service redis-server start   # WSL usually has no systemd; `service` works either way
 
+# Everything at once (broker, API, worker, live screen, frontend), one terminal:
+./venv/bin/python scripts/StartServices.py
+
+# -- or the same thing by hand, one terminal each --
 ./venv/bin/python webapp/manage.py runserver 8000
 # (new terminal)
 ./venv/bin/python scripts/start-worker.py

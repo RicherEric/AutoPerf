@@ -2,7 +2,7 @@ import unittest
 from unittest.mock import patch
 
 from autoperf import preflight
-from autoperf.adapters import AndroidAdapter
+from autoperf.adapters import HOME, AndroidAdapter, Waits
 from autoperf.scenarios import youtube
 from tests.support import EMPTY_SCREEN, PAUSED, PLAYING, SCREEN, DeviceAdb, NoWaits
 
@@ -379,3 +379,56 @@ class RunPreflightTests(NoWaits, unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PreflightLeavesDeviceQuietTests(unittest.TestCase):
+    """Whatever preflight drove must not be left running on the phone."""
+
+    def _adapter_and_adb(self):
+        from tests.support import DeviceAdb
+        adb = DeviceAdb(allow_unknown=True)
+        adapter = AndroidAdapter(waits=Waits.instant())
+        return adb, adapter
+
+    def test_the_app_is_force_stopped_and_home_is_pressed_when_it_finishes(self):
+        adb, adapter = self._adapter_and_adb()
+        recorded = []
+        adapter.stop_app = lambda a, s, package: recorded.append(("stop", package))
+        adapter.key_event = lambda a, s, keycode: recorded.append(("key", keycode))
+        adapter.screen_size = lambda a, s: (1080, 1920)
+
+        report = preflight.ScenarioReport(scenario="cold_start", targets=[], verifications=[])
+        with patch.object(preflight, "check_scenario", return_value=report):
+            preflight.run_preflight(adb, adapter, "S1", scenarios=["cold_start"],
+                                    sleep=lambda _s: None)
+
+        self.assertIn(("key", HOME), recorded)
+        self.assertTrue(any(kind == "stop" for kind, _ in recorded))
+
+    def test_it_also_happens_when_a_scenario_raises(self):
+        # The path where a device is most likely to be left mid-video.
+        adb, adapter = self._adapter_and_adb()
+        recorded = []
+        adapter.stop_app = lambda a, s, package: recorded.append(("stop", package))
+        adapter.key_event = lambda a, s, keycode: recorded.append(("key", keycode))
+        adapter.screen_size = lambda a, s: (1080, 1920)
+
+        with patch.object(preflight, "check_scenario", side_effect=RuntimeError("boom")):
+            with self.assertRaises(RuntimeError):
+                preflight.run_preflight(adb, adapter, "S1", scenarios=["cold_start"],
+                                        sleep=lambda _s: None)
+
+        self.assertIn(("key", HOME), recorded)
+
+    def test_it_also_happens_when_it_is_cancelled(self):
+        adb, adapter = self._adapter_and_adb()
+        recorded = []
+        adapter.stop_app = lambda a, s, package: recorded.append(("stop", package))
+        adapter.key_event = lambda a, s, keycode: recorded.append(("key", keycode))
+        adapter.screen_size = lambda a, s: (1080, 1920)
+
+        summary = preflight.run_preflight(adb, adapter, "S1", scenarios=["cold_start"],
+                                          sleep=lambda _s: None, should_stop=lambda: True)
+
+        self.assertTrue(summary["stopped_early"])
+        self.assertIn(("key", HOME), recorded)

@@ -47,7 +47,7 @@ The optional `--app <package>` flag drives the device via an `Adapter` (see `ada
 ### Tests
 
 ```powershell
-python scripts/run-tests.py            # everything: 320 core + 111 webapp
+python scripts/run-tests.py            # everything: 417 core + 149 webapp
 python scripts/run-tests.py --list     # the groups, and when each one fails
 python scripts/run-tests.py elements   # just one group
 ```
@@ -192,7 +192,27 @@ process directly -- the run row is created immediately (`pending`), and Celery
 picks it up on its own worker.
 
 ```powershell
-.\venv\Scripts\python.exe -m pip install -e .[dashboard,worker]
+.\venv\Scripts\python.exe -m pip install -e .[dashboard,worker,livescreen]
+.\venv\Scripts\python.exe scripts\StartServices.py
+```
+
+`scripts/StartServices.py` is the whole stack in one terminal -- broker, API,
+worker, live screen, frontend, started in that order, each health-checked
+before the next one starts so a failure is reported against the service that
+actually failed rather than as a blank page three steps later. Ctrl+C stops all
+of them. It also owns the one environment variable they must agree on: it
+resolves the broker (`AUTOPERF_CELERY_BROKER_URL`) once and hands the same
+value to Django and to the worker, which is the failure this script was written
+after -- on Windows, Ubuntu's WSL redis-server binds `127.0.0.1` *inside* the
+distro, so `redis-cli ping` answers PONG there while Windows gets connection
+refused on the same port. It checks reachability from the OS that will actually
+connect, and falls back to a second Redis bound to `0.0.0.0` on port 6380.
+
+Skip parts with `--no-frontend` / `--no-worker` / `--no-livescreen` /
+`--no-redis`. The manual sequence below is what it runs, and is still the way
+to restart one service on its own.
+
+```powershell
 docker run -d --name autoperf-redis -p 6379:6379 redis:7-alpine
 .\venv\Scripts\python.exe webapp\manage.py runserver 8000
 ```
@@ -263,6 +283,23 @@ header comment):
   zero) for the whole duration of a run. The page also shows a "Currently
   running" table sourced directly from Storage (`list_running_runs()`), which
   has no such blind spot, for exactly this reason.
+
+The Run List's history table filters to the device picked above it
+(`GET /api/runs?device=<serial>`, the same parameter name `/api/stats`,
+`/api/campaigns` and `/api/preflights` already use), with "all devices" kept
+as the escape hatch — comparing two devices is the other real question. Rows
+that the filter hides are deselected, since deleting what you can no longer
+see is the one thing a filter must never do.
+
+A sixth page, **教室加入 / Join** (`/join`), is built and tested but **hidden**
+behind `frontend/src/features.js`'s `CLASSROOM_JOIN_ENABLED`. It discovers
+phones over mDNS so they can join by WiFi with no USB cable, and the school
+network it was written for turned out to put clients in an isolated
+environment — client isolation drops the multicast the scan depends on, so
+the page finds nothing and cannot. Hidden rather than deleted: it still
+compiles, still has its tests, and one word turns it back on for a network
+that allows it. Its route is registered only when the flag is on, so the page
+is not reachable by typing the URL either.
 
 ## Verification: why a green run used to mean nothing
 
@@ -535,6 +572,20 @@ runs. Two kinds, drivable from either the CLI or the dashboard's
 Child runs are plain `test_runs` rows tagged with a `campaign_id`, so
 baselines, the comparison endpoint, live screen, recordings and deletion all
 keep working on them unchanged.
+
+The page leads with **one button** (放著跑 / Leave it running) and puts the
+form behind an "advanced" fold. Pressing it starts a `repeat` campaign of the
+`smoke` tier, 30 iterations, 60s per run, **on every connected device at
+once** — one campaign per serial, which is the shape the same-device run lock
+already has (`Storage.try_start_run` only excludes two jobs on the *same*
+serial, so devices interleave rather than queue). Nothing to choose, because
+by the time someone wants a long run they have already decided: data,
+unattended, from whatever is plugged in. `repeat` rather than `soak` for the
+default precisely because a soak is one long run — cancel it and nothing is
+kept, whereas every finished iteration here is already a comparable sample.
+A device that fails to start is named in the error rather than silently
+omitted; finding out hours later that one phone collected nothing is the
+failure this page exists to avoid.
 
 ```powershell
 autoperf campaign start --serial <SERIAL> --kind soak --scenario play_golden --duration 14400

@@ -123,8 +123,12 @@ def create_campaign(storage: Storage, spec: CampaignSpec) -> dict:
     run_ids = []
     for scenario in spec.planned_scenarios():
         run_id = uuid.uuid4().hex
+        # The child carries its own duration so the row alone is enough to
+        # start it -- see Storage.next_pending_run and the dashboard's
+        # dispatcher, which run a campaign from the table rather than from a
+        # queue full of pre-made tasks.
         storage.create_run(run_id, spec.serial, scenario, campaign_id=campaign_id,
-                           origin=RunOrigin.CAMPAIGN)
+                           origin=RunOrigin.CAMPAIGN, duration=spec.duration)
         run_ids.append(run_id)
     return {"campaign_id": campaign_id, "run_ids": run_ids, "count": len(run_ids)}
 

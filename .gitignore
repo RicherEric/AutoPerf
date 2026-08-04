@@ -14,3 +14,13 @@ webapp/recordings/
 # Build cache for scripts/build-docs-html.py -- the generated HTML inlines it,
 # so the page is self-contained and this copy never needs to be committed.
 docs/vendor/
+
+# Presentation material, deliberately not part of what gets uploaded: only the
+# software documentation is. These stay in the working tree and stay in sync
+# with the code -- they are just not tracked. (They exist in history before
+# this point; untracking stops future commits, it does not remove the past.)
+docs/*.pptx
+docs/PPT規劃.txt
+docs/DEMO_SCRIPT_zh-TW.md
+docs/PRESENTATION_NOTES_zh-TW.md
+scripts/build-final-ppt.py

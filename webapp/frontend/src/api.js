@@ -55,15 +55,30 @@ export function setDeviceNickname(serial, nickname) {
   })
 }
 
-export function listRuns() {
-  return request('/runs')
+// connectedOnly narrows to devices adb can see right now -- what anything
+// about to drive a device needs, as opposed to everything ever registered.
+// The demo's plan, from the same definition scripts/demo.py runs.
+export function getDemoPlan() {
+  return request('/demo')
 }
 
-export function triggerRun(serial, duration, youtubeScenario = '') {
+export function listConnectedDevices() {
+  return request('/devices?connected=1')
+}
+
+export function listRuns(deviceSerial = '') {
+  const deviceParam = deviceSerial ? `?device=${encodeURIComponent(deviceSerial)}` : ''
+  return request(`/runs${deviceParam}`)
+}
+
+export function triggerRun(serial, duration, youtubeScenario = '', blindTargets = []) {
   return request('/runs', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ serial, duration, youtube_scenario: youtubeScenario || null }),
+    body: JSON.stringify({
+      serial, duration, youtube_scenario: youtubeScenario || null,
+      blind_targets: blindTargets.length ? blindTargets : undefined,
+    }),
   })
 }
 
@@ -95,6 +110,10 @@ export function listPreflights(deviceSerial = '', limit = 5) {
   return request(`/preflights?limit=${limit}${device}`)
 }
 
+export function cancelPreflight(preflightId) {
+  return request(`/preflights/${encodeURIComponent(preflightId)}/cancel`, { method: 'POST' })
+}
+
 export function getPreflight(preflightId) {
   return request(`/preflights/${encodeURIComponent(preflightId)}`)
 }
@@ -103,6 +122,11 @@ export function getPreflight(preflightId) {
 // nothing to grade there -- the deep-link presets are all like that.
 export function getScenarioTargets(youtubeScenario) {
   return request(`/selector-targets?scenario=${encodeURIComponent(youtubeScenario)}`)
+}
+
+// Only the running-runs half, and without the Celery broadcast behind it.
+export function getRunningRuns() {
+  return request('/queue?running=1')
 }
 
 export function getQueueStatus() {

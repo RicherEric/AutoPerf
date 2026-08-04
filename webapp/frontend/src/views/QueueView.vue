@@ -70,6 +70,15 @@ onUnmounted(() => {
     <p>{{ t('queue.runFromHint') }}</p>
   </Card>
 
+  <!-- Counted from the database. Celery's own `reserved` reads as zero
+       while a solo worker is busy, so the page could say "nothing queued"
+       with hundreds of runs waiting -- and a run list full of pending rows
+       right next to it. -->
+  <Card v-if="status" :title="t('queue.queuedTitle')">
+    <p class="queued-count">{{ t('queue.queuedCount', { count: status.queued_runs ?? 0 }) }}</p>
+    <p class="hint">{{ t('queue.queuedHint') }}</p>
+  </Card>
+
   <Card v-if="status?.running_runs?.length" :title="t('queue.currentlyRunningTitle')">
     <p class="hint">{{ t('queue.sourcedHint') }}</p>
     <table>
@@ -143,6 +152,11 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+.queued-count {
+  font-size: 1.6em;
+  font-weight: 600;
+  margin: 0 0 var(--space-2);
+}
 .stat-row {
   display: flex;
   gap: var(--space-4);

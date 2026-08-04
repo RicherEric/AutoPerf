@@ -3,6 +3,7 @@
 Split out of one 1120-line module; the shared setUp lives in support.ApiTestCase.
 """
 
+from contextlib import closing
 import json
 
 from autoperf.models import MetricSample
@@ -126,12 +127,41 @@ class AnalysisApiTests(ApiTestCase):
         comparison_response = self.client.get("/api/runs/run1/comparison")
         self.assertEqual(comparison_response.status_code, 404)
 
-    def test_stats_includes_metric_trend(self):
+    def test_stats_includes_metric_trend_for_one_device(self):
         self._complete_run_with_samples("run1", "S1", [10.0])
-        response = self.client.get("/api/stats")
+        response = self.client.get("/api/stats?device=S1")
         payload = response.json()
         self.assertIn("cpu.total", payload["trend"])
         self.assertEqual(payload["trend"]["cpu.total"][0]["value"], 10.0)
+        self.assertEqual(payload["trend_scope"], "device")
+
+    def test_stats_omits_the_trend_when_devices_are_combined(self):
+        # One line through two machines' means is not a trend, it is two
+        # unrelated series drawn as one -- the page says so instead.
+        self._complete_run_with_samples("run1", "S1", [10.0])
+        self._complete_run_with_samples("run2", "S2", [90.0])
+
+        payload = self.client.get("/api/stats").json()
+
+        self.assertEqual(payload["trend"], {})
+        self.assertEqual(payload["trend_scope"], "all_devices")
+
+    def test_the_trend_is_ordered_by_when_runs_actually_ran(self):
+        # Campaign children are all created up front, so row order says when
+        # they were planned. Plotted against that, the line doubles back.
+        self._complete_run_with_samples("later", "S1", [20.0])
+        self._complete_run_with_samples("earlier", "S1", [10.0])
+        self.storage.update_run("later", "completed")
+        with closing(self.storage.connect()) as conn:
+            with conn:
+                conn.execute("UPDATE test_runs SET started_at=? WHERE id=?",
+                             ("2026-01-01T00:00:00+00:00", "earlier"))
+                conn.execute("UPDATE test_runs SET started_at=? WHERE id=?",
+                             ("2026-01-02T00:00:00+00:00", "later"))
+
+        points = self.client.get("/api/stats?device=S1").json()["trend"]["cpu.total"]
+
+        self.assertEqual([p["value"] for p in points], [10.0, 20.0])
 
     def test_stats_respects_limit_query_param(self):
         self._complete_run_with_samples("run1", "S1", [10.0])

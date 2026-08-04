@@ -105,8 +105,20 @@ async def _start_recording(run_id: str) -> asyncio.subprocess.Process | None:
     return await asyncio.create_subprocess_exec(
         "ffmpeg", "-y", "-loglevel", "error",
         "-f", "h264", "-use_wallclock_as_timestamps", "1", "-i", "pipe:0",
-        "-c", "copy", str(partial_path),
-        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+        # `-f mp4` on the *output* is not redundant: ffmpeg chooses the muxer
+        # from the filename's extension, and this file is deliberately named
+        # `<run>.mp4.part` so no reader can open it before it is finalised --
+        # which makes the extension `.part`. ffmpeg refuses ("Unable to
+        # choose an output format"), exits -22, and the recording is dropped.
+        # Recording had therefore never once succeeded, on any device; the
+        # symptom was the UI's "no recording for this run", which reads as a
+        # thing that did not happen rather than a thing that failed.
+        "-c", "copy", "-f", "mp4", str(partial_path),
+        # stderr is captured, not discarded: when ffmpeg fails, the exit
+        # code alone ("-22") says nothing, and the recording is then dropped
+        # with no way to find out why. Its own message is the only evidence.
+        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
     )
 
 
@@ -124,9 +136,41 @@ async def _stop_recording(recorder: asyncio.subprocess.Process | None, run_id: s
     if recorder.returncode == 0 and partial_path.exists():
         partial_path.replace(final_path)  # atomic on the same filesystem
     else:
-        logger.warning("ffmpeg exited %s for run %s -- discarding partial recording",
-                        recorder.returncode, run_id)
+        detail = ""
+        if recorder.stderr is not None:
+            try:
+                detail = (await asyncio.wait_for(recorder.stderr.read(), timeout=2)
+                          ).decode("utf-8", "replace").strip()
+            except (asyncio.TimeoutError, Exception):
+                detail = ""
+        logger.warning("ffmpeg exited %s for run %s -- discarding partial recording%s",
+                        recorder.returncode, run_id, f": {detail}" if detail else "")
         partial_path.unlink(missing_ok=True)
+
+
+# How long the stream must be silent before the NAL still in the splitter is
+# treated as complete and sent anyway. `screenrecord` emits a frame only when
+# the screen changes, so on a device sitting still there is no "next frame" to
+# terminate the first one -- and without this the preview stays black until
+# something moves on a device you were opening the preview in order to move.
+# A second is orders of magnitude longer than the gap inside one frame's write
+# to a pipe, so a NAL this old is complete rather than half-written.
+IDLE_FLUSH_SECONDS = 1.0
+
+
+async def _emit(websocket, assembler: AccessUnitAssembler, nals) -> None:
+    """Assembles NALs into access units and sends whichever ones complete.
+
+    The leading byte tells the browser which kind it is, because WebCodecs
+    needs `type: 'key'` on the chunk carrying SPS+PPS+IDR and would otherwise
+    have to parse the bitstream itself to find out.
+    """
+    for nal_type, payload in nals:
+        result = assembler.feed(nal_type, payload)
+        if result is None:
+            continue
+        is_key, framed = result
+        await websocket.send((b"\x01" if is_key else b"\x00") + framed)
 
 
 async def _h264_stream(websocket, adb: AdbClient, serial: str, run_id: str | None = None) -> None:
@@ -136,21 +180,51 @@ async def _h264_stream(websocket, adb: AdbClient, serial: str, run_id: str | Non
     assembler = AccessUnitAssembler()
     process = await _spawn(argv)
     recorder = await _start_recording(run_id) if run_id else None
+    checked_preamble = False
     try:
         while True:
-            chunk = await process.stdout.read(65536)
+            try:
+                chunk = await asyncio.wait_for(
+                    process.stdout.read(65536), timeout=IDLE_FLUSH_SECONDS
+                )
+            except asyncio.TimeoutError:
+                # Quiet stream: whatever the splitter is holding is a whole
+                # frame, not a partial one. Send it rather than wait for a
+                # screen change that may never come.
+                await _emit(websocket, assembler, splitter.flush())
+                continue
             if not chunk:
                 break
+            if not checked_preamble:
+                # screenrecord reports its own failures on *stdout*, ahead of
+                # the bitstream, and then carries on at a lower resolution:
+                # "ERROR: unable to configure video/avc codec at 2048x1280
+                # (err=-22) / WARNING: failed at 2048x1280, retrying at
+                # 1280x720". The splitter skips it as not-a-start-code, which
+                # is right but silent -- and it is the only explanation of why
+                # a device's preview is not its real resolution.
+                checked_preamble = True
+                end = chunk.find(b"\x00\x00\x01")
+                if end > 0 and chunk[end - 1] == 0:
+                    end -= 1  # the leading zero of a 4-byte start code
+                preamble = chunk if end == -1 else chunk[:end]
+                if preamble.strip():
+                    logger.warning("%s: screenrecord said: %s", serial,
+                                   preamble.decode("utf-8", "replace").strip())
+                # And it must not reach ffmpeg. The splitter skips it, but the
+                # recorder is teed the raw bytes -- and over a pipe ffmpeg
+                # gets that text as its entire first read (66 bytes on the
+                # Redmi Pad, the bitstream not arriving until the next chunk),
+                # fails to parse it as H.264 and exits -22 before any video
+                # exists. Every recording on that device was discarded for
+                # this, which read as "no recording was made" rather than as
+                # a failure. Feeding a *file* with the same preamble works,
+                # which is why it only ever showed up on the live path.
+                chunk = chunk[end:] if end > 0 else chunk
             if recorder is not None:
                 recorder.stdin.write(chunk)
                 await recorder.stdin.drain()
-            for nal_type, payload in splitter.feed(chunk):
-                result = assembler.feed(nal_type, payload)
-                if result is None:
-                    continue
-                is_key, framed = result
-                prefix = b"\x01" if is_key else b"\x00"
-                await websocket.send(prefix + framed)
+            await _emit(websocket, assembler, splitter.feed(chunk))
     finally:
         if process.returncode is None:
             process.terminate()

@@ -343,6 +343,24 @@ def alignments(line: str) -> list[str]:
 
 
 def render_blocks(lines: list[str], ctx: Context, link: bool = True) -> str:
+    # Every block below is recognised at column 0, but the paragraph branch
+    # refuses a line whose *lstripped* form starts with one of those same
+    # markers. An indented block marker therefore matched nothing, was refused
+    # by the paragraph loop, and left `i` exactly where it was: an infinite
+    # loop appending an empty <p> per turn. One indented blockquote in
+    # DEVICE_TESTING_zh-TW.md was enough to spin this build for 25 minutes and
+    # 6.8 GB before it was killed -- and, being a build, it did not look like a
+    # hang so much as a slow tool. Dedenting first is what makes the two
+    # halves agree on what a block is.
+    # Indentation *inside* a fence is content -- mermaid's layout and every
+    # code sample depend on it -- so only lines outside one are dedented.
+    dedented: list[str] = []
+    in_fence = False
+    for line in lines:
+        dedented.append(line if in_fence else line.lstrip())
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+    lines = dedented
     out: list[str] = []
     i, n = 0, len(lines)
     while i < n:
@@ -423,6 +441,13 @@ def render_blocks(lines: list[str], ctx: Context, link: bool = True) -> str:
         while i < n and lines[i].strip() and not lines[i].lstrip().startswith(
             ("#", ">", "- ", "|", "```", "---")
         ):
+            para.append(lines[i].strip())
+            i += 1
+        if not para:
+            # Nothing was consumed, so nothing above claimed this line either:
+            # a marker this renderer does not implement. Take it verbatim and
+            # move on. Whatever it costs to render one line plainly, it is not
+            # a build that never terminates.
             para.append(lines[i].strip())
             i += 1
         joined = "<br>".join(inline(p, ctx, link) for p in para)

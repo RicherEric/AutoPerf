@@ -32,6 +32,32 @@ class AnnexBSplitter:
     def __init__(self):
         self._buffer = b""
 
+    def flush(self) -> list[tuple[int, bytes]]:
+        """Emits the NAL still sitting in the buffer, unterminated.
+
+        Annex-B has no length prefix: a NAL ends where the next start code
+        begins, so `feed` cannot emit the last one until more bytes arrive.
+        For a file that is right. For a live preview it is a trap, and it is
+        the reason a Redmi Pad 2 showed a permanently black screen while a
+        Galaxy A55 was fine on the same code: `screenrecord` only emits a
+        frame when the screen *changes*, so on a device sitting at a static
+        launcher the very first IDR was held hostage waiting for a second
+        frame that would not exist until somebody touched the tablet -- and
+        the preview existed to let them do exactly that.
+
+        Only ever call this after the stream has been quiet long enough that
+        a partially-written NAL is implausible; the caller owns that clock,
+        because this class has no I/O and therefore no idea what "quiet"
+        means. See livescreen/server.py's IDLE_FLUSH_SECONDS.
+        """
+        first = _find_start_code(self._buffer, 0)
+        if first is None:
+            return []
+        offset, length = first
+        payload = self._buffer[offset + length:]
+        self._buffer = b""
+        return [(payload[0] & 0x1F, payload)] if payload else []
+
     def feed(self, chunk: bytes) -> list[tuple[int, bytes]]:
         self._buffer += chunk
         nals: list[tuple[int, bytes]] = []

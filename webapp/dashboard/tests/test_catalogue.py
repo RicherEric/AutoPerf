@@ -58,4 +58,10 @@ class CatalogueApiTests(ApiTestCase):
         self.assertEqual(payload["tier"], "smoke")
         self.assertEqual(payload["count"], expected_count)
         self.assertEqual(len(payload["run_ids"]), expected_count)
-        self.assertEqual(mock_task.apply_async.call_count, expected_count)
+        # Every scenario gets a row; the device gets one task at a time. The
+        # rest follow as each finishes -- which is also what makes a suite run
+        # in tier order rather than in whatever order the retries settled.
+        self.assertEqual(mock_task.apply_async.call_count, 1)
+        self.assertEqual(
+            [self.storage.get_run(rid)["status"] for rid in payload["run_ids"]],
+            ["pending"] * expected_count)

@@ -3,6 +3,7 @@ import { useRoute } from 'vue-router'
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { setLocale } from './i18n.js'
+import { CLASSROOM_JOIN_ENABLED, TASK_QUEUE_ENABLED } from './features.js'
 
 const route = useRoute()
 const isRunSection = computed(() => route.path === '/runs' || route.path.startsWith('/runs/'))
@@ -22,10 +23,11 @@ function toggleLocale() {
     <router-link to="/" active-class="nav-active">{{ t('nav.stats') }}</router-link>
     <router-link to="/runs" :class="{ 'nav-active': isRunSection }">{{ t('nav.runs') }}</router-link>
     <router-link to="/campaigns" active-class="nav-active">{{ t('nav.campaigns') }}</router-link>
-    <router-link to="/queue" active-class="nav-active">{{ t('nav.queue') }}</router-link>
+    <router-link v-if="TASK_QUEUE_ENABLED" to="/queue" active-class="nav-active">{{ t('nav.queue') }}</router-link>
+    <router-link to="/demo" active-class="nav-active">{{ t('nav.demo') }}</router-link>
     <router-link to="/screen" active-class="nav-active">{{ t('nav.screen') }}</router-link>
     <router-link to="/mission-control" active-class="nav-active">{{ t('nav.missionControl') }}</router-link>
-    <router-link to="/join" active-class="nav-active">{{ t('nav.join') }}</router-link>
+    <router-link v-if="CLASSROOM_JOIN_ENABLED" to="/join" active-class="nav-active">{{ t('nav.join') }}</router-link>
     <button class="locale-toggle" @click="toggleLocale">
       {{ locale === 'zh-TW' ? 'EN' : '中文' }}
     </button>

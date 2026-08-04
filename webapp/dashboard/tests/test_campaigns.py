@@ -29,13 +29,46 @@ class CampaignApiTests(ApiTestCase):
             writer.put(MetricSample(run_id, "collector", name, float(value), unit, **kwargs))
         writer.close()
 
-    def test_repeat_campaign_enqueues_one_run_per_scenario_per_iteration(self, task):
+    def test_repeat_campaign_plans_every_run_but_queues_only_one(self, task):
+        # The plan is rows; Celery holds one task per device at a time. Both
+        # ways of queueing it all up front were tried and both failed: FIFO
+        # starved the second device, fixed start times drifted out of step
+        # with how long runs really take. See services.dispatch_pending.
         response = self._post({"kind": "repeat", "serial": "S1", "tier": "smoke",
                                "duration": 30, "iterations": 3})
         self.assertEqual(response.status_code, 202)
         expected = len(list_scenarios(tier="smoke")) * 3
         self.assertEqual(response.json()["count"], expected)
-        self.assertEqual(task.apply_async.call_count, expected)
+        self.assertEqual(
+            len(self.storage.list_campaign_runs(response.json()["campaign_id"])), expected)
+        self.assertEqual(task.apply_async.call_count, 1)
+
+    def test_the_queued_one_is_the_first_planned_run(self, task):
+        response = self._post({"kind": "repeat", "serial": "S1", "tier": "smoke",
+                               "duration": 30, "iterations": 2})
+        runs = self.storage.list_campaign_runs(response.json()["campaign_id"])
+        self.assertEqual(task.apply_async.call_args.kwargs["task_id"], runs[0]["id"])
+
+    def test_a_run_already_handed_out_is_not_handed_out_again(self, task):
+        # The bug this replaces: the stall repair runs on every UI poll, and
+        # without this it re-queued the same row every few seconds -- 1305
+        # copies of two runs, measured, while one device sat idle.
+        from dashboard.services import dispatch_stalled
+        self._post({"kind": "repeat", "serial": "S1", "scenario": "cold_start",
+                    "duration": 30, "iterations": 3})
+        task.apply_async.reset_mock()
+
+        dispatch_stalled(self.storage)
+        dispatch_stalled(self.storage)
+
+        self.assertEqual(task.apply_async.call_count, 0)
+
+    def test_a_campaign_child_carries_its_own_duration(self, task):
+        # So a row can be understood (and re-run) without its queued task.
+        response = self._post({"kind": "repeat", "serial": "S1", "scenario": "cold_start",
+                               "duration": 45, "iterations": 2})
+        runs = self.storage.list_campaign_runs(response.json()["campaign_id"])
+        self.assertEqual([run["duration"] for run in runs], [45.0, 45.0])
 
     def test_repeat_over_a_tier_is_ordered_iteration_major(self, task):
         # A campaign cut short must leave an even number of samples per
@@ -182,7 +215,12 @@ class CampaignApiTests(ApiTestCase):
         self.assertEqual(listed["status"], detail["status"])
         self.assertEqual(listed["finished_count"], detail["finished_count"])
 
-    def test_cancel_flags_unstarted_runs(self, task):
+    def test_cancel_removes_unstarted_runs(self, task):
+        # Queued children are removed rather than flagged: a flag on a row
+        # whose task fires hours from now (or never, after a worker restart)
+        # leaves it sitting in the list as `pending` forever, and clearing
+        # those was only possible by deleting the campaign -- which takes the
+        # completed runs with it.
         campaign_id = self._post({"kind": "repeat", "serial": "S1", "scenario": "cold_start",
                                   "duration": 30, "iterations": 3}).json()["campaign_id"]
         runs = self.storage.list_campaign_runs(campaign_id)
@@ -191,8 +229,8 @@ class CampaignApiTests(ApiTestCase):
         response = self.client.post(f"/api/campaigns/{campaign_id}/cancel")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["cancelled_runs"], 2)
-        self.assertEqual(self.storage.get_run(runs[0]["id"])["cancel_requested"], 0)
-        self.assertEqual(self.storage.get_run(runs[1]["id"])["cancel_requested"], 1)
+        self.assertEqual(self.storage.get_run(runs[0]["id"])["status"], "completed")
+        self.assertIsNone(self.storage.get_run(runs[1]["id"]))
         self.assertEqual(
             self.client.get(f"/api/campaigns/{campaign_id}").json()["status"], "interrupted"
         )
@@ -223,4 +261,65 @@ class CampaignApiTests(ApiTestCase):
                                   "duration": 600}).json()["campaign_id"]
         run_id = self.storage.list_campaign_runs(campaign_id)[0]["id"]
         self.assertEqual(self.client.get(f"/api/runs/{run_id}").status_code, 200)
-        self.assertIn(run_id, {run["id"] for run in self.client.get("/api/runs").json()})
+        self.assertIn(run_id, {run["id"] for run in self.client.get("/api/runs?queued=1").json()})
+
+    def test_the_run_list_hides_a_campaigns_queued_children_by_default(self, task):
+        # An overnight campaign pre-creates 500 rows per device. Listed by
+        # default they *are* the history: 500 things that have not happened,
+        # with everything that did happen pushed off the end of the limit.
+        campaign_id = self._post({"kind": "repeat", "serial": "S1", "scenario": "play_golden",
+                                  "iterations": 3, "duration": 60}).json()["campaign_id"]
+        run_ids = [run["id"] for run in self.storage.list_campaign_runs(campaign_id)]
+
+        listed = {run["id"] for run in self.client.get("/api/runs").json()}
+
+        self.assertFalse(listed & set(run_ids))
+
+    def test_a_campaign_run_appears_in_the_list_once_it_has_started(self, task):
+        campaign_id = self._post({"kind": "repeat", "serial": "S1", "scenario": "play_golden",
+                                  "iterations": 3, "duration": 60}).json()["campaign_id"]
+        run_id = self.storage.list_campaign_runs(campaign_id)[0]["id"]
+        self.storage.update_run(run_id, "completed")
+
+        listed = {run["id"] for run in self.client.get("/api/runs").json()}
+
+        self.assertIn(run_id, listed)
+
+    def test_a_queued_campaign_run_can_be_deleted(self, task):
+        # It holds nothing and touches no device; refusing made a queued
+        # campaign impossible to clear from the UI.
+        campaign_id = self._post({"kind": "repeat", "serial": "S1", "scenario": "play_golden",
+                                  "iterations": 3, "duration": 60}).json()["campaign_id"]
+        run_id = self.storage.list_campaign_runs(campaign_id)[0]["id"]
+
+        response = self.client.delete(f"/api/runs/{run_id}")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(self.storage.get_run(run_id))
+
+    def test_cancelling_keeps_what_already_ran_and_clears_what_did_not(self, task):
+        # The failure this replaces: cancel left hundreds of pending rows that
+        # would never resolve, so the only way to clear them was to delete the
+        # campaign -- which also deleted the completed measurements.
+        campaign_id = self._post({"kind": "repeat", "serial": "S1", "scenario": "play_golden",
+                                  "iterations": 4, "duration": 60}).json()["campaign_id"]
+        run_ids = [run["id"] for run in self.storage.list_campaign_runs(campaign_id)]
+        self.storage.update_run(run_ids[0], "completed")
+
+        self.client.post(f"/api/campaigns/{campaign_id}/cancel")
+
+        self.assertEqual(self.storage.get_run(run_ids[0])["status"], "completed")
+        for run_id in run_ids[1:]:
+            self.assertIsNone(self.storage.get_run(run_id))
+
+    def test_cancelling_flags_a_running_child_rather_than_deleting_it(self, task):
+        campaign_id = self._post({"kind": "repeat", "serial": "S1", "scenario": "play_golden",
+                                  "iterations": 2, "duration": 60}).json()["campaign_id"]
+        run_ids = [run["id"] for run in self.storage.list_campaign_runs(campaign_id)]
+        self.storage.update_run(run_ids[0], "running")
+
+        self.client.post(f"/api/campaigns/{campaign_id}/cancel")
+
+        still_there = self.storage.get_run(run_ids[0])
+        self.assertEqual(still_there["status"], "running")
+        self.assertEqual(still_there["cancel_requested"], 1)

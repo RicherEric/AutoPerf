@@ -2,7 +2,7 @@
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
-import { cancelRun, deleteRun, getComparison, getRun, getRunRecording, listDevices, listSamples, setBaseline } from '../api.js'
+import { cancelRun, deleteRun, getComparison, getRun, getRunRecording, listDevices, listSamples, listYoutubeScenarios, setBaseline } from '../api.js'
 import Card from '../components/Card.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import DeltaBar from '../components/DeltaBar.vue'
@@ -11,7 +11,12 @@ import LiveScreenPanel from '../components/LiveScreenPanel.vue'
 import Toast from '../components/Toast.vue'
 
 const props = defineProps({ id: String })
+const youtubeScenarios = ref([])
 const router = useRouter()
+// The scenario library already carries a description per preset; this page
+// reads it rather than keeping a second copy of the same sentences.
+const scenarioDescription = computed(() =>
+  youtubeScenarios.value.find((s) => s.name === run.value?.youtube_scenario)?.description ?? '')
 const { t } = useI18n()
 
 const STATUS_TONE = {
@@ -224,6 +229,7 @@ async function onDeleteRun() {
 }
 
 onMounted(async () => {
+  listYoutubeScenarios().then((entries) => (youtubeScenarios.value = entries)).catch(() => {})
   await poll()
   pollHandle = setInterval(poll, 2000)
 })
@@ -262,6 +268,15 @@ onUnmounted(() => {
           <dt>{{ t('common.userAgent') }}</dt><dd class="ua">{{ device.user_agent ?? '—' }}</dd>
         </dl>
       </details>
+      <!-- What this run was doing, in words. The name alone ("
+           search_and_play") does not say what it touches, and this page is
+           where somebody arrives to find out why a number looks like it does. -->
+      <p class="scenario-line">
+        {{ t('runDetail.scenarioLabel') }}
+        <code v-if="run.youtube_scenario">{{ run.youtube_scenario }}</code>
+        <span v-else>{{ t('common.noScenario') }}</span>
+      </p>
+      <p v-if="scenarioDescription" class="scenario-desc">{{ scenarioDescription }}</p>
       <p v-if="run.error" class="error">{{ t('runDetail.errorLabel') }} {{ run.error }}</p>
       <button @click="onSetBaseline" :disabled="settingBaseline">
         {{ settingBaseline ? t('runDetail.settingBaseline') : t('runDetail.setBaselineButton', { scenario: run.youtube_scenario || t('common.noScenario') }) }}
@@ -393,6 +408,16 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+.scenario-line code {
+  font-size: 0.95em;
+}
+.scenario-desc {
+  color: var(--color-text-muted);
+  font-size: 0.85em;
+  max-width: 46rem;
+  line-height: 1.5;
+  margin-top: calc(-1 * var(--space-2));
+}
 .toast-stack {
   position: fixed;
   top: var(--space-4);

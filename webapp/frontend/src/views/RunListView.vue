@@ -5,8 +5,10 @@ import {
   cancelRun,
   connectDevice,
   deleteRun,
+  cancelPreflight,
   getPreflight,
   getScenarioTargets,
+  listConnectedDevices,
   listDevices,
   listPreflights,
   listRuns,
@@ -51,9 +53,20 @@ const ORIGIN_TONE = {
 const TIER_ORDER = ['smoke', 'functional', 'regression']
 
 const devices = ref([])
+// Two lists on purpose. The table below shows every device this database
+// remembers, because its runs still name it. Every *picker* shows only what
+// adb can see now, deduplicated: the same phone attached by USB and by WiFi
+// is two serials with the same nickname, and picking the wrong "Galaxy A55"
+// showed an empty history for a device that was running perfectly well.
+const pickableDevices = ref([])
 const runs = ref([])
 const youtubeScenarios = ref([]) // [{ name, description, tier }]
 const selectedSerial = ref('')
+// The run history follows the device picker, because "the runs" almost always
+// means "this device's runs" -- three devices' histories interleaved by time
+// is not a list anyone reads. '' is the deliberate escape hatch (all devices),
+// kept because comparing two devices is the other real question.
+const runsFilterSerial = ref('')
 const selectedScenario = ref('')
 const duration = ref(60)
 const error = ref('')
@@ -70,6 +83,7 @@ const bulkDeleting = ref(false)
 const scenarioTargets = ref(null)
 const preflightReport = ref(null)
 const startingPreflight = ref(false)
+const cancellingPreflight = ref(false)
 
 let pollHandle = null
 
@@ -88,8 +102,17 @@ function formatTimestamp(iso) {
   return new Date(iso).toLocaleString(undefined, { hour12: false })
 }
 
+// Only a running run is undeletable. A queued one holds nothing, and while
+// it was excluded here a queued campaign could not be cleared from the UI at
+// all -- which is exactly when someone wants to.
+// The scenario's own description, which is where "what does this test even
+// do" is already written down -- one table, not a second copy in the UI.
+function scenarioDescription(name) {
+  return youtubeScenarios.value.find((s) => s.name === name)?.description ?? ''
+}
+
 function isDeletable(run) {
-  return run.status !== 'running' && run.status !== 'pending'
+  return run.status !== 'running'
 }
 
 const deletableRuns = computed(() => runs.value.filter(isDeletable))
@@ -129,14 +152,18 @@ const selectedScenarioInfo = computed(() =>
 )
 
 async function loadDevices() {
-  devices.value = await listDevices()
-  if (!selectedSerial.value && devices.value.length) {
-    selectedSerial.value = devices.value[0].serial
+  ;[devices.value, pickableDevices.value] = await Promise.all([listDevices(), listConnectedDevices()])
+  if (!selectedSerial.value && pickableDevices.value.length) {
+    selectedSerial.value = pickableDevices.value[0].serial
   }
 }
 
 async function loadRuns() {
-  runs.value = await listRuns()
+  runs.value = await listRuns(runsFilterSerial.value)
+  // A row that scrolled out of the filter must not stay selected: deleting
+  // what you can no longer see is the one thing a filter must never do.
+  const visible = new Set(runs.value.map((r) => r.id))
+  selectedIds.value = new Set([...selectedIds.value].filter((id) => visible.has(id)))
 }
 
 async function onRefreshDevices() {
@@ -144,8 +171,9 @@ async function onRefreshDevices() {
   refreshing.value = true
   try {
     devices.value = await refreshDevices()
-    if (!selectedSerial.value && devices.value.length) {
-      selectedSerial.value = devices.value[0].serial
+    pickableDevices.value = await listConnectedDevices()
+    if (!selectedSerial.value && pickableDevices.value.length) {
+      selectedSerial.value = pickableDevices.value[0].serial
     }
   } catch (err) {
     error.value = err.message
@@ -192,6 +220,30 @@ const preflightAttention = computed(() =>
   preflightReport.value?.summary?.needs_attention ?? [],
 )
 
+// Every target the check actually looked at, not only the ones with a
+// problem. A report that lists nothing when everything passed cannot be told
+// apart from a report that checked nothing -- and "which selector is holding
+// this together, and by which strategy" is the question this whole mechanism
+// exists to answer. `strategies` says how each one was found: content_desc is
+// durable, resource_id survives only within an app version, structural means
+// "the third clickable row", coordinates means it was not found at all.
+const preflightTargets = computed(() => {
+  const summary = preflightReport.value?.summary
+  if (!summary) return []
+  const rows = []
+  for (const item of summary.needs_attention ?? []) {
+    rows.push({ ...item, tone: 'danger', kind: 'attention' })
+  }
+  for (const item of summary.healthy ?? []) {
+    rows.push({ ...item, tone: 'success', kind: 'healthy' })
+  }
+  for (const [key, tone] of [['by_design', 'neutral'], ['not_applicable', 'neutral'],
+                             ['ungraded', 'warning']]) {
+    for (const item of summary[key] ?? []) rows.push({ ...item, tone, kind: key })
+  }
+  return rows
+})
+
 async function loadScenarioTargets() {
   if (!selectedScenario.value) {
     scenarioTargets.value = null
@@ -235,6 +287,20 @@ async function onStartPreflight() {
     error.value = err.message
   } finally {
     startingPreflight.value = false
+  }
+}
+
+async function onCancelPreflight() {
+  if (!preflightReport.value) return
+  error.value = ''
+  cancellingPreflight.value = true
+  try {
+    await cancelPreflight(preflightReport.value.id)
+    await refreshPreflight()
+  } catch (err) {
+    error.value = err.message
+  } finally {
+    cancellingPreflight.value = false
   }
 }
 
@@ -298,6 +364,13 @@ async function onSetNickname(serial, nickname) {
 
 watch(selectedScenario, loadScenarioTargets)
 watch(selectedSerial, refreshPreflight)
+// Picking a device to run on also narrows the history to that device. The
+// filter stays independently settable afterwards, so choosing "all devices"
+// is not undone by the next thing you do.
+watch(selectedSerial, (serial) => {
+  runsFilterSerial.value = serial
+})
+watch(runsFilterSerial, loadRuns)
 
 onMounted(async () => {
   await Promise.all([
@@ -393,7 +466,7 @@ onUnmounted(() => {
       <label>
         {{ t('runs.deviceLabel') }}
         <select v-model="selectedSerial">
-          <option v-for="d in devices" :key="d.serial" :value="d.serial">
+          <option v-for="d in pickableDevices" :key="d.serial" :value="d.serial">
             {{ deviceLabel(d) }}
           </option>
         </select>
@@ -447,6 +520,13 @@ onUnmounted(() => {
       <button @click="onStartPreflight" :disabled="startingPreflight || preflightBusy || !preflightPossible">
         {{ startingPreflight ? t('runs.preflight.starting') : t('runs.preflight.button') }}
       </button>
+      <!-- A preflight holds the device for as long as it runs, and the whole
+           covering set is minutes. Without this the only way out was to wait
+           it out. It stops at the next scenario boundary, not instantly --
+           the hint says so rather than letting the button imply otherwise. -->
+      <button v-if="preflightBusy" @click="onCancelPreflight" :disabled="cancellingPreflight">
+        {{ cancellingPreflight ? t('common.cancelling') : t('runs.preflight.cancelButton') }}
+      </button>
       <span v-if="selectedScenario && (scenarioTargets ?? []).length" class="hint">
         {{ t('runs.preflight.scopedHint', { scenario: selectedScenario, count: scenarioTargets.length }) }}
       </span>
@@ -484,12 +564,49 @@ onUnmounted(() => {
         </span>
       </div>
 
+      <p v-if="preflightBusy && cancellingPreflight" class="hint">
+        {{ t('runs.preflight.cancelHint') }}
+      </p>
+      <p v-if="preflightReport.summary?.stopped_early" class="hint">
+        {{ t('runs.preflight.stoppedEarly', {
+          checked: (preflightReport.summary.scenarios_checked ?? []).length,
+          planned: preflightReport.summary.scenarios_planned ?? 0,
+        }) }}
+      </p>
       <p v-if="preflightReport.error" class="error">
         {{ t('runs.preflight.failedLabel') }}: {{ preflightReport.error }}
       </p>
 
       <!-- Aggregated per target, because the fix is per target: one decayed
-           selector shows up in several scenarios but is corrected in one place. -->
+           selector shows up in several scenarios but is corrected in one place.
+           Everything checked is listed, passing included: a report that shows
+           nothing when all is well looks exactly like one that ran nothing. -->
+      <table v-if="preflightTargets.length" class="preflight-targets">
+        <thead>
+          <tr>
+            <th>{{ t('runs.preflight.colTarget') }}</th>
+            <th>{{ t('runs.preflight.colResult') }}</th>
+            <th>{{ t('runs.preflight.colHow') }}</th>
+            <th>{{ t('runs.preflight.colScenarios') }}</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="item in preflightTargets" :key="item.target + item.kind">
+            <td><code>{{ item.target }}</code></td>
+            <td>
+              <StatusBadge :label="t(`runs.preflight.kind.${item.kind}`)" :tone="item.tone" />
+            </td>
+            <td class="how">
+              <template v-if="(item.strategies ?? []).length">
+                <code v-for="s in item.strategies" :key="s">{{ s }}</code>
+              </template>
+              <span v-else class="muted">{{ item.detail || '—' }}</span>
+            </td>
+            <td class="how">{{ (item.scenarios ?? []).join(', ') }}</td>
+          </tr>
+        </tbody>
+      </table>
+
       <table v-if="preflightAttention.length">
         <thead>
           <tr>
@@ -519,6 +636,15 @@ onUnmounted(() => {
 
   <Card :title="t('runs.runsTitle')">
     <div class="bulk-bar">
+      <label class="runs-filter">
+        {{ t('runs.filterDevice') }}
+        <select v-model="runsFilterSerial">
+          <option value="">{{ t('runs.filterAllDevices') }}</option>
+          <option v-for="d in pickableDevices" :key="d.serial" :value="d.serial">
+            {{ deviceLabel(d) }}
+          </option>
+        </select>
+      </label>
       <button @click="onBulkDelete" :disabled="!selectedIds.size || bulkDeleting">
         {{ bulkDeleting ? t('common.deleting') : t('runs.bulkDeleteButton', { count: selectedIds.size }) }}
       </button>
@@ -529,6 +655,7 @@ onUnmounted(() => {
           <th><input type="checkbox" :checked="allDeletableSelected" @change="toggleSelectAll" /></th>
           <th>{{ t('runs.colId') }}</th>
           <th>{{ t('runs.colDevice') }}</th>
+          <th>{{ t('runs.colScenario') }}</th>
           <th>{{ t('runs.colOrigin') }}</th>
           <th>{{ t('runs.colStatus') }}</th>
           <th>{{ t('runs.colStarted') }}</th>
@@ -548,6 +675,19 @@ onUnmounted(() => {
           </td>
           <td><router-link :to="`/runs/${run.id}`">{{ run.id.slice(0, 8) }}</router-link></td>
           <td>{{ run.device_serial }}</td>
+          <!-- What this run was actually doing. A row that only says
+               "completed" cannot be read: 24 presets do very different things
+               to the phone, and the description is the difference between a
+               name and a meaning. -->
+          <td class="scenario">
+            <span v-if="run.youtube_scenario" :title="scenarioDescription(run.youtube_scenario)">
+              <code>{{ run.youtube_scenario }}</code>
+              <em v-if="scenarioDescription(run.youtube_scenario)">
+                {{ scenarioDescription(run.youtube_scenario) }}
+              </em>
+            </span>
+            <span v-else class="muted">{{ t('common.noScenario') }}</span>
+          </td>
           <td>
             <StatusBadge
               :label="t(`runs.origin.${run.origin || 'unknown'}`)"
@@ -567,6 +707,14 @@ onUnmounted(() => {
             </button>
           </td>
         </tr>
+        <!-- An empty table right after filtering reads as a broken page.
+             Say which of the two it is: nothing here yet, or nothing here
+             for this device. -->
+        <tr v-if="!runs.length">
+          <td class="empty" colspan="9">
+            {{ runsFilterSerial ? t('runs.noRunsForDevice') : t('runs.noRuns') }}
+          </td>
+        </tr>
       </tbody>
     </table>
   </Card>
@@ -575,6 +723,32 @@ onUnmounted(() => {
 <style scoped>
 .runs-table td {
   white-space: nowrap;
+}
+.runs-table td.scenario {
+  white-space: normal;
+  max-width: 24rem;
+}
+.runs-table td.scenario em {
+  display: block;
+  font-style: normal;
+  color: var(--color-text-muted);
+  font-size: 0.8em;
+  line-height: 1.35;
+}
+.runs-table td.scenario .muted {
+  color: var(--color-text-muted);
+}
+.preflight-targets td.how {
+  font-size: 0.85em;
+  color: var(--color-text-muted);
+}
+.preflight-targets td.how code {
+  margin-right: var(--space-1);
+}
+.runs-table td.empty {
+  color: var(--color-text-muted);
+  text-align: center;
+  padding: var(--space-4) 0;
 }
 .hint {
   color: var(--color-text-muted);
@@ -587,6 +761,17 @@ onUnmounted(() => {
 }
 .bulk-bar {
   margin-bottom: var(--space-3);
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+.runs-filter {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--color-text-muted);
+  font-size: 0.9em;
 }
 .device-details summary {
   cursor: pointer;

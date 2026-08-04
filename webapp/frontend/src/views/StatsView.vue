@@ -163,7 +163,13 @@ onUnmounted(() => {
   </Card>
 
   <Card :title="t('stats.trendTitle')">
-    <p v-if="stats && !trendMetrics.length" class="hint">{{ t('stats.notEnoughData') }}</p>
+    <!-- An empty chart box reads as "no data". Say which of the two it is:
+         nothing measured yet, or a question this scope cannot answer. -->
+    <p v-if="stats && !trendMetrics.length" class="hint">
+      {{ stats.trend_scope === 'all_devices'
+          ? t('stats.trendNeedsOneDevice')
+          : t('stats.notEnoughData') }}
+    </p>
     <div class="metric-grid">
       <MetricChart
         v-for="name in trendMetrics"

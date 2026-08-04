@@ -44,6 +44,40 @@ Live Screen WebSocket 位址預設為 `ws://127.0.0.1:8100/stream/<serial>`。
 H.264 模式可在 Run Detail／Mission Control 開啟畫面時同步 remux 為 MP4
 測試錄影。錄影依賴 ffmpeg；screenshot fallback 不產生 MP4。
 
+### 靜止的畫面：為什麼首幀需要 idle flush
+
+`screenrecord` **只在畫面有變化時才輸出影格**。Annex-B 沒有長度欄位，一個
+NAL 的結尾是「下一個 start code 的開頭」——所以停在啟動器不動的裝置，第一個
+IDR 會被押在切分器裡，等一個不會發生的第二張影格。**畫面永遠是黑的，而那個
+畫面存在的目的正是讓人去把裝置弄動。**
+
+2026-08-03 在 Redmi Pad 2（b84fee70）實測：透過 WebSocket 12 秒 **0 影格**；
+同一份程式對 Galaxy A55 正常，只因為手機畫面一直在動。
+
+伺服器因此改成有逾時的讀取：串流靜默滿 `IDLE_FLUSH_SECONDS`（1 秒）就呼叫
+`AnnexBSplitter.flush()`，把押著的 NAL 當成完整影格送出。一秒遠長於一張影格
+寫進 pipe 的間隔，所以這時候押著的東西是「寫完了」而不是「寫到一半」。
+
+修正後同一台 Redmi Pad 2 立刻拿到 KEY 影格（44480 bytes）。
+
+**連帶修好的是點擊。** `DeviceScreenView.onCanvasClick` 在 canvas 還沒有尺寸
+時直接 return，而 canvas 的尺寸來自第一張影格——所以沒有影格就等於整個畫面
+點不動。方向鍵與 Home／Back 按鈕不經過 canvas，當時是正常的。
+
+### 裝置自己回報的失敗，會出現在 stdout 裡
+
+`screenrecord` 把自己的錯誤印在 **stdout**（不是 stderr），排在位元流前面，
+然後降解析度繼續跑。Redmi Pad 2 的實際輸出：
+
+```
+ERROR: unable to configure video/avc codec at 2048x1280 (err=-22)
+WARNING: failed at 2048x1280, retrying at 1280x720
+```
+
+切分器會把這段文字當成「不是 start code」跳過——正確，但**安靜**，而它是
+「為什麼這台裝置的預覽不是它的真實解析度」唯一的解釋。伺服器現在會把第一個
+chunk 裡位元流之前的文字記進 log（`screenrecord said: ...`）。
+
 ## Chromecast／Google TV／Android TV
 
 TV 不先嘗試 H.264，而是直接進入 screenshot 模式。實機上 TV 的
@@ -80,14 +114,17 @@ screenshot 模式目前不產生測試 MP4 錄影。
   - ADB H.264 與 screenshot 擷取
   - ffmpeg 等比例縮圖與 JPEG 壓縮
   - 同裝置串流互斥與舊程序清理
+  - 靜止畫面的 idle flush、`screenrecord` 自述錯誤的記錄
 - `autoperf/screen_stream.py`
   - Annex-B NAL 切割及 H.264 access unit 組裝
+  - `flush()`：把沒有下一個 start code 可以收尾的 NAL 送出
 
 ## 調整參數
 
 | 參數 | 目前值 | 程式位置 |
 |---|---:|---|
 | H.264 首幀 timeout | 20 秒 | `FIRST_FRAME_TIMEOUT_MS` |
+| 靜止畫面 idle flush | 1 秒 | `IDLE_FLUSH_SECONDS`（`livescreen/server.py`） |
 | 重連退避 | 1、2、5、10 秒 | `RECONNECT_DELAYS_MS` |
 | TV screenshot 間隔 | 1.2 秒 | `startFallback()` |
 | TV 最大寬度 | 960 px | `startFallback()` |

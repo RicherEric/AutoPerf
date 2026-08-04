@@ -27,7 +27,7 @@ Select-String -Path src\autoperf\*.py -Pattern "django|celery|webapp"
 **這個方向是單向的，而且是整個結構最重要的一件事。** 它換來三件具體的東西：
 
 1. CLI 跟 dashboard 可以同時跑，因為它們是同一個引擎的兩個前端。
-2. 377 個核心測試不需要 Django、不需要 Redis、不需要 Celery 就能跑完。
+2. 417 個核心測試不需要 Django、不需要 Redis、不需要 Celery 就能跑完。
 3. 哪天 dashboard 整個重寫，`src/autoperf` 一行都不用動。
 
 ---
@@ -64,7 +64,7 @@ AutoPerf/
 │   ├── livescreen/        即時畫面：獨立的 asyncio 行程（server 281），不碰 SQLite
 │   └── frontend/src/      Vue · 3265 行 · 8 個頁面 + 9 個元件
 │
-├── tests/                 22 個核心測試模組 · 377 個測試
+├── tests/                 22 個核心測試模組 · 417 個測試
 │   └── captures/          ★ 真機錄下來的輸出 —— 全套唯一對照真實裝置的東西
 │       └── sm_a5560_android15/
 │           ├── *.hierarchy.xml      畫面結構
@@ -74,6 +74,8 @@ AutoPerf/
 │
 ├── scripts/
 │   ├── run-tests.py       跑測試，可以只跑一組（見下方「測試怎麼分組」）
+│   ├── StartServices.py   一個指令依序開起整個 dashboard（Redis → API →
+│   │                      worker → livescreen → 前端），每個都健康檢查
 │   ├── start-worker.py    啟動 Celery worker，自動決定要開幾個
 │   └── demo.py            三分鐘現場 demo 的驅動腳本
 │
@@ -106,7 +108,7 @@ Adapter   adapters.py
 是外面傳進來的 adb，模組自己從來不去拿一個。
 
 這一個決定換來的是：測試只要換掉那一個參數，就能在**沒有裝置**的情況下驗證
-任何一層。377 個核心測試全部靠這件事。
+任何一層。417 個核心測試全部靠這件事。
 
 ---
 
@@ -118,8 +120,8 @@ Adapter   adapters.py
 ```
 YouTube 改版
     │
-    ├─▶ tests/captures/ 對不上   →  parsing + elements 兩組測試紅（111 個）
-    │                                （另外 118 個 logic 完全不受影響）
+    ├─▶ tests/captures/ 對不上   →  parsing + elements 兩組測試紅（114 個）
+    │                                （另外 131 個 logic 完全不受影響）
     ├─▶ preflight.py             →  逐個 target 評分，miss 時列出畫面上實際有什麼
     │                                報告按 target 聚合 = 一張工作清單
     ├─▶ 修 scenarios/selectors.py   一個壞掉的 selector 只在這裡修一次
@@ -139,13 +141,13 @@ YouTube 改版
 
 | 組 | 什麼時候會壞 | 測試數 |
 |---|---|--:|
-| `logic` | 我們自己的邏輯改了。**這裡不知道「裝置」是什麼** | 118 |
-| `parsing` | 裝置吐的東西跟 fixture 假設的不一樣 ← fixture 都在這 | 69 |
+| `logic` | 我們自己的邏輯改了。**這裡不知道「裝置」是什麼** | 131 |
+| `parsing` | 裝置吐的東西跟 fixture 假設的不一樣 ← fixture 都在這 | 70 |
 | `commands` | 送出去的指令形狀改了 | 44 |
-| `elements` | selector 解析或 `verify_*` 改了 | 42 |
-| `flow` | 整條流程對假裝置跑不通 | 104 |
-| `webapp` | API / Celery / 串流 | 126 |
-| | | **503** |
+| `elements` | selector 解析或 `verify_*` 改了 | 44 |
+| `flow` | 整條流程對假裝置跑不通 | 128 |
+| `webapp` | API / Celery / 串流 | 149 |
+| | | **566** |
 
 ```powershell
 python scripts\run-tests.py            # 全部
@@ -155,7 +157,7 @@ python scripts\run-tests.py parsing    # 只跑會過期的那一片
 
 按模組分只是把 `src` 目錄抄一遍。**按失敗原因分，才回答得出維護者真正會問的
 問題：「YouTube 改版了，我要看哪裡？」** ——答案是 `parsing` 跟 `elements`，
-111 個，不是 503 個。
+114 個，不是 566 個。
 
 而且這張地圖不會爛掉：測試模組沒有歸組，「跑全部」會靜默跳過它，於是
 `test_suite_groups.py` 失敗。**靜默跳過就是這整個專案在對抗的東西**，包括在
