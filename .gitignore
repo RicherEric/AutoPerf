@@ -24,3 +24,7 @@ docs/PPT規劃.txt
 docs/DEMO_SCRIPT_zh-TW.md
 docs/PRESENTATION_NOTES_zh-TW.md
 scripts/build-final-ppt.py
+
+# 隨手截的畫面：留在工作目錄方便對照，但它們不是這個 repo 的一部分
+image/
+螢幕擷取畫面*.png
